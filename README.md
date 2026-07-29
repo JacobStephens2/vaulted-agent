@@ -24,6 +24,46 @@ you $ vaulted-agent claude
              └─ secrets live here, in this process, until it exits
 ```
 
+## Install
+
+**One-liner** — short URL on stephens.page; the script only bootstraps. The
+payload is always a **tagged GitHub release** tarball (not floating `main`):
+
+```bash
+curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+```
+
+**From GitHub** — clone a release tag and run the real installer yourself:
+
+```bash
+git clone --branch v0.1.0 --depth 1 \
+  https://github.com/JacobStephens2/vaulted-agent-launcher
+cd vaulted-agent-launcher && sudo ./install.sh
+```
+
+Either path ends the same way: put the one vault credential on disk, then copy
+a harness into place:
+
+```bash
+# the one credential that stays on disk (1Password; see Backends for the rest)
+printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee /etc/vaulted-agent/op.env >/dev/null
+sudo chown root:"$USER" /etc/vaulted-agent/op.env
+sudo chmod 0640 /etc/vaulted-agent/op.env
+
+sudo cp /etc/vaulted-agent/harnesses.d/claude.conf.example \
+        /etc/vaulted-agent/harnesses.d/claude.conf
+```
+
+| | |
+|---|---|
+| Pin a version | `VAULTED_AGENT_VERSION=v0.1.0 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
+| Pass install flags | `curl -fsSL … \| bash -s -- --user agent --allow-user alice` |
+| Prefer not to pipe | `curl -fsSL -o install.sh https://stephens.page/vaulted-agent/install.sh && less install.sh && bash install.sh` |
+| Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault) |
+
+Details, shared-host setup, flags, and uninstall are under
+[Install details](#install-details) below.
+
 ## The honest claim
 
 This is **not** "no secrets on disk." One credential stays on disk: the vault
@@ -83,15 +123,13 @@ secret being absent from `/proc/<pid>/cmdline` while present in the
 environment, and the launcher refusing to start an agent it could not fully
 feed.
 
-## Install
+## Install details
+
+If you already have the tree (clone, release tarball, or the remote
+bootstrap's temp dir), the real installer is:
 
 ```bash
 sudo ./install.sh
-
-# the one credential that stays on disk (1Password; see Backends for the rest)
-printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee /etc/vaulted-agent/op.env >/dev/null
-sudo chown root:"$USER" /etc/vaulted-agent/op.env
-sudo chmod 0640 /etc/vaulted-agent/op.env
 ```
 
 By default agents run as **you** - the user who invoked `install.sh` - and the
