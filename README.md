@@ -26,6 +26,9 @@ you $ vaulted-agent claude
 
 ## Install
 
+Product page (what it does + copy-paste install commands):
+[stephens.page/vaulted-agent](https://stephens.page/vaulted-agent)
+
 **One-liner** — short URL on stephens.page; the script only bootstraps. The
 payload is always a **tagged GitHub release** tarball (not floating `main`):
 
