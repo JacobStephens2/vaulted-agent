@@ -11,6 +11,7 @@
 #   sudo ./install.sh                          installs for you, no setup needed
 #   sudo ./install.sh --user agent             dedicated account (shared hosts)
 #   sudo ./install.sh --no-va                  skip the short `va` alias
+#   sudo ./install.sh --backend bitwarden --auth-mode prompt
 #   ./install.sh --user conductor --workdir /srv/orchestration --link-user alice \
 #                --op-env /etc/orchestration/op.env --allow-user alice
 #
@@ -41,6 +42,11 @@ NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok
 NO_SETUP=0                       # skip interactive vault backend questions
 SHORT_NAME="va"                  # short alias for vaulted-agent
 BACKEND_CHOICE=""                # onepassword|bitwarden|pass|sops|plainfile|skip
+AUTH_MODE_CHOICE=""              # file|prompt — how vault tokens are supplied at launch
+# Set during setup when a vault refs manifest is created/wired; printed in the
+# final "Next" summary so the operator knows where to put credential references.
+REFS_MANIFEST_PATH=""            # absolute path, e.g. /etc/vaulted-agent/manifests/bitwarden.refs
+SETUP_BACKEND=""                 # backend name recorded for the final summary
 OP_TOKEN_FILE=""                 # optional path to service-account token (never on argv)
 BWS_TOKEN_FILE=""
 USER_EXPLICIT=0
@@ -54,6 +60,14 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ORIG_ARGS=( ${1+"$@"} )          # kept for the re-run hint; the parse loop below consumes $@
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 run() { if (( DRY )); then printf '  would: %s\n' "$*"; else "$@"; fi; }
+
+# True when a human can answer prompts. Do NOT require -t 0: `curl … | bash`
+# makes stdin a pipe even when the user is at a real terminal. Read answers
+# from /dev/tty (same pattern as uninstall). -t 1 is enough to know we're not
+# running under a fully detached cron/CI sink.
+can_prompt_user() {
+  (( ! ASSUME_YES )) && (( ! DRY )) && [[ -t 1 && -r /dev/tty ]]
+}
 
 # Home directory for a username. Linux: getent. macOS: dscl / python pwd.
 # Falls back to ~user expansion when the shell can resolve it.
@@ -117,12 +131,18 @@ while (( $# )); do
     --no-auto-harness) NO_AUTO_HARNESS=1; shift ;;
     --no-setup)        NO_SETUP=1; shift ;;
     --backend)         BACKEND_CHOICE="${2:?}"; shift 2 ;;
+    --auth-mode)       AUTH_MODE_CHOICE="${2:?}"; shift 2 ;;
     --op-token-file)   OP_TOKEN_FILE="${2:?}"; shift 2 ;;
     --bws-token-file)  BWS_TOKEN_FILE="${2:?}"; shift 2 ;;
     -h|--help)         sed -n "2,25p" "$0"; exit 0 ;;
     *)                 die "unknown option '$1'" ;;
   esac
 done
+
+case "${AUTH_MODE_CHOICE}" in
+  ''|file|prompt) ;;
+  *) die "--auth-mode must be 'file' or 'prompt' (got '$AUTH_MODE_CHOICE')" ;;
+esac
 
 # --- uninstall --------------------------------------------------------------
 # Removes only what this script installs, and only where it can confirm
@@ -141,7 +161,7 @@ if (( UNINSTALL )); then
   # to that would mean anyone who installed somewhere other than the default
   # prefix could never reach the menu, since they must pass --prefix to say so.
   interactive=0
-  if (( ! ASSUME_YES )) && (( ! DRY )) && [[ -t 1 && -r /dev/tty ]]; then interactive=1; fi
+  if can_prompt_user; then interactive=1; fi
 
   # Work out what would go before touching anything. The prompt, --dry-run and
   # the real removal all render from these same two lists.
@@ -405,10 +425,12 @@ write_auto_harness() {
   cat > "$conf" <<EOF
 # Auto-configured by install.sh — detected $path
 # Day-one: plainfile + empty.env so the agent launches with no vault secrets.
+# workdir=caller keeps the shell's cwd so agent --resume / sessions match.
 # To inject secrets: set backend + manifest (see README), or run:
 #   vaulted-agent setup
 backend  = plainfile
 manifest = empty.env
+workdir  = caller
 bin      = $bindir
 command  = $cmd
 EOF
@@ -449,7 +471,7 @@ else
   printf '\nskipped agent auto-detect (--no-auto-harness)\n'
 fi
 
-# --- optional interactive vault backend setup -----------------------------
+# --- optional interactive vault backend + auth-mode setup -----------------
 write_token_file() {
   # $1=path $2=varname $3=token-value  → 0640 root:SERVICE_USER
   local path="$1" var="$2" token="$3" grp
@@ -464,11 +486,162 @@ write_token_file() {
   printf '  wrote %s (0640)\n' "$path"
 }
 
+write_defaults_conf() {
+  # $1 = auth_mode (file|prompt)
+  local mode="$1" path="$CONFIG/defaults.conf"
+  case "$mode" in file|prompt) ;; *) die "internal: bad auth_mode '$mode'" ;; esac
+  if (( DRY )); then
+    printf '  would write %s (auth_mode=%s)\n' "$path" "$mode"
+    return 0
+  fi
+  cat > "$path" <<EOF
+# Machine-wide launcher defaults.
+# Change later: vaulted-agent auth-mode  |  va auth-mode prompt|file
+auth_mode = $mode
+EOF
+  chmod 0644 "$path"
+  printf '  wrote %s (auth_mode=%s)\n' "$path" "$mode"
+}
+
+# Create a live reference manifest (no secret values) if missing.
+# Records REFS_MANIFEST_PATH for the final install summary.
+ensure_ref_manifest() {
+  # $1=basename  remaining args = comment/header lines
+  local base="$1" path="$CONFIG/manifests/$1"
+  shift
+  REFS_MANIFEST_PATH="$path"
+  if [[ -e "$path" ]]; then
+    printf '  kept existing manifest %s\n' "$path"
+    return 0
+  fi
+  if (( DRY )); then
+    printf '  would write %s\n' "$path"
+    return 0
+  fi
+  {
+    printf '%s\n' "$@"
+    printf '\n'
+  } > "$path"
+  chmod 0644 "$path"
+  printf '  wrote %s  (add VAR=reference lines when ready)\n' "$path"
+}
+
+# Personal installs: agent sessions (grok/claude/codex) are cwd-scoped. Ensure
+# live harnesses use workdir=caller so `va grok --resume …` matches a normal
+# `grok --resume …` from the same directory. Only adds the key when missing.
+ensure_workdir_caller() {
+  local conf tmp
+  shopt -s nullglob
+  for conf in "$CONFIG"/harnesses.d/*.conf; do
+    if grep -q '^[[:space:]]*workdir[[:space:]]*=' "$conf" 2>/dev/null; then
+      continue
+    fi
+    if (( DRY )); then
+      printf '  would add workdir=caller to %s\n' "${conf##*/}"
+      continue
+    fi
+    tmp="$(mktemp)" || die "mktemp failed"
+    cat "$conf" > "$tmp"
+    printf 'workdir  = caller\n' >> "$tmp"
+    install -m 0644 "$tmp" "$conf"
+    rm -f "$tmp"
+    printf '  added workdir=caller to %s\n' "${conf##*/}"
+  done
+  shopt -u nullglob
+}
+
+# Day-one auto-harnesses are plainfile + empty.env. Choosing a vault backend
+# at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
+# has no vault token). Never touch harnesses that already have a real backend.
+wire_day_one_harnesses() {
+  local backend="$1" manifest_name="$2" conf tmp n=0 be man
+  case "$backend" in
+    onepassword|bitwarden|pass) ;;
+    *) return 0 ;;
+  esac
+  [[ -n "$manifest_name" ]] || return 0
+  shopt -s nullglob
+  for conf in "$CONFIG"/harnesses.d/*.conf; do
+    be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    be="$(printf '%s' "$be" | sed 's/[[:space:]]*$//')"
+    man="$(printf '%s' "$man" | sed 's/[[:space:]]*$//')"
+    # Only rewrite the installer's zero-secret starter config.
+    if [[ "$be" != "plainfile" || "$man" != "empty.env" ]]; then
+      printf '  left %s  (backend=%s manifest=%s — not day-one)\n' \
+        "${conf##*/}" "${be:-?}" "${man:-?}"
+      continue
+    fi
+    if (( DRY )); then
+      printf '  would set %s → backend=%s manifest=%s\n' \
+        "${conf##*/}" "$backend" "$manifest_name"
+      n=$(( n + 1 ))
+      continue
+    fi
+    tmp="$(mktemp)" || die "mktemp failed"
+    sed -e "s|^[[:space:]]*backend[[:space:]]*=.*|backend  = $backend|" \
+        -e "s|^[[:space:]]*manifest[[:space:]]*=.*|manifest = $manifest_name|" \
+        "$conf" > "$tmp"
+    # Ensure workdir=caller so agent --resume uses the shell's cwd (sessions are
+    # often scoped by directory). Add the key if the day-one file lacks it.
+    if ! grep -q '^[[:space:]]*workdir[[:space:]]*=' "$tmp"; then
+      # Insert after manifest line when present; otherwise append.
+      if grep -q '^[[:space:]]*manifest[[:space:]]*=' "$tmp"; then
+        awk '
+          /^[[:space:]]*manifest[[:space:]]*=/ && !done {
+            print; print "workdir  = caller"; done=1; next
+          }
+          { print }
+        ' "$tmp" > "${tmp}.w" && mv "${tmp}.w" "$tmp"
+      else
+        printf 'workdir  = caller\n' >> "$tmp"
+      fi
+    fi
+    install -m 0644 "$tmp" "$conf"
+    rm -f "$tmp"
+    printf '  wired %s → backend=%s manifest=%s workdir=caller\n' \
+      "${conf##*/}" "$backend" "$manifest_name"
+    n=$(( n + 1 ))
+  done
+  shopt -u nullglob
+  if (( n == 0 )); then
+    printf '  no day-one (plainfile+empty.env) harnesses to wire\n'
+  else
+    printf '  %d harness(es) now use %s — token prompt applies when auth_mode=prompt\n' \
+      "$n" "$backend"
+  fi
+}
+
+# Resolve AUTH_MODE_CHOICE interactively when unset. Defaults to file.
+prompt_auth_mode_setup() {
+  local choice
+  if [[ -n "$AUTH_MODE_CHOICE" ]]; then
+    return 0
+  fi
+  if (( ! NO_SETUP )) && can_prompt_user; then
+    printf '\nHow should vault tokens be supplied at launch?\n'
+    printf '  1) file    — store once in op.env / bws.env (no prompt each run)\n'
+    printf '  2) prompt  — paste token each launch; nothing stored on disk\n'
+    printf '     (same as always running with -p / --prompt-auth)\n'
+    printf 'choice [1-2, default 1]: '
+    read -r choice < /dev/tty || choice=1
+    case "$choice" in
+      1|file|''|disk) AUTH_MODE_CHOICE=file ;;
+      2|prompt|p)     AUTH_MODE_CHOICE=prompt ;;
+      *)
+        printf '  unknown choice; defaulting to file\n'
+        AUTH_MODE_CHOICE=file
+        ;;
+    esac
+  else
+    AUTH_MODE_CHOICE=file
+  fi
+}
+
 prompt_backend_setup() {
   local choice token path
   choice="$BACKEND_CHOICE"
-  if [[ -z "$choice" ]] && (( ! ASSUME_YES )) && (( ! NO_SETUP )) \
-     && (( ! DRY )) && [[ -t 0 && -t 1 && -r /dev/tty ]]; then
+  if [[ -z "$choice" ]] && (( ! NO_SETUP )) && can_prompt_user; then
     printf '\nDefault secret backend for this machine?\n'
     printf '  1) 1Password service account  (op inject)\n'
     printf '  2) Bitwarden Secrets Manager  (bws)\n'
@@ -487,59 +660,110 @@ prompt_backend_setup() {
     esac
   elif [[ -z "$choice" ]]; then
     choice=skip
+    if (( ! NO_SETUP )) && ! can_prompt_user; then
+      printf '\nNo interactive terminal for setup questions (common with curl|bash in CI).\n'
+      printf '  Defaults: backend skipped, auth_mode=file.\n'
+      printf '  Later: vaulted-agent setup   and/or   vaulted-agent auth-mode\n'
+      printf '  Or re-run with flags, e.g.:\n'
+      printf '    curl -fsSL …/install.sh | bash -s -- --backend bitwarden --auth-mode prompt\n'
+    fi
   fi
+
+  # Auth mode applies machine-wide; always record it (even on skip).
+  prompt_auth_mode_setup
+  write_defaults_conf "$AUTH_MODE_CHOICE"
+  # Always keep project-scoped resume working for existing harnesses.
+  ensure_workdir_caller
 
   case "$choice" in
     onepassword|op)
+      SETUP_BACKEND=onepassword
       path="${OP_ENV:-$CONFIG/op.env}"
-      if [[ -n "$OP_TOKEN_FILE" && -r "$OP_TOKEN_FILE" ]]; then
-        token="$(tr -d '\n' < "$OP_TOKEN_FILE")"
-      elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
-        token="$OP_SERVICE_ACCOUNT_TOKEN"
-      elif (( ! ASSUME_YES )) && [[ -t 0 && -r /dev/tty ]]; then
-        printf 'OP_SERVICE_ACCOUNT_TOKEN (input hidden, empty to skip): '
-        read -rs token < /dev/tty || token=""
-        printf '\n'
+      ensure_ref_manifest onepassword.refs \
+        '# 1Password references — one per line, no secret values:' \
+        '#   VAR=op://Vault/Item/field' \
+        '# Fill these in, then launch; with auth_mode=prompt you paste OP_SERVICE_ACCOUNT_TOKEN.'
+      printf '  Wiring day-one harnesses to onepassword…\n'
+      wire_day_one_harnesses onepassword onepassword.refs
+      if [[ "$AUTH_MODE_CHOICE" == prompt ]]; then
+        printf '  auth_mode=prompt: not writing %s\n' "$path"
+        printf '  backend ready: onepassword — launch prompts for OP_SERVICE_ACCOUNT_TOKEN\n'
+        printf '  change later: vaulted-agent auth-mode file|prompt\n'
       else
-        token=""
-      fi
-      if [[ -n "$token" ]]; then
-        write_token_file "$path" OP_SERVICE_ACCOUNT_TOKEN "$token"
-        printf '  backend ready: onepassword  (set backend=onepassword and a real manifest on harnesses)\n'
-      else
-        printf '  no token provided; left plainfile/empty harnesses as-is\n'
-        printf '  later: write %s or run vaulted-agent setup\n' "$path"
+        if [[ -n "$OP_TOKEN_FILE" && -r "$OP_TOKEN_FILE" ]]; then
+          token="$(tr -d '\n' < "$OP_TOKEN_FILE")"
+        elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+          token="$OP_SERVICE_ACCOUNT_TOKEN"
+        elif can_prompt_user; then
+          printf 'OP_SERVICE_ACCOUNT_TOKEN (input hidden, empty to skip): '
+          read -rs token < /dev/tty || token=""
+          printf '\n'
+        else
+          token=""
+        fi
+        if [[ -n "$token" ]]; then
+          write_token_file "$path" OP_SERVICE_ACCOUNT_TOKEN "$token"
+          printf '  backend ready: onepassword\n'
+        else
+          printf '  no token provided; write %s later or: vaulted-agent auth-mode prompt\n' "$path"
+        fi
       fi
       ;;
     bitwarden|bws)
+      SETUP_BACKEND=bitwarden
       path="${CONFIG}/bws.env"
-      if [[ -n "$BWS_TOKEN_FILE" && -r "$BWS_TOKEN_FILE" ]]; then
-        token="$(tr -d '\n' < "$BWS_TOKEN_FILE")"
-      elif [[ -n "${BWS_ACCESS_TOKEN:-}" ]]; then
-        token="$BWS_ACCESS_TOKEN"
-      elif (( ! ASSUME_YES )) && [[ -t 0 && -r /dev/tty ]]; then
-        printf 'BWS_ACCESS_TOKEN (input hidden, empty to skip): '
-        read -rs token < /dev/tty || token=""
-        printf '\n'
+      ensure_ref_manifest bitwarden.refs \
+        '# Bitwarden Secrets Manager — one per line, no secret values:' \
+        '#   VAR=<secret-uuid>' \
+        '# List ids: bws secret list' \
+        '# With auth_mode=prompt, launch asks for BWS_ACCESS_TOKEN (not written to disk).'
+      printf '  Wiring day-one harnesses to bitwarden…\n'
+      wire_day_one_harnesses bitwarden bitwarden.refs
+      if [[ "$AUTH_MODE_CHOICE" == prompt ]]; then
+        printf '  auth_mode=prompt: not writing %s\n' "$path"
+        printf '  backend ready: bitwarden — launch prompts for BWS_ACCESS_TOKEN\n'
+        printf '  change later: vaulted-agent auth-mode file|prompt\n'
       else
-        token=""
-      fi
-      if [[ -n "$token" ]]; then
-        write_token_file "$path" BWS_ACCESS_TOKEN "$token"
-        printf '  backend ready: bitwarden  (set backend=bitwarden + UUID manifest on harnesses)\n'
-      else
-        printf '  no token provided; left plainfile/empty harnesses as-is\n'
+        if [[ -n "$BWS_TOKEN_FILE" && -r "$BWS_TOKEN_FILE" ]]; then
+          token="$(tr -d '\n' < "$BWS_TOKEN_FILE")"
+        elif [[ -n "${BWS_ACCESS_TOKEN:-}" ]]; then
+          token="$BWS_ACCESS_TOKEN"
+        elif can_prompt_user; then
+          printf 'BWS_ACCESS_TOKEN (input hidden, empty to skip): '
+          read -rs token < /dev/tty || token=""
+          printf '\n'
+        else
+          token=""
+        fi
+        if [[ -n "$token" ]]; then
+          write_token_file "$path" BWS_ACCESS_TOKEN "$token"
+          printf '  backend ready: bitwarden\n'
+        else
+          printf '  no token provided; write %s later or: vaulted-agent auth-mode prompt\n' "$path"
+        fi
       fi
       ;;
     pass)
+      SETUP_BACKEND=pass
+      ensure_ref_manifest pass.refs \
+        '# pass (passwordstore.org) — one per line:' \
+        '#   VAR=store/entry/path' \
+        '# Service account needs GPG + `pass show`.'
+      printf '  Wiring day-one harnesses to pass…\n'
+      wire_day_one_harnesses pass pass.refs
       printf '  pass: ensure the service account can run `pass show` (GPG key).\n'
-      printf '  Set backend=pass and VAR=store/path lines in each harness manifest.\n'
+      printf '  auth_mode=%s is recorded; pass uses GPG, not a pasteable vault token file.\n' \
+        "$AUTH_MODE_CHOICE"
       ;;
     sops)
       printf '  sops: place an age identity at %s/age.key (0600) and set backend=sops.\n' "$CONFIG"
+      printf '  auth_mode=%s is recorded; sops uses age.key, not a pasteable vault token.\n' \
+        "$AUTH_MODE_CHOICE"
+      printf '  (day-one harnesses left as plainfile — sops needs an encrypted manifest per harness)\n'
       ;;
     skip|plainfile|none|'')
       printf '\nVault setup skipped. Agents launch with empty.env until you configure a backend.\n'
+      printf '  auth_mode=%s  (change later: vaulted-agent auth-mode)\n' "$AUTH_MODE_CHOICE"
       printf '  Interactive later:  vaulted-agent setup\n'
       ;;
     *)
@@ -552,6 +776,34 @@ if (( ! NO_SETUP )); then
   prompt_backend_setup
 else
   printf '\nskipped vault setup prompts (--no-setup)\n'
+  # Still record auth_mode when the operator passed it explicitly.
+  if [[ -n "$AUTH_MODE_CHOICE" ]]; then
+    write_defaults_conf "$AUTH_MODE_CHOICE"
+  elif [[ ! -e "$CONFIG/defaults.conf" ]]; then
+    write_defaults_conf file
+  fi
+  ensure_workdir_caller
+  # --backend without interactive setup should still rewire day-one harnesses.
+  case "${BACKEND_CHOICE}" in
+    onepassword|op)
+      SETUP_BACKEND=onepassword
+      ensure_ref_manifest onepassword.refs \
+        '# VAR=op://Vault/Item/field'
+      wire_day_one_harnesses onepassword onepassword.refs
+      ;;
+    bitwarden|bws)
+      SETUP_BACKEND=bitwarden
+      ensure_ref_manifest bitwarden.refs \
+        '# VAR=<secret-uuid>  # bws secret list'
+      wire_day_one_harnesses bitwarden bitwarden.refs
+      ;;
+    pass)
+      SETUP_BACKEND=pass
+      ensure_ref_manifest pass.refs \
+        '# VAR=store/entry/path'
+      wire_day_one_harnesses pass pass.refs
+      ;;
+  esac
 fi
 
 # --- optional per-harness symlinks -----------------------------------------
@@ -666,12 +918,56 @@ else
   unset who fixcmd rerun
 fi
 
-printf '\nNext: put a backend credential at %s (0640 root:%s),\n' "$OP_ENV" "$SERVICE_USER"
-printf 'copy a harness into place:\n'
-printf '  cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
-printf 'then run:  vaulted-agent   (or the short alias:  %s)\n' "$SHORT_NAME"
-printf '  e.g.  %s claude\n' "$SHORT_NAME"
-printf '  (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
+printf '\nNext:\n'
+if [[ -n "$REFS_MANIFEST_PATH" ]]; then
+  case "${SETUP_BACKEND}" in
+    bitwarden)
+      printf '  Put Bitwarden credential references (VAR=<secret-uuid>) in:\n'
+      printf '    %s\n' "$REFS_MANIFEST_PATH"
+      printf '  List secret ids with:  bws secret list\n'
+      ;;
+    onepassword)
+      printf '  Put 1Password credential references (VAR=op://Vault/Item/field) in:\n'
+      printf '    %s\n' "$REFS_MANIFEST_PATH"
+      ;;
+    pass)
+      printf '  Put pass store paths (VAR=store/entry/path) in:\n'
+      printf '    %s\n' "$REFS_MANIFEST_PATH"
+      ;;
+    *)
+      printf '  Put credential references in:\n'
+      printf '    %s\n' "$REFS_MANIFEST_PATH"
+      ;;
+  esac
+  printf '  (references only — never secret values; safe to edit as root)\n'
+fi
+if [[ "${AUTH_MODE_CHOICE:-file}" == prompt ]]; then
+  printf '  auth_mode is prompt — paste the vault token when launching (nothing on disk).\n'
+  printf '  Change later:  vaulted-agent auth-mode file|prompt\n'
+else
+  case "${SETUP_BACKEND}" in
+    bitwarden)
+      printf '  Vault token file (if using file auth): %s/bws.env  (0640 root:%s)\n' \
+        "$CONFIG" "$SERVICE_USER"
+      ;;
+    onepassword)
+      printf '  Vault token file (if using file auth): %s  (0640 root:%s)\n' \
+        "$OP_ENV" "$SERVICE_USER"
+      ;;
+    *)
+      printf '  put a backend credential at %s (0640 root:%s) if you use file auth,\n' \
+        "$OP_ENV" "$SERVICE_USER"
+      ;;
+  esac
+  printf '  or switch to paste-each-launch:  vaulted-agent auth-mode prompt\n'
+fi
+if [[ -z "$REFS_MANIFEST_PATH" ]]; then
+  printf '  copy a harness into place if needed:\n'
+  printf '    cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
+fi
+printf '  then run:  vaulted-agent   (or the short alias:  %s)\n' "$SHORT_NAME"
+printf '    e.g.  %s claude   /   %s grok\n' "$SHORT_NAME" "$SHORT_NAME"
+printf '    (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
 printf '\nTo remove this install later:\n'
 printf '  sudo vaulted-agent uninstall\n'
 printf '  sudo vaulted-agent uninstall --purge   # also remove config\n'

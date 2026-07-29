@@ -46,10 +46,16 @@ DEFAULT_BACKEND="onepassword"
 OP_ENV_FILE="${CONFIG_DIR}/op.env"          # OP_SERVICE_ACCOUNT_TOKEN
 BWS_ENV_FILE="${CONFIG_DIR}/bws.env"        # BWS_ACCESS_TOKEN
 AGE_KEY_FILE="${CONFIG_DIR}/age.key"        # age identity for sops
+DEFAULTS_FILE="${CONFIG_DIR}/defaults.conf" # machine-wide defaults (auth_mode, …)
 LAUNCHER_NAME="vaulted-agent"
 SHORT_NAME="va"                             # optional short alias installed as a symlink
 LINK_SUFFIX="-conductor"                    # claude-conductor -> harness "claude"
 LABEL_NAMESPACE="vaulted-agent"              # UUIDv5 namespace for session labels
+
+# Default auth mode when defaults.conf is absent.
+#   file    read vault token from op.env / bws.env on disk
+#   prompt  ask for the token on each launch (never written by the launcher)
+DEFAULT_AUTH_MODE="file"
 
 # Everything not named here, and not named by the harness's manifest or its
 # keep= setting, is removed from the environment before the agent starts.
@@ -58,6 +64,50 @@ PASSTHROUGH_VARS=(HOME PATH USER LOGNAME SHELL TERM COLORTERM TZ LANG LC_ALL)
 # ===========================================================================
 
 die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
+
+# Read auth_mode from defaults.conf. Sets AUTH_MODE to file|prompt.
+read_auth_mode() {
+  local raw entry key val
+  AUTH_MODE="$DEFAULT_AUTH_MODE"
+  [[ -r "$DEFAULTS_FILE" ]] || return 0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw="${raw%$'\r'}"
+    entry="$(trim "$raw")"
+    [[ -z "$entry" || "$entry" == "#"* || "$entry" != *=* ]] && continue
+    key="$(trim "${entry%%=*}")"
+    val="$(trim "${entry#*=}")"
+    if [[ "$key" == "auth_mode" ]]; then
+      case "$val" in
+        file|prompt) AUTH_MODE="$val" ;;
+      esac
+    fi
+  done < "$DEFAULTS_FILE"
+}
+
+# Write defaults.conf (auth_mode only for now). Direct write when possible;
+# otherwise sudo (typical for /etc/vaulted-agent owned by root).
+write_auth_mode() {
+  local mode="$1" path="$DEFAULTS_FILE" tmp parent
+  case "$mode" in file|prompt) ;; *) die "auth-mode must be 'file' or 'prompt'" ;; esac
+  parent="$(dirname -- "$path")"
+  tmp="$(mktemp)" || die "mktemp failed"
+  cat > "$tmp" <<EOF
+# Machine-wide launcher defaults.
+# Change later: vaulted-agent auth-mode  |  va auth-mode prompt|file
+auth_mode = $mode
+EOF
+  if [[ -w "$path" ]] || { [[ ! -e "$path" && -w "$parent" ]]; }; then
+    install -m 0644 "$tmp" "$path" || { rm -f "$tmp"; die "could not write $path"; }
+  elif [[ "$(id -u)" -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
+    sudo install -m 0644 "$tmp" "$path" || { rm -f "$tmp"; die "could not write $path"; }
+  else
+    rm -f "$tmp"
+    die "writing $path needs root (re-run: sudo $LAUNCHER_NAME auth-mode $mode)"
+  fi
+  rm -f "$tmp"
+  AUTH_MODE="$mode"
+  printf 'auth_mode set to %s  (%s)\n' "$mode" "$path"
+}
 
 # Strip leading and trailing whitespace. Pure parameter expansion.
 trim() {
@@ -69,6 +119,10 @@ trim() {
 
 invoked="${0##*/}"
 orig=( ${1+"$@"} )               # exact argv, replayed verbatim across the sudo hop
+# Directory the human was in when they typed `va …`. Survives the sudo hop via
+# VAULTED_AGENT_CALLER_CWD so harnesses can use `workdir = caller` (needed for
+# cwd-scoped agent sessions / --resume).
+CALLER_CWD="${VAULTED_AGENT_CALLER_CWD:-$PWD}"
 
 # Primary entrypoints (full name and short alias). Not harness-conductor links.
 is_primary_cmd() {
@@ -120,13 +174,17 @@ pick_harness() {
 
 usage() {
   local f name cmdline
+  read_auth_mode 2>/dev/null || true
   printf 'usage: %s <harness> [args...]\n' "$LAUNCHER_NAME" >&2
   printf '       %s <harness> [args...]             short alias\n' "$SHORT_NAME" >&2
   printf '       %s|%s pick [args...]    choose one interactively\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s setup             configure vault backend / token\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s auth-mode [mode]  show or set default auth mode\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s uninstall [opts]  remove this install (needs root)\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       <harness>%s [args...]\n\n' "$LINK_SUFFIX" >&2
-  printf 'launcher flags:  --prompt-auth|-p   prompt for vault token (not written to disk)\n' >&2
+  printf 'launcher flags:  --prompt-auth|-p   prompt for vault token this launch (not written to disk)\n' >&2
+  printf 'default auth_mode: %s  (file = token on disk; prompt = paste each launch)\n' \
+    "${AUTH_MODE:-$DEFAULT_AUTH_MODE}" >&2
   printf 'uninstall options: --purge  --dry-run  -y|--yes  --link-user NAME\n\n' >&2
   printf 'harnesses in %s:\n' "$HARNESS_DIR" >&2
   if compgen -G "$HARNESS_DIR/*.conf" >/dev/null 2>&1; then
@@ -314,17 +372,71 @@ do_uninstall() {
   exit 0
 }
 
+# Show current auth_mode and optionally set it. Reserved unless auth-mode.conf exists.
+do_auth_mode() {
+  local mode="${1-}" choice
+  read_auth_mode
+  case "$mode" in
+    -h|--help)
+      printf 'usage: %s auth-mode [file|prompt|show]\n' "$LAUNCHER_NAME"
+      printf '  file    store vault token on disk (op.env / bws.env); no prompt each launch\n'
+      printf '  prompt  paste vault token at each launch; nothing written by the launcher\n'
+      printf '  show    print the current mode (default with no args in non-TTY)\n'
+      printf '\nCurrent: %s  (%s)\n' "$AUTH_MODE" \
+        "$( [[ -r "$DEFAULTS_FILE" ]] && printf '%s' "$DEFAULTS_FILE" || printf 'built-in default' )"
+      printf 'Per-launch override: -p / --prompt-auth\n'
+      return 0
+      ;;
+    show|'')
+      if [[ -z "$mode" && -t 1 && -r /dev/tty ]]; then
+        printf 'vaulted-agent auth-mode\n\n'
+        printf 'Current default: %s\n' "$AUTH_MODE"
+        if [[ -r "$DEFAULTS_FILE" ]]; then
+          printf '  from %s\n' "$DEFAULTS_FILE"
+        else
+          printf '  (no %s yet; using built-in default)\n' "$DEFAULTS_FILE"
+        fi
+        printf '\nHow should vault tokens be supplied at launch?\n'
+        printf '  1) file    — token file on disk (op.env / bws.env)\n'
+        printf '  2) prompt  — paste token each launch (nothing on disk)\n'
+        printf '  q) quit without changing\n\n'
+        printf 'choice [1-2, q]: '
+        read -r choice < /dev/tty || exit 130
+        case "$choice" in
+          1|file)   write_auth_mode file ;;
+          2|prompt) write_auth_mode prompt ;;
+          q|Q|'')   printf 'Nothing changed (still %s).\n' "$AUTH_MODE" ;;
+          *)        die "unknown choice '$choice' (want file, prompt, or q)" ;;
+        esac
+      else
+        printf 'auth_mode=%s\n' "$AUTH_MODE"
+      fi
+      return 0
+      ;;
+    file|prompt)
+      write_auth_mode "$mode"
+      return 0
+      ;;
+    *)
+      die "unknown auth-mode '$mode' (want file, prompt, or show)"
+      ;;
+  esac
+}
+
 # Interactive vault token / backend help. Reserved name unless setup.conf exists.
 do_setup() {
   local choice token path grp
   grp="$(id -gn 2>/dev/null || true)"
+  read_auth_mode
   printf 'vaulted-agent setup\n\n'
   printf 'Configure a vault backend credential for this machine.\n'
   printf 'Auto-harnesses start as plainfile+empty.env; change their backend/manifest\n'
-  printf 'after this if you want vault injection.\n\n'
+  printf 'after this if you want vault injection.\n'
+  printf 'Current auth_mode: %s  (change with: vaulted-agent auth-mode)\n\n' "$AUTH_MODE"
   printf '  1) 1Password  (writes op.env with OP_SERVICE_ACCOUNT_TOKEN)\n'
   printf '  2) Bitwarden  (writes bws.env with BWS_ACCESS_TOKEN)\n'
   printf '  3) Show pass / sops notes only\n'
+  printf '  4) Change default auth mode (file vs prompt)\n'
   printf '  q) Quit\n\n'
   printf 'choice: '
   [[ -r /dev/tty ]] || die "setup needs a terminal"
@@ -347,6 +459,10 @@ do_setup() {
       fi
       printf 'wrote %s\n' "$path"
       printf 'Next: set backend=onepassword and a real manifest on each harness.\n'
+      if [[ "$AUTH_MODE" == prompt ]]; then
+        printf 'Note: auth_mode is prompt — launches still ask for the token unless you run:\n'
+        printf '  %s auth-mode file\n' "$LAUNCHER_NAME"
+      fi
       ;;
     2|bitwarden|bws)
       path="$BWS_ENV_FILE"
@@ -365,11 +481,18 @@ do_setup() {
       fi
       printf 'wrote %s\n' "$path"
       printf 'Next: set backend=bitwarden and UUID refs in the harness manifest.\n'
+      if [[ "$AUTH_MODE" == prompt ]]; then
+        printf 'Note: auth_mode is prompt — launches still ask for the token unless you run:\n'
+        printf '  %s auth-mode file\n' "$LAUNCHER_NAME"
+      fi
       ;;
     3)
       printf 'pass: service account needs GPG + `pass show`; backend=pass, VAR=store/path\n'
       printf 'sops: age identity at %s (0600); backend=sops, encrypted dotenv manifest\n' \
         "$AGE_KEY_FILE"
+      ;;
+    4|auth-mode|auth_mode)
+      do_auth_mode
       ;;
     q|Q) printf 'Nothing changed.\n' ;;
     *) die "unknown choice" ;;
@@ -400,20 +523,34 @@ fi
 
 # --- Pull launcher flags out of the argument list --------------------------
 # Everything not consumed here is passed through to the agent untouched.
+#
+# Auth mode resolution (first match wins for "prompt this launch"):
+#   1. -p / --prompt-auth
+#   2. VAULTED_AGENT_PROMPT_AUTH=1
+#   3. VAULTED_AGENT_AUTH_MODE=prompt|file
+#   4. defaults.conf auth_mode (set at install or via `auth-mode`)
+#   5. DEFAULT_AUTH_MODE (file)
 harness_flag=""
-PROMPT_AUTH=0
-[[ "${VAULTED_AGENT_PROMPT_AUTH:-}" == "1" ]] && PROMPT_AUTH=1
+PROMPT_AUTH_FLAG=0
+read_auth_mode
+case "${VAULTED_AGENT_AUTH_MODE:-}" in
+  prompt|file) AUTH_MODE="$VAULTED_AGENT_AUTH_MODE" ;;
+esac
+[[ "${VAULTED_AGENT_PROMPT_AUTH:-}" == "1" ]] && AUTH_MODE=prompt
 args=()
 while (( $# )); do
   case "$1" in
     -H|--harness) (( $# >= 2 )) || die "-H requires a value"; harness_flag="$2"; shift 2 ;;
     --harness=*)  harness_flag="${1#*=}"; shift ;;
-    -p|--prompt-auth) PROMPT_AUTH=1; shift ;;
+    -p|--prompt-auth) PROMPT_AUTH_FLAG=1; shift ;;
     --)           args+=("$@"); break ;;
     *)            args+=("$1"); shift ;;
   esac
 done
 set -- ${args[@]+"${args[@]}"}
+(( PROMPT_AUTH_FLAG )) && AUTH_MODE=prompt
+PROMPT_AUTH=0
+[[ "$AUTH_MODE" == prompt ]] && PROMPT_AUTH=1
 
 # --- Harness selection -----------------------------------------------------
 # The re-exec path is rebuilt from a configured directory plus the *invoked*
@@ -449,6 +586,11 @@ if is_primary_cmd "$invoked"; then
     do_setup
     exit 0
   fi
+  # auth-mode: show or set machine-wide default (file vs prompt).
+  if [[ "$HARNESS" == "auth-mode" && ! -e "$HARNESS_DIR/auth-mode.conf" ]]; then
+    do_auth_mode ${1+"$@"}
+    exit 0
+  fi
   # Keep the invoked name (va or vaulted-agent) so sudoers can grant either path.
   launcher_path="${LAUNCHER_BIN_DIR}/${invoked}"
 else
@@ -468,11 +610,13 @@ fi
 # Replay the original argv exactly, so a sudoers rule matches the command line
 # as typed. Rewriting `vaulted-agent codex` into `vaulted-agent -H codex` here
 # would force every rule to be written in a form the user never types.
+# Pass CALLER_CWD so `workdir = caller` still sees the human's directory after
+# sudo resets the environment.
 if [[ "$(id -un)" != "$SERVICE_USER" ]]; then
-  exec sudo -u "$SERVICE_USER" "$launcher_path" ${orig[@]+"${orig[@]}"}
+  exec sudo -u "$SERVICE_USER" env \
+    "VAULTED_AGENT_CALLER_CWD=$CALLER_CWD" \
+    "$launcher_path" ${orig[@]+"${orig[@]}"}
 fi
-
-cd "$WORKDIR" || die "cannot cd to $WORKDIR"
 
 # --- Read the harness definition -------------------------------------------
 # One file per harness, `key = value`, one setting per line. The file is
@@ -482,7 +626,8 @@ cd "$WORKDIR" || die "cannot cd to $WORKDIR"
 conf="${HARNESS_DIR}/${HARNESS}.conf"
 [[ -r "$conf" ]] || die "unknown harness '$HARNESS' (no readable $conf)"
 
-bin_dir=""; manifest=""; labels="no"; keep_extra=""; backend=""; cmd=(); extra_args=()
+bin_dir=""; manifest=""; labels="no"; keep_extra=""; backend=""; workdir_key=""
+cmd=(); extra_args=()
 lineno=0
 while IFS= read -r raw || [[ -n "$raw" ]]; do
   lineno=$(( lineno + 1 ))
@@ -498,6 +643,7 @@ while IFS= read -r raw || [[ -n "$raw" ]]; do
     labels)   labels="$val" ;;
     keep)     keep_extra="$val" ;;
     backend)  backend="$val" ;;
+    workdir)  workdir_key="$val" ;;
     command)
       # Word-split on whitespace only: no globbing, no expansion, no eval.
       # Use `arg =` lines for any argument that contains a space.
@@ -519,6 +665,41 @@ backend="${backend:-$DEFAULT_BACKEND}"
 bin_dir="${bin_dir//\$\{HOME\}/$HOME}"; bin_dir="${bin_dir//\$HOME/$HOME}"
 [[ "$manifest" == /* ]] || manifest="${MANIFEST_DIR}/${manifest}"
 [[ -r "$manifest" ]] || die "cannot read manifest $manifest"
+
+# Working directory for the agent process.
+#   (unset)     → WORKDIR from install (service account home / --workdir)
+#   caller      → directory where the user typed `va …` (for --resume / project work)
+#   path/$HOME  → absolute or $HOME-relative path
+case "$workdir_key" in
+  '')
+    run_cwd="$WORKDIR" ;;
+  caller)
+    run_cwd="$CALLER_CWD"
+    [[ -n "$run_cwd" ]] || die "$conf: workdir=caller but caller directory is unknown"
+    ;;
+  *)
+    run_cwd="${workdir_key//\$\{HOME\}/$HOME}"
+    run_cwd="${run_cwd//\$HOME/$HOME}"
+    ;;
+esac
+cd "$run_cwd" || die "cannot cd to $run_cwd (harness workdir)"
+
+# plainfile never calls load_auth, so auth_mode=prompt / -p would be silent.
+# Tell the operator why no token prompt appeared.
+if (( PROMPT_AUTH )) && [[ "$backend" == plainfile || "$backend" == sops || "$backend" == pass ]]; then
+  if [[ -w /dev/tty ]]; then
+    printf 'vaulted-agent: auth_mode=prompt has no vault-token step for backend=%s\n' \
+      "$backend" >/dev/tty
+    if [[ "$backend" == plainfile ]]; then
+      printf '  this harness is still plainfile (day-one empty.env). Wire a vault backend:\n' \
+        >/dev/tty
+      printf '    edit %s  →  backend = bitwarden|onepassword  + a refs manifest\n' \
+        "$conf" >/dev/tty
+      printf '    or re-run: sudo ./install.sh   and choose Bitwarden/1Password again\n' \
+        >/dev/tty
+    fi
+  fi
+fi
 
 # --- Scrub the inherited environment ---------------------------------------
 # Without this the manifest only ever ADDS variables, and every secret already
@@ -596,15 +777,15 @@ export_stream() {
   done
 }
 
-# Load backend auth from a disk file, or prompt on a TTY when --prompt-auth /
-# VAULTED_AGENT_PROMPT_AUTH=1 is set (token never written by the launcher).
+# Load backend auth from a disk file, or prompt on a TTY when auth_mode=prompt
+# (via defaults, -p, or env). Prompted tokens are never written by the launcher.
 load_auth() {                                # $1 = file, $2 = variable it must set
   local file="$1" var="$2" token=""
   # Already present in the environment (e.g. caller exported before launch).
   if [[ -n "${!var-}" ]]; then return 0; fi
 
   if (( PROMPT_AUTH )); then
-    [[ -r /dev/tty ]] || die "--prompt-auth needs a terminal (or export $var)"
+    [[ -r /dev/tty ]] || die "auth_mode=prompt needs a terminal (or export $var)"
     printf '%s (not written to disk): ' "$var" >/dev/tty
     read -rs token < /dev/tty || token=""
     printf '\n' >/dev/tty
@@ -628,12 +809,12 @@ load_auth() {                                # $1 = file, $2 = variable it must 
     printf '  enter %s for this launch only (empty to abort): ' "$var" >/dev/tty
     read -rs token < /dev/tty || token=""
     printf '\n' >/dev/tty
-    [[ -n "$token" ]] || die "backend '$backend' needs $file (or --prompt-auth / export $var)"
+    [[ -n "$token" ]] || die "backend '$backend' needs $file (or: auth-mode prompt / -p / export $var)"
     export "$var=$token"
     return 0
   fi
 
-  die "backend '$backend' needs $file (is this the service account?). Or: --prompt-auth"
+  die "backend '$backend' needs $file (is this the service account?). Or: $LAUNCHER_NAME auth-mode prompt"
 }
 
 auth_vars=()
@@ -661,6 +842,27 @@ case "$backend" in
   pass|bitwarden)
     [[ "$backend" != bitwarden ]] || { load_auth "$BWS_ENV_FILE" BWS_ACCESS_TOKEN
                                        auth_vars=(BWS_ACCESS_TOKEN); }
+    # bws: fetch then parse. A pipe to python turned auth failures into a
+    # confusing JSONDecodeError ("Expecting value") after bws printed the real
+    # reason (often: token is not a Secrets Manager access token).
+    bws_secret_value() {
+      local ref="$1" errf json val
+      errf="$(mktemp)" || die "mktemp failed"
+      if ! json="$(bws secret get "$ref" --output json 2>"$errf")"; then
+        val="$(tr -d '\r' < "$errf" | head -c 500)"
+        rm -f "$errf"
+        die "bws secret get '$ref' failed${val:+
+  $val}
+  BWS_ACCESS_TOKEN must be a Bitwarden Secrets Manager access token
+  (Machine Accounts → Access Tokens), not your vault password or login API key.
+  List secret ids: bws secret list"
+      fi
+      rm -f "$errf"
+      val="$(printf '%s' "$json" | python3 -c \
+        'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])')" \
+        || die "bws secret get '$ref' returned unparseable JSON"
+      printf '%s' "$val"
+    }
     while IFS= read -r raw || [[ -n "$raw" ]]; do
       raw="$(trim "${raw%$'\r'}")"
       [[ -z "$raw" || "$raw" == "#"* || "$raw" != *=* ]] && continue
@@ -670,16 +872,12 @@ case "$backend" in
         value="$(pass show "$ref")" || die "pass show '$ref' failed; refusing to launch"
         value="${value%%$'\n'*}"             # line 1 is the secret, by convention
       else
-        # --output env would save a dependency, but its quoting rules are not
-        # documented; json plus the python3 already required by `labels` is
-        # unambiguous. The reference is on argv, never the value.
-        value="$(bws secret get "$ref" --output json \
-                 | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])')" \
-          || die "bws secret get '$ref' failed; refusing to launch"
+        value="$(bws_secret_value "$ref")" || exit 1
       fi
       export "$var=$value"
     done < "$manifest"
-    unset raw var ref value ;;
+    unset raw var ref value
+    unset -f bws_secret_value 2>/dev/null || true ;;
 
   *) die "unknown backend '$backend' (onepassword|bitwarden|sops|pass|plainfile)" ;;
 esac
@@ -690,15 +888,30 @@ esac
 for v in ${auth_vars[@]+"${auth_vars[@]}"}; do unset "$v"; done
 unset auth_vars v
 
-# --- Optional: friendly session labels -------------------------------------
-# Maps any non-UUID --resume/--session-id value to a stable UUIDv5, so a
-# conversation can be resumed by name instead of by copied UUID.
+# --- Session resume argv ---------------------------------------------------
+# Agents disagree on CLI shape. After the harness name we pass args through,
+# with small normalizations so a common `va <agent> resume|‑‑resume <id>`
+# habit works for all three:
+#
+#   labels=yes     map non-UUID resume targets to a stable UUIDv5
+#   codex          native is `resume <id>`; rewrite --resume/-r → resume
+#   claude / grok  native is --resume/-r; rewrite bare `resume` → --resume
+#
+# Examples:
+#   va claude --resume b03ca221-…-…
+#   va claude resume b03ca221-…-…
+#   va codex resume 019fabc2-…-…
+#   va codex --resume 019fabc2-…-…
+#   va grok --resume 019fabc1-…-…
+#   va grok resume 019fabc1-…-…
+
+uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+label_to_uuid() {
+  python3 -c 'import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[2]+":"+sys.argv[1]))' \
+    "$1" "$LABEL_NAMESPACE"
+}
+
 if [[ "$labels" == "yes" ]]; then
-  uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-  label_to_uuid() {
-    python3 -c 'import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[2]+":"+sys.argv[1]))' \
-      "$1" "$LABEL_NAMESPACE"
-  }
   mapped=()
   while (( $# )); do
     case "$1" in
@@ -715,12 +928,63 @@ if [[ "$labels" == "yes" ]]; then
         flag="${1%%=*}"; val="${1#*=}"; shift
         [[ "$val" =~ $uuid_re ]] || val="$(label_to_uuid "$val")"
         mapped+=("$flag" "$val") ;;
+      # Subcommand form: `resume [SESSION_ID]` (codex native; also accepted above)
+      resume)
+        mapped+=("$1"); shift
+        if (( $# )) && [[ "$1" != -* ]]; then
+          val="$1"; shift
+          [[ "$val" =~ $uuid_re ]] || val="$(label_to_uuid "$val")"
+          mapped+=("$val")
+        fi ;;
       *) mapped+=("$1"); shift ;;
     esac
   done
   set -- ${mapped[@]+"${mapped[@]}"}
 fi
 
+agent_base="${cmd[0]##*/}"
+case "$agent_base" in
+  codex)
+    # Codex speaks `resume`, not `--resume`.
+    mapped=()
+    while (( $# )); do
+      case "$1" in
+        --resume|-r)
+          shift
+          mapped+=(resume)
+          if (( $# )) && [[ "$1" != -* ]]; then
+            mapped+=("$1"); shift
+          fi ;;
+        --resume=*)
+          mapped+=(resume "${1#*=}"); shift ;;
+        *)
+          mapped+=("$1"); shift ;;
+      esac
+    done
+    set -- ${mapped[@]+"${mapped[@]}"}
+    ;;
+  claude|grok)
+    # Claude/grok speak `--resume` / `-r`. Bare `resume <id>` is rewritten.
+    mapped=()
+    while (( $# )); do
+      case "$1" in
+        resume)
+          shift
+          mapped+=(--resume)
+          if (( $# )) && [[ "$1" != -* ]]; then
+            mapped+=("$1"); shift
+          fi ;;
+        *)
+          mapped+=("$1"); shift ;;
+      esac
+    done
+    set -- ${mapped[@]+"${mapped[@]}"}
+    ;;
+esac
+unset agent_base mapped uuid_re
+
 # --- Hand off --------------------------------------------------------------
+# Everything after the harness name is the agent's argv (e.g. grok --resume UUID,
+# codex resume UUID, claude --resume UUID). Only launcher flags are stripped.
 [[ -n "$bin_dir" ]] && export PATH="${bin_dir}:$PATH"
 exec "${cmd[@]}" ${1+"$@"}

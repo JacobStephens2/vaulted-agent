@@ -1,9 +1,12 @@
 # vaulted-agent-launcher
 
-Give an AI coding agent real credentials without leaving them on disk.
+Give Claude Code, Codex, and Grok real vault credentials **in-process** — without
+leaving a pile of `.env` files on disk.
 
-One launcher, one vault, different blast radii per agent. Secrets resolve into
-the agent process at start - not into a pile of `.env` files.
+One launcher (`va`), one secrets backend (1Password, Bitwarden Secrets Manager,
+pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt
+auth**: paste the vault token at each launch so even the manager token need not
+live on disk.
 
 **macOS and Linux.** Product page: [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent)
 
@@ -12,39 +15,50 @@ the agent process at start - not into a pile of `.env` files.
 Day to day you name the harness as the first argument:
 
 ```bash
-vaulted-agent claude
-vaulted-agent codex
-vaulted-agent grok
-vaulted-agent pick
-```
-
-Same binary under the short alias (installed by default):
-
-```bash
 va claude
 va codex
 va grok
 va pick
+# full name also works: vaulted-agent claude
 ```
 
-After a fresh install, if those CLIs were on your PATH, harnesses are
-auto-created with **no vault secrets** (`plainfile` + `empty.env`) so the agent
-still starts. Wire a vault when you are ready:
+After a fresh install, agents found on your PATH get harnesses that start with
+**no vault secrets** (`plainfile` + `empty.env`). Wire a vault when ready:
 
 ```bash
-vaulted-agent setup                 # interactive token / backend help
-# or launch without anything on disk:
-va claude --prompt-auth             # prompts for OP_SERVICE_ACCOUNT_TOKEN once
+vaulted-agent setup                 # interactive backend / token help
+vaulted-agent auth-mode             # file (token on disk) vs prompt (paste each launch)
+va claude                           # with auth_mode=prompt: asks for vault token
+va claude -p                        # force prompt this launch only
 ```
 
-Extra args after the harness go to the agent:
+### Resume sessions
+
+Extra args after the harness go to the agent. Resume shape is normalized so
+either form works under `va` (Claude/Grok speak `--resume`; Codex speaks the
+`resume` subcommand):
 
 ```bash
-vaulted-agent claude "fix the flaky test in auth"
-vaulted-agent codex --help
+va claude --resume b03ca221-798e-457b-8f64-f71713e7066c
+va claude resume b03ca221-798e-457b-8f64-f71713e7066c
+va codex resume 019fabc2-fe4f-7e00-a431-a6a44d94b559
+va codex --resume 019fabc2-fe4f-7e00-a431-a6a44d94b559
+va grok --resume 019fabde-7535-7cc2-ab09-7987edc08ff8
+va grok resume 019fabde-7535-7cc2-ab09-7987edc08ff8
 ```
 
-List harnesses: `vaulted-agent`  
+Harnesses use `workdir = caller` by default so the agent runs in the directory
+you launched from (sessions are often cwd-scoped).
+
+Other examples:
+
+```bash
+va claude "fix the flaky test in auth"
+va codex --help
+va claude -c                          # continue latest (claude native)
+```
+
+List harnesses: `vaulted-agent` or `va`  
 Uninstall: `sudo vaulted-agent uninstall` (or `sudo va uninstall`)
 
 ## Install
@@ -58,8 +72,10 @@ curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 The installer:
 
 1. Installs `vaulted-agent` and the `va` alias  
-2. Detects `claude` / `codex` / `grok` on your PATH and writes live harnesses  
-3. Optionally asks for a vault backend (1Password, Bitwarden, …) when a TTY is present  
+2. Detects `claude` / `codex` / `grok` on your PATH and writes live harnesses (`workdir = caller`)  
+3. Optionally asks for a vault backend (1Password, **Bitwarden Secrets Manager**, pass, sops, …) when a TTY is present  
+4. Asks for a default **auth mode**: `file` (token on disk) or `prompt` (paste each launch; nothing stored)  
+5. For 1Password / Bitwarden / pass, prints the **refs manifest path** where you put `VAR=…` references  
 
 Then, if detection found your agents:
 
@@ -69,12 +85,14 @@ va codex
 va grok
 ```
 
-Or from a release tag:
+Or from a release tag / local clone:
 
 ```bash
 git clone --branch v0.2.0 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
+# local tree with Bitwarden + prompt auth (no token file):
+sudo ./install.sh --backend bitwarden --auth-mode prompt
 ```
 
 | | |
@@ -83,8 +101,13 @@ cd vaulted-agent-launcher && sudo ./install.sh
 | Skip short alias `va` | `… \| bash -s -- --no-va` |
 | Skip agent auto-detect | `… \| bash -s -- --no-auto-harness` |
 | Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
+| Prompt each launch (no token file) | `… \| bash -s -- --backend bitwarden --auth-mode prompt` |
 | Shared host | `… \| bash -s -- --user agent --allow-user alice` |
 | Try without installing | `git clone … && ./demo/try-it.sh` |
+
+`curl … \| bash` can still prompt on a real terminal (answers are read from
+`/dev/tty`). In CI or non-TTY environments, pass `--backend` / `--auth-mode`
+explicitly.
 
 More flags, shared-host setup, and uninstall detail:
 [Install details](#install-details) · [Uninstall](#uninstall)
@@ -92,17 +115,19 @@ More flags, shared-host setup, and uninstall detail:
 ## How it works
 
 ```
-you $ vaulted-agent claude
+you $ va claude --resume <session-id>
       │
-      │  first argument selects the harness
+      │  first argument selects the harness; rest → agent
       ▼
-  /usr/local/bin/vaulted-agent
+  /usr/local/bin/vaulted-agent   (alias: va)
       │
-      ├─ sudo -u agent                    become the service account
+      ├─ optional sudo -u <service>       become the service account
+      ├─ cd workdir                       caller cwd by default (sessions / resume)
       ├─ scrub environment                allowlist only; nothing inherited rides along
-      ├─ op inject -i full.env.tpl        vault refs -> values, in memory
+      ├─ load vault auth                  op.env / bws.env, or prompt (auth_mode)
+      ├─ resolve manifest refs            op inject / bws secret get / …
       ├─ unset vault token                the agent must not inherit the master key
-      └─ exec claude --permission-mode auto
+      └─ exec claude … --resume <id>
              │
              └─ secrets live here, in this process, until it exits
 ```
@@ -210,8 +235,9 @@ config file you have edited. Useful flags:
 | `--no-auto-harness` | do not detect claude/codex/grok or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip` |
-| `--op-token-file PATH` | write OP_SERVICE_ACCOUNT_TOKEN from this file (not argv) |
-| `--bws-token-file PATH` | write BWS_ACCESS_TOKEN from this file |
+| `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
+| `--op-token-file PATH` | write OP_SERVICE_ACCOUNT_TOKEN from this file (not argv); ignored when `--auth-mode prompt` |
+| `--bws-token-file PATH` | write BWS_ACCESS_TOKEN from this file; ignored when `--auth-mode prompt` |
 | `--workdir DIR` | working directory; defaults to that account's home |
 
 | `--op-env FILE` | reuse a backend credential that already exists elsewhere |
@@ -389,10 +415,15 @@ command  = claude --permission-mode auto
 | `backend`  | `onepassword`, `bitwarden`, `sops`, `pass`, or `plainfile`          |
 | `manifest` | the secrets to load. **This is the blast radius.**                  |
 | `bin`      | prepended to `PATH` before exec; `$HOME` expands                    |
+| `workdir`  | agent cwd: unset → install default; `caller` → your shell’s directory (needed for `--resume` / project sessions); or an absolute/`$HOME` path |
 | `labels`   | map non-UUID `--resume`/`--session-id` values to a stable UUIDv5    |
 | `keep`     | extra variables surviving the environment scrub, comma separated    |
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
+
+See [Resume sessions](#resume-sessions) above for `va claude|codex|grok` resume
+examples. Native CLIs still differ without `va`: Claude/Grok use `--resume`;
+Codex uses the `resume` subcommand (`codex --resume` errors).
 
 Whitespace around the key, the `=`, and the value is ignored, so align them
 however you like. Your own arguments are appended after the configured ones.
@@ -444,11 +475,31 @@ Set per harness with `backend =`, or change `DEFAULT_BACKEND` in the launcher.
 
 | backend | manifest is | on-disk credential | resolves |
 |---|---|---|---|
-| `onepassword` | `VAR=op://vault/item/field` | `op.env` (`OP_SERVICE_ACCOUNT_TOKEN`) | whole file, one `op inject` |
-| `bitwarden` | `VAR=<secret-uuid>` | `bws.env` (`BWS_ACCESS_TOKEN`) | one `bws secret get` per line |
+| `onepassword` | `VAR=op://vault/item/field` | `op.env` (`OP_SERVICE_ACCOUNT_TOKEN`) when `auth_mode=file` | whole file, one `op inject` |
+| `bitwarden` | `VAR=<secret-uuid>` | `bws.env` (`BWS_ACCESS_TOKEN`) when `auth_mode=file` | one `bws secret get` per line |
 | `pass` | `VAR=store/entry/path` | the service account's GPG key | one `pass show` per line |
 | `sops` | a sops-encrypted dotenv | `age.key` | whole file, one `sops --decrypt` |
 | `plainfile` | a plain dotenv | the manifest itself | nothing to resolve |
+
+### Auth mode (`file` vs `prompt`)
+
+Machine-wide default lives in `/etc/vaulted-agent/defaults.conf` (`auth_mode = file|prompt`).
+
+| mode | meaning |
+|---|---|
+| `file` | load the vault token from `op.env` / `bws.env` (0640). No prompt when the file is present. |
+| `prompt` | always ask for the token on a TTY at launch; the launcher never writes it. |
+
+Set at install (interactive question, or `--auth-mode`), or later:
+
+```bash
+vaulted-agent auth-mode              # interactive (TTY) or print current
+vaulted-agent auth-mode prompt       # nothing on disk
+vaulted-agent auth-mode file         # use op.env / bws.env
+va claude -p                         # force prompt for this launch only
+```
+
+Precedence for a single launch: `-p` → `VAULTED_AGENT_PROMPT_AUTH=1` → `VAULTED_AGENT_AUTH_MODE` → `defaults.conf` → built-in `file`.
 
 The split that matters is not which vendor, it is **reference versus payload**.
 
@@ -473,9 +524,11 @@ its own rather than parsed out of a shared document.
 Adding a sixth backend is one `case` arm in `resolve`, which is also how you
 would swap in `vault`, `chamber`, `aws-vault`, or `gopass`.
 
-> The `bitwarden` arm is written against the documented `bws` CLI
-> (`bws secret get <id> --output json`, auth via `BWS_ACCESS_TOKEN`) and is
-> tested here against a stub, not a live Bitwarden vault. Corrections welcome.
+> **Bitwarden:** `BWS_ACCESS_TOKEN` must be a **Secrets Manager access token**
+> (Machine Accounts → Access Tokens), not your vault password or a login API
+> key. Wrong token types fail with errors such as “Doesn't contain a decryption
+> key.” List secret UUIDs with `bws secret list`. The arm is written against the
+> documented `bws` CLI (`bws secret get <id> --output json`).
 
 ## Making the manifest a real boundary
 

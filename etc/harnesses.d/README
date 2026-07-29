@@ -16,11 +16,23 @@ Recognised keys, all optional except command and manifest:
                sops         a sops-encrypted dotenv; the file IS the secrets
                plainfile    a plain dotenv; the file IS the secrets
   bin      = directory prepended to PATH before exec; $HOME expands
+  workdir  = directory for the agent process before exec:
+               (unset)  install WORKDIR (often the service account home)
+               caller   the directory where you typed `va …` (best for
+                        grok/claude --resume and project-scoped sessions)
+               /path or $HOME/…  an explicit directory
   labels   = yes|no. Map non-UUID --resume/--session-id values to a UUIDv5.
+             UUID-shaped --resume values are always passed through unchanged.
   keep     = extra environment variables surviving the scrub, comma separated.
   command  = the command line, split on whitespace
   arg      = one further argument, taken verbatim. Repeatable. Use this for
              any argument containing a space; `command` cannot express one.
+
+  Extra CLI args after the harness name go to the agent, e.g.
+    va grok --resume 019fabc1-…     |  va grok resume 019fabc1-…
+    va claude --resume b03ca221-…   |  va claude resume b03ca221-…
+    va codex resume 019fabc2-…      |  va codex --resume 019fabc2-…
+  Shape is normalized per agent: codex wants `resume`; claude/grok want `--resume`.
 
 Whitespace around the key, the `=`, and the value is ignored, so align them
 however you like. Lines beginning with # are comments. The files are parsed,
