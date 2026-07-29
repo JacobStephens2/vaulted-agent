@@ -9,23 +9,32 @@ the agent process at start - not into a pile of `.env` files.
 
 ## Usage
 
-Day to day you name the harness as the first argument. Each harness is a
-config file with its own command and secret manifest:
+Day to day you name the harness as the first argument:
 
 ```bash
-vaulted-agent claude          # Claude Code, full (or whatever) manifest
-vaulted-agent codex           # Codex, often a narrower manifest
-vaulted-agent grok            # Grok
-vaulted-agent pick            # interactive chooser
+vaulted-agent claude
+vaulted-agent codex
+vaulted-agent grok
+vaulted-agent pick
 ```
 
-Same binary under a short alias (installed by default):
+Same binary under the short alias (installed by default):
 
 ```bash
 va claude
 va codex
 va grok
 va pick
+```
+
+After a fresh install, if those CLIs were on your PATH, harnesses are
+auto-created with **no vault secrets** (`plainfile` + `empty.env`) so the agent
+still starts. Wire a vault when you are ready:
+
+```bash
+vaulted-agent setup                 # interactive token / backend help
+# or launch without anything on disk:
+va claude --prompt-auth             # prompts for OP_SERVICE_ACCOUNT_TOKEN once
 ```
 
 Extra args after the harness go to the agent:
@@ -35,19 +44,8 @@ vaulted-agent claude "fix the flaky test in auth"
 vaulted-agent codex --help
 ```
 
-List configured harnesses (no name, or a typo):
-
-```bash
-vaulted-agent
-```
-
-Uninstall (no git tree required after a one-liner install):
-
-```bash
-sudo vaulted-agent uninstall
-# or:  sudo va uninstall
-# also drop config:  sudo vaulted-agent uninstall --purge
-```
+List harnesses: `vaulted-agent`  
+Uninstall: `sudo vaulted-agent uninstall` (or `sudo va uninstall`)
 
 ## Install
 
@@ -57,37 +55,36 @@ sudo vaulted-agent uninstall
 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 ```
 
+The installer:
+
+1. Installs `vaulted-agent` and the `va` alias  
+2. Detects `claude` / `codex` / `grok` on your PATH and writes live harnesses  
+3. Optionally asks for a vault backend (1Password, Bitwarden, …) when a TTY is present  
+
+Then, if detection found your agents:
+
+```bash
+va claude
+va codex
+va grok
+```
+
 Or from a release tag:
 
 ```bash
-git clone --branch v0.1.3 --depth 1 \
+git clone --branch v0.2.0 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 ```
 
-Then put your vault token in `op.env` (path printed by the installer) and
-activate a harness:
-
-```bash
-# 1Password example - one credential on disk
-printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee op.env >/dev/null
-sudo chmod 0640 op.env
-
-# turn on a harness (drop the .example suffix)
-sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
-sudo cp harnesses.d/codex.conf.example  harnesses.d/codex.conf
-
-vaulted-agent claude
-vaulted-agent codex
-```
-
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.1.3 curl -fsSL …/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.2.0 curl -fsSL …/install.sh \| bash` |
 | Skip short alias `va` | `… \| bash -s -- --no-va` |
-| Shared host / dedicated account | `… \| bash -s -- --user agent --allow-user alice` |
-| Prefer not to pipe | download `install.sh`, read it, then `bash install.sh` |
-| Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault) |
+| Skip agent auto-detect | `… \| bash -s -- --no-auto-harness` |
+| Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
+| Shared host | `… \| bash -s -- --user agent --allow-user alice` |
+| Try without installing | `git clone … && ./demo/try-it.sh` |
 
 More flags, shared-host setup, and uninstall detail:
 [Install details](#install-details) · [Uninstall](#uninstall)
@@ -114,7 +111,7 @@ you $ vaulted-agent claude
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.1.3](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.1.3)
+Latest: [v0.2.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.2.0)
 
 ## The honest claim
 
@@ -210,7 +207,13 @@ config file you have edited. Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
+| `--no-auto-harness` | do not detect claude/codex/grok or write live harnesses |
+| `--no-setup` | skip interactive vault backend questions |
+| `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip` |
+| `--op-token-file PATH` | write OP_SERVICE_ACCOUNT_TOKEN from this file (not argv) |
+| `--bws-token-file PATH` | write BWS_ACCESS_TOKEN from this file |
 | `--workdir DIR` | working directory; defaults to that account's home |
+
 | `--op-env FILE` | reuse a backend credential that already exists elsewhere |
 | `--links a,b,c` | also create `a-conductor`, `b-conductor`, … symlinks |
 | `--allow-user NAME` | write a sudoers rule letting NAME launch any harness |

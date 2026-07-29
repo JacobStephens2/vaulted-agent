@@ -123,8 +123,10 @@ usage() {
   printf 'usage: %s <harness> [args...]\n' "$LAUNCHER_NAME" >&2
   printf '       %s <harness> [args...]             short alias\n' "$SHORT_NAME" >&2
   printf '       %s|%s pick [args...]    choose one interactively\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s setup             configure vault backend / token\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s uninstall [opts]  remove this install (needs root)\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       <harness>%s [args...]\n\n' "$LINK_SUFFIX" >&2
+  printf 'launcher flags:  --prompt-auth|-p   prompt for vault token (not written to disk)\n' >&2
   printf 'uninstall options: --purge  --dry-run  -y|--yes  --link-user NAME\n\n' >&2
   printf 'harnesses in %s:\n' "$HARNESS_DIR" >&2
   if compgen -G "$HARNESS_DIR/*.conf" >/dev/null 2>&1; then
@@ -312,6 +314,68 @@ do_uninstall() {
   exit 0
 }
 
+# Interactive vault token / backend help. Reserved name unless setup.conf exists.
+do_setup() {
+  local choice token path grp
+  grp="$(id -gn 2>/dev/null || true)"
+  printf 'vaulted-agent setup\n\n'
+  printf 'Configure a vault backend credential for this machine.\n'
+  printf 'Auto-harnesses start as plainfile+empty.env; change their backend/manifest\n'
+  printf 'after this if you want vault injection.\n\n'
+  printf '  1) 1Password  (writes op.env with OP_SERVICE_ACCOUNT_TOKEN)\n'
+  printf '  2) Bitwarden  (writes bws.env with BWS_ACCESS_TOKEN)\n'
+  printf '  3) Show pass / sops notes only\n'
+  printf '  q) Quit\n\n'
+  printf 'choice: '
+  [[ -r /dev/tty ]] || die "setup needs a terminal"
+  read -r choice < /dev/tty || exit 130
+  case "$choice" in
+    1|onepassword|op)
+      path="$OP_ENV_FILE"
+      printf 'OP_SERVICE_ACCOUNT_TOKEN (hidden, not echoed): '
+      read -rs token < /dev/tty || token=""
+      printf '\n'
+      [[ -n "$token" ]] || die "empty token"
+      if [[ "$(id -u)" -ne 0 ]]; then
+        printf '%s=%s\n' OP_SERVICE_ACCOUNT_TOKEN "$token" | sudo tee "$path" >/dev/null
+        sudo chmod 0640 "$path"
+        sudo chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
+      else
+        printf '%s=%s\n' OP_SERVICE_ACCOUNT_TOKEN "$token" > "$path"
+        chmod 0640 "$path"
+        chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
+      fi
+      printf 'wrote %s\n' "$path"
+      printf 'Next: set backend=onepassword and a real manifest on each harness.\n'
+      ;;
+    2|bitwarden|bws)
+      path="$BWS_ENV_FILE"
+      printf 'BWS_ACCESS_TOKEN (hidden, not echoed): '
+      read -rs token < /dev/tty || token=""
+      printf '\n'
+      [[ -n "$token" ]] || die "empty token"
+      if [[ "$(id -u)" -ne 0 ]]; then
+        printf '%s=%s\n' BWS_ACCESS_TOKEN "$token" | sudo tee "$path" >/dev/null
+        sudo chmod 0640 "$path"
+        sudo chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
+      else
+        printf '%s=%s\n' BWS_ACCESS_TOKEN "$token" > "$path"
+        chmod 0640 "$path"
+        chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
+      fi
+      printf 'wrote %s\n' "$path"
+      printf 'Next: set backend=bitwarden and UUID refs in the harness manifest.\n'
+      ;;
+    3)
+      printf 'pass: service account needs GPG + `pass show`; backend=pass, VAR=store/path\n'
+      printf 'sops: age identity at %s (0600); backend=sops, encrypted dotenv manifest\n' \
+        "$AGE_KEY_FILE"
+      ;;
+    q|Q) printf 'Nothing changed.\n' ;;
+    *) die "unknown choice" ;;
+  esac
+}
+
 # --- Reserved: uninstall (must run as root, never as the agent user) --------
 if is_primary_cmd "$invoked" \
    && { [[ "${1-}" == "uninstall" ]] || [[ "${1-}" == "--uninstall" ]]; }; then
@@ -334,14 +398,17 @@ if is_primary_cmd "$invoked" \
   do_uninstall ${1+"$@"}
 fi
 
-# --- Pull -H/--harness out of the argument list ----------------------------
+# --- Pull launcher flags out of the argument list --------------------------
 # Everything not consumed here is passed through to the agent untouched.
 harness_flag=""
+PROMPT_AUTH=0
+[[ "${VAULTED_AGENT_PROMPT_AUTH:-}" == "1" ]] && PROMPT_AUTH=1
 args=()
 while (( $# )); do
   case "$1" in
     -H|--harness) (( $# >= 2 )) || die "-H requires a value"; harness_flag="$2"; shift 2 ;;
     --harness=*)  harness_flag="${1#*=}"; shift ;;
+    -p|--prompt-auth) PROMPT_AUTH=1; shift ;;
     --)           args+=("$@"); break ;;
     *)            args+=("$1"); shift ;;
   esac
@@ -376,6 +443,11 @@ if is_primary_cmd "$invoked"; then
   fi
   if [[ "$HARNESS" == "uninstall" && ! -e "$HARNESS_DIR/uninstall.conf" ]]; then
     die "internal error: uninstall should have been handled earlier"
+  fi
+  # setup: interactive vault backend help (does not need the agent hop).
+  if [[ "$HARNESS" == "setup" && ! -e "$HARNESS_DIR/setup.conf" ]]; then
+    do_setup
+    exit 0
   fi
   # Keep the invoked name (va or vaulted-agent) so sudoers can grant either path.
   launcher_path="${LAUNCHER_BIN_DIR}/${invoked}"
@@ -524,13 +596,44 @@ export_stream() {
   done
 }
 
+# Load backend auth from a disk file, or prompt on a TTY when --prompt-auth /
+# VAULTED_AGENT_PROMPT_AUTH=1 is set (token never written by the launcher).
 load_auth() {                                # $1 = file, $2 = variable it must set
-  [[ -r "$1" ]] || die "backend '$backend' needs $1 (is this the service account?)"
-  set -a
-  # shellcheck source=/dev/null
-  . "$1"
-  set +a
-  [[ -n "${!2-}" ]] || die "$1 does not define $2"
+  local file="$1" var="$2" token=""
+  # Already present in the environment (e.g. caller exported before launch).
+  if [[ -n "${!var-}" ]]; then return 0; fi
+
+  if (( PROMPT_AUTH )); then
+    [[ -r /dev/tty ]] || die "--prompt-auth needs a terminal (or export $var)"
+    printf '%s (not written to disk): ' "$var" >/dev/tty
+    read -rs token < /dev/tty || token=""
+    printf '\n' >/dev/tty
+    [[ -n "$token" ]] || die "empty $var"
+    export "$var=$token"
+    return 0
+  fi
+
+  if [[ -r "$file" ]]; then
+    set -a
+    # shellcheck source=/dev/null
+    . "$file"
+    set +a
+    [[ -n "${!var-}" ]] || die "$file does not define $var"
+    return 0
+  fi
+
+  # No file and not forced prompt: offer a one-shot prompt when a TTY is present.
+  if [[ -r /dev/tty ]]; then
+    printf 'vaulted-agent: %s missing %s\n' "$backend" "$file" >/dev/tty
+    printf '  enter %s for this launch only (empty to abort): ' "$var" >/dev/tty
+    read -rs token < /dev/tty || token=""
+    printf '\n' >/dev/tty
+    [[ -n "$token" ]] || die "backend '$backend' needs $file (or --prompt-auth / export $var)"
+    export "$var=$token"
+    return 0
+  fi
+
+  die "backend '$backend' needs $file (is this the service account?). Or: --prompt-auth"
 }
 
 auth_vars=()

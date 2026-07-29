@@ -37,7 +37,12 @@ ALLOW_USER=""                    # write a sudoers rule for this user
 LINK_USER=""                     # symlink into this user's ~/.local/bin
 NO_LINK=0                        # skip the default ~/.local/bin symlink
 NO_VA=0                          # skip the short `va` alias symlink
+NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok
+NO_SETUP=0                       # skip interactive vault backend questions
 SHORT_NAME="va"                  # short alias for vaulted-agent
+BACKEND_CHOICE=""                # onepassword|bitwarden|pass|sops|plainfile|skip
+OP_TOKEN_FILE=""                 # optional path to service-account token (never on argv)
+BWS_TOKEN_FILE=""
 USER_EXPLICIT=0
 FORCE=0
 DRY=0
@@ -107,10 +112,15 @@ while (( $# )); do
     --uninstall)  UNINSTALL=1; shift ;;
     --purge)      PURGE=1; shift ;;
     -y|--yes)     ASSUME_YES=1; shift ;;
-    --no-link)    NO_LINK=1; shift ;;
-    --no-va)      NO_VA=1; shift ;;
-    -h|--help)    sed -n "2,20p" "$0"; exit 0 ;;
-    *)            die "unknown option '$1'" ;;
+    --no-link)         NO_LINK=1; shift ;;
+    --no-va)           NO_VA=1; shift ;;
+    --no-auto-harness) NO_AUTO_HARNESS=1; shift ;;
+    --no-setup)        NO_SETUP=1; shift ;;
+    --backend)         BACKEND_CHOICE="${2:?}"; shift 2 ;;
+    --op-token-file)   OP_TOKEN_FILE="${2:?}"; shift 2 ;;
+    --bws-token-file)  BWS_TOKEN_FILE="${2:?}"; shift 2 ;;
+    -h|--help)         sed -n "2,25p" "$0"; exit 0 ;;
+    *)                 die "unknown option '$1'" ;;
   esac
 done
 
@@ -339,11 +349,14 @@ run install -d -m 0755 "$CONFIG" "$CONFIG/harnesses.d" "$CONFIG/manifests"
 # exist on your machine, so installing them as live config would leave a fresh
 # install listing several harnesses that all fail at injection. Copy one and
 # drop the suffix to activate it.
+# Exception: empty.env is installed live - auto-harnesses need a zero-secret
+# day-one manifest so `va claude` can launch before vault wiring.
 for src in "$REPO"/etc/harnesses.d/* "$REPO"/etc/manifests/*; do
   base="${src#"$REPO"/etc/}"
   case "$base" in
-    */README) dst="$CONFIG/$base" ;;
-    *)        dst="$CONFIG/${base}.example" ;;
+    */README)            dst="$CONFIG/$base" ;;
+    manifests/empty.env) dst="$CONFIG/$base" ;;
+    *)                   dst="$CONFIG/${base}.example" ;;
   esac
   if [[ -e "$dst" ]]; then
     printf 'kept existing %s\n' "$dst"
@@ -352,6 +365,194 @@ for src in "$REPO"/etc/harnesses.d/* "$REPO"/etc/manifests/*; do
     printf 'installed %s\n' "$dst"
   fi
 done
+
+# --- auto-detect agent CLIs and activate harnesses ------------------------
+# Prefer the invoking user's PATH (not root's) when install runs under sudo.
+find_user_bin() {
+  local name="$1" p home
+  if [[ -n "${SUDO_USER:-}" ]] && command -v sudo >/dev/null 2>&1; then
+    p="$(sudo -nu "$SUDO_USER" -- command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+    home="$(user_home "$SUDO_USER" 2>/dev/null || true)"
+  else
+    p="$(command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+    home="${HOME:-}"
+  fi
+  for d in \
+    ${home:+"$home/.local/bin"} \
+    ${home:+"$home/.grok/bin"} \
+    /opt/homebrew/bin \
+    /usr/local/bin
+  do
+    if [[ -x "$d/$name" ]]; then printf '%s\n' "$d/$name"; return 0; fi
+  done
+  return 1
+}
+
+write_auto_harness() {
+  local name="$1" path="$2" cmd="$3" bindir conf
+  conf="$CONFIG/harnesses.d/${name}.conf"
+  bindir="$(dirname -- "$path")"
+  if [[ -e "$conf" ]]; then
+    printf '  %-8s kept existing %s\n' "$name" "$conf"
+    return 0
+  fi
+  if (( DRY )); then
+    printf '  %-8s would write %s  (bin=%s command=%s)\n' "$name" "$conf" "$bindir" "$cmd"
+    return 0
+  fi
+  cat > "$conf" <<EOF
+# Auto-configured by install.sh — detected $path
+# Day-one: plainfile + empty.env so the agent launches with no vault secrets.
+# To inject secrets: set backend + manifest (see README), or run:
+#   vaulted-agent setup
+backend  = plainfile
+manifest = empty.env
+bin      = $bindir
+command  = $cmd
+EOF
+  chmod 0644 "$conf"
+  printf '  %-8s wrote %s  (%s)\n' "$name" "$conf" "$path"
+}
+
+if (( ! NO_AUTO_HARNESS )); then
+  printf '\nDetecting agent CLIs on PATH…\n'
+  found_any=0
+  if p="$(find_user_bin claude)"; then
+    write_auto_harness claude "$p" "claude --permission-mode auto"
+    found_any=1
+  else
+    printf '  %-8s not found (skipped)\n' claude
+  fi
+  if p="$(find_user_bin codex)"; then
+    write_auto_harness codex "$p" "codex"
+    found_any=1
+  else
+    printf '  %-8s not found (skipped)\n' codex
+  fi
+  if p="$(find_user_bin grok)"; then
+    write_auto_harness grok "$p" "grok"
+    found_any=1
+  else
+    printf '  %-8s not found (skipped)\n' grok
+  fi
+  if (( found_any )); then
+    printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
+    printf '  Try:  va claude   /   va codex   /   va grok\n'
+  else
+    printf '  No claude/codex/grok found. Install an agent CLI, then re-run install\n'
+    printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
+  fi
+  unset found_any p
+else
+  printf '\nskipped agent auto-detect (--no-auto-harness)\n'
+fi
+
+# --- optional interactive vault backend setup -----------------------------
+write_token_file() {
+  # $1=path $2=varname $3=token-value  → 0640 root:SERVICE_USER
+  local path="$1" var="$2" token="$3" grp
+  grp="$(id -gn "$SERVICE_USER" 2>/dev/null || echo "$SERVICE_USER")"
+  if (( DRY )); then
+    printf '  would write %s (%s=…)\n' "$path" "$var"
+    return 0
+  fi
+  printf '%s=%s\n' "$var" "$token" > "$path"
+  chown "root:$grp" "$path" 2>/dev/null || chown "root:$SERVICE_USER" "$path" 2>/dev/null || true
+  chmod 0640 "$path"
+  printf '  wrote %s (0640)\n' "$path"
+}
+
+prompt_backend_setup() {
+  local choice token path
+  choice="$BACKEND_CHOICE"
+  if [[ -z "$choice" ]] && (( ! ASSUME_YES )) && (( ! NO_SETUP )) \
+     && (( ! DRY )) && [[ -t 0 && -t 1 && -r /dev/tty ]]; then
+    printf '\nDefault secret backend for this machine?\n'
+    printf '  1) 1Password service account  (op inject)\n'
+    printf '  2) Bitwarden Secrets Manager  (bws)\n'
+    printf '  3) pass (passwordstore.org)\n'
+    printf '  4) sops + age\n'
+    printf '  5) Skip — keep plainfile/empty (agents launch with no vault secrets)\n'
+    printf 'choice [1-5, default 5]: '
+    read -r choice < /dev/tty || choice=5
+    case "$choice" in
+      1|onepassword|op) choice=onepassword ;;
+      2|bitwarden|bws)  choice=bitwarden ;;
+      3|pass)           choice=pass ;;
+      4|sops)           choice=sops ;;
+      5|''|skip|plainfile|none) choice=skip ;;
+      *) printf '  unknown choice; skipping vault setup\n'; choice=skip ;;
+    esac
+  elif [[ -z "$choice" ]]; then
+    choice=skip
+  fi
+
+  case "$choice" in
+    onepassword|op)
+      path="${OP_ENV:-$CONFIG/op.env}"
+      if [[ -n "$OP_TOKEN_FILE" && -r "$OP_TOKEN_FILE" ]]; then
+        token="$(tr -d '\n' < "$OP_TOKEN_FILE")"
+      elif [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+        token="$OP_SERVICE_ACCOUNT_TOKEN"
+      elif (( ! ASSUME_YES )) && [[ -t 0 && -r /dev/tty ]]; then
+        printf 'OP_SERVICE_ACCOUNT_TOKEN (input hidden, empty to skip): '
+        read -rs token < /dev/tty || token=""
+        printf '\n'
+      else
+        token=""
+      fi
+      if [[ -n "$token" ]]; then
+        write_token_file "$path" OP_SERVICE_ACCOUNT_TOKEN "$token"
+        printf '  backend ready: onepassword  (set backend=onepassword and a real manifest on harnesses)\n'
+      else
+        printf '  no token provided; left plainfile/empty harnesses as-is\n'
+        printf '  later: write %s or run vaulted-agent setup\n' "$path"
+      fi
+      ;;
+    bitwarden|bws)
+      path="${CONFIG}/bws.env"
+      if [[ -n "$BWS_TOKEN_FILE" && -r "$BWS_TOKEN_FILE" ]]; then
+        token="$(tr -d '\n' < "$BWS_TOKEN_FILE")"
+      elif [[ -n "${BWS_ACCESS_TOKEN:-}" ]]; then
+        token="$BWS_ACCESS_TOKEN"
+      elif (( ! ASSUME_YES )) && [[ -t 0 && -r /dev/tty ]]; then
+        printf 'BWS_ACCESS_TOKEN (input hidden, empty to skip): '
+        read -rs token < /dev/tty || token=""
+        printf '\n'
+      else
+        token=""
+      fi
+      if [[ -n "$token" ]]; then
+        write_token_file "$path" BWS_ACCESS_TOKEN "$token"
+        printf '  backend ready: bitwarden  (set backend=bitwarden + UUID manifest on harnesses)\n'
+      else
+        printf '  no token provided; left plainfile/empty harnesses as-is\n'
+      fi
+      ;;
+    pass)
+      printf '  pass: ensure the service account can run `pass show` (GPG key).\n'
+      printf '  Set backend=pass and VAR=store/path lines in each harness manifest.\n'
+      ;;
+    sops)
+      printf '  sops: place an age identity at %s/age.key (0600) and set backend=sops.\n' "$CONFIG"
+      ;;
+    skip|plainfile|none|'')
+      printf '\nVault setup skipped. Agents launch with empty.env until you configure a backend.\n'
+      printf '  Interactive later:  vaulted-agent setup\n'
+      ;;
+    *)
+      printf '  unknown --backend %s; skipping\n' "$choice"
+      ;;
+  esac
+}
+
+if (( ! NO_SETUP )); then
+  prompt_backend_setup
+else
+  printf '\nskipped vault setup prompts (--no-setup)\n'
+fi
 
 # --- optional per-harness symlinks -----------------------------------------
 if [[ -n "$LINKS" ]]; then
