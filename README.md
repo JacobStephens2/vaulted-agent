@@ -100,8 +100,13 @@ launch (`bws secret get`). So:
 | You did in Bitwarden SM | What to run |
 |---|---|
 | Rotated a secret’s **value** | Nothing - next `va claude` / `va run` gets the new value |
-| **Added** a new secret you want in a harness | `va refresh openai.env.refs` (or edit the refs file by hand) |
-| Removed a secret from a harness | Edit the refs file (or refresh and re-pick) |
+| **Added** a new secret you want in a harness | `va refresh openai.env.refs` (merge: keeps existing lines, appends new) |
+| Rebuild the refs file from scratch | `va refresh openai.env.refs --replace --all` |
+| Removed a secret from a harness | Edit the refs file by hand (or `--replace` and re-pick) |
+
+`va refresh` is the same refs-file writer as `va setup`, for **after** setup.
+Default when the file already exists is **merge** (append unmapped secrets).
+Use `--replace` to rewrite the whole file like first-time setup.
 
 Bitwarden refs accept `UUID`, `uuid:UUID`, `name:KEY`, or `project:PROJECT/KEY`.
 Placeholder values (`REPLACE_…`, all-zero UUIDs, …) fail validation before
@@ -642,11 +647,13 @@ at it with `backend = bitwarden` and `manifest = openai.env.refs`, or:
 va run -m openai.env.refs --backend bitwarden -p -- your-command
 ```
 
-When you **add** secrets in Secrets Manager later:
+When you **add** secrets in Secrets Manager later (same process as setup’s
+refs builder, on an existing file):
 
 ```bash
-va refresh openai.env.refs          # pick which to include
-va refresh openai.env.refs --all    # every secret the token can see
+va refresh openai.env.refs              # merge: show what’s new, append picks
+va refresh openai.env.refs --all        # append every not-yet-mapped secret
+va refresh openai.env.refs --replace --all   # rewrite file from scratch
 ```
 
 Rotating a secret’s **value** in SM needs no refresh - the next launch fetches
