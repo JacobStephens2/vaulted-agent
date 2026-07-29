@@ -423,3 +423,6 @@ printf 'copy a harness into place:\n'
 printf '  cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
 printf 'then run:  vaulted-agent\n'
 printf '  (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
+printf '\nTo remove this install later:\n'
+printf '  sudo vaulted-agent uninstall\n'
+printf '  sudo vaulted-agent uninstall --purge   # also remove config\n'

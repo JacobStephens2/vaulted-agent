@@ -40,7 +40,7 @@ curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 **From GitHub** — clone a release tag and run the real installer yourself:
 
 ```bash
-git clone --branch v0.1.1 --depth 1 \
+git clone --branch v0.1.2 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 ```
@@ -61,7 +61,8 @@ sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
 
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.1.1 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.1.2 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
+| Uninstall | `sudo vaulted-agent uninstall` (or `--purge` to drop config too) |
 | Pass install flags | `curl -fsSL … \| bash -s -- --user agent --allow-user alice` |
 | Prefer not to pipe | `curl -fsSL -o install.sh https://stephens.page/vaulted-agent/install.sh && less install.sh && bash install.sh` |
 | Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault) |
@@ -269,6 +270,21 @@ boundary above it decorative.
 
 ## Uninstall
 
+If you installed with the one-liner (or any path that left `vaulted-agent` on
+your PATH), remove it the same way you run agents:
+
+```bash
+sudo vaulted-agent uninstall              # interactive; keeps config
+sudo vaulted-agent uninstall --purge      # also remove config
+sudo vaulted-agent uninstall --dry-run    # show the plan only
+sudo vaulted-agent uninstall --yes        # no prompts (scripts/cron)
+```
+
+That works after a `curl | bash` install because uninstall lives **in the
+installed binary** - you do not need the git tree anymore.
+
+From a checkout of this repo you can still use the older front door:
+
 ```console
 $ sudo ./uninstall.sh
 
@@ -288,18 +304,8 @@ choice [1-3, q]:
 ```
 
 It prompts when a terminal is present, then lists the exact paths and asks
-once more before deleting anything. For scripts and cron:
-
-```bash
-sudo ./uninstall.sh --dry-run     # print the plan, change nothing, never prompts
-sudo ./uninstall.sh --yes         # no prompts
-sudo ./uninstall.sh --yes --purge # no prompts, config removed too
-```
-
-`uninstall.sh` is a four-line front door onto `install.sh --uninstall`; both
-spellings work. It is a wrapper rather than a second script because removal
-has to agree with installation about which files are "ours", and two copies of
-that rule would drift.
+once more before deleting anything. `uninstall.sh` forwards to
+`install.sh --uninstall` for the same discovery rules.
 
 It removes a symlink only when that link resolves to the launcher it is
 uninstalling, and reports anything else at those paths as "left alone (not
