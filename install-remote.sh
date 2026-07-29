@@ -13,7 +13,7 @@
 #
 # Pin a version (recommended for shared hosts / repeatable deploys):
 #
-#   VAULTED_AGENT_VERSION=v0.1.2 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+#   VAULTED_AGENT_VERSION=v0.1.3 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 #
 # Pass flags through to install.sh after --:
 #
@@ -33,7 +33,7 @@ set -euo pipefail
 REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent-launcher}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # Bump this when cutting a release so unpinned one-liners stay intentional.
-DEFAULT_VERSION="v0.1.2"
+DEFAULT_VERSION="v0.1.3"
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"

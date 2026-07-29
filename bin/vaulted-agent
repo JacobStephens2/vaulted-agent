@@ -13,6 +13,7 @@
 # Ways to invoke it:
 #
 #   vaulted-agent codex [args...]     harness as the first argument
+#   va codex [args...]                short alias (same binary)
 #   codex-conductor [args...]         harness from a per-harness symlink
 #   vaulted-agent pick [args...]      interactive harness chooser
 #   vaulted-agent uninstall [...]     remove what install.sh installed
@@ -46,6 +47,7 @@ OP_ENV_FILE="${CONFIG_DIR}/op.env"          # OP_SERVICE_ACCOUNT_TOKEN
 BWS_ENV_FILE="${CONFIG_DIR}/bws.env"        # BWS_ACCESS_TOKEN
 AGE_KEY_FILE="${CONFIG_DIR}/age.key"        # age identity for sops
 LAUNCHER_NAME="vaulted-agent"
+SHORT_NAME="va"                             # optional short alias installed as a symlink
 LINK_SUFFIX="-conductor"                    # claude-conductor -> harness "claude"
 LABEL_NAMESPACE="vaulted-agent"              # UUIDv5 namespace for session labels
 
@@ -67,6 +69,11 @@ trim() {
 
 invoked="${0##*/}"
 orig=( ${1+"$@"} )               # exact argv, replayed verbatim across the sudo hop
+
+# Primary entrypoints (full name and short alias). Not harness-conductor links.
+is_primary_cmd() {
+  [[ "$1" == "$LAUNCHER_NAME" || "$1" == "$SHORT_NAME" ]]
+}
 
 # Read the harness names, plus a one-line summary of each, out of harnesses.d.
 # Fills the parallel arrays HNAMES / HCMDS / HMANIFESTS.
@@ -114,8 +121,9 @@ pick_harness() {
 usage() {
   local f name cmdline
   printf 'usage: %s <harness> [args...]\n' "$LAUNCHER_NAME" >&2
-  printf '       %s pick [args...]      choose one interactively\n' "$LAUNCHER_NAME" >&2
-  printf '       %s uninstall [opts]    remove this install (needs root)\n' "$LAUNCHER_NAME" >&2
+  printf '       %s <harness> [args...]             short alias\n' "$SHORT_NAME" >&2
+  printf '       %s|%s pick [args...]    choose one interactively\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s uninstall [opts]  remove this install (needs root)\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       <harness>%s [args...]\n\n' "$LINK_SUFFIX" >&2
   printf 'uninstall options: --purge  --dry-run  -y|--yes  --link-user NAME\n\n' >&2
   printf 'harnesses in %s:\n' "$HARNESS_DIR" >&2
@@ -202,27 +210,32 @@ do_uninstall() {
 
   targets=(); foreign=(); seen_users=" "
 
+  # Collect a path if it is ours (symlink to launcher), or note it as foreign.
+  consider() {
+    local p="$1"
+    if [[ -L "$p" && "$(resolve_path "$p")" == "$launcher" ]]; then
+      targets+=("$p")
+    elif [[ -e "$p" || -L "$p" ]]; then
+      foreign+=("$p")
+    fi
+  }
+
   shopt -s nullglob
   for f in "$PREFIX"/*-conductor; do
-    if [[ -L "$f" && "$(resolve_path "$f")" == "$launcher" ]]; then
-      targets+=("$f")
-    elif [[ -e "$f" || -L "$f" ]]; then
-      foreign+=("$f")
-    fi
+    consider "$f"
   done
   shopt -u nullglob
+
+  # Short alias next to the launcher (default install creates this).
+  consider "$PREFIX/$SHORT_NAME"
 
   for u in ${LINK_USER:+"$LINK_USER"} ${SUDO_USER:+"$SUDO_USER"}; do
     if [[ "$seen_users" == *" $u "* ]]; then continue; fi
     seen_users="$seen_users$u "
     uh="$(user_home "$u" 2>/dev/null || true)"
     if [[ -z "$uh" ]]; then continue; fi
-    ul="$uh/.local/bin/vaulted-agent"
-    if [[ -L "$ul" && "$(resolve_path "$ul")" == "$launcher" ]]; then
-      targets+=("$ul")
-    elif [[ -e "$ul" || -L "$ul" ]]; then
-      foreign+=("$ul")
-    fi
+    consider "$uh/.local/bin/vaulted-agent"
+    consider "$uh/.local/bin/$SHORT_NAME"
   done
 
   if [[ -e "$launcher" ]]; then targets+=("$launcher"); fi
@@ -300,7 +313,7 @@ do_uninstall() {
 }
 
 # --- Reserved: uninstall (must run as root, never as the agent user) --------
-if [[ "$invoked" == "$LAUNCHER_NAME" ]] \
+if is_primary_cmd "$invoked" \
    && { [[ "${1-}" == "uninstall" ]] || [[ "${1-}" == "--uninstall" ]]; }; then
   shift
   # --help must not require root / sudo password.
@@ -311,6 +324,7 @@ if [[ "$invoked" == "$LAUNCHER_NAME" ]] \
   if [[ "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
       # Preserve SUDO_USER so home-link cleanup finds the invoker.
+      # Re-exec via the long name so a missing short alias still uninstalls.
       exec sudo env \
         "SUDO_USER=${SUDO_USER:-$(id -un)}" \
         "${LAUNCHER_BIN_DIR}/${LAUNCHER_NAME}" uninstall ${1+"$@"}
@@ -339,8 +353,9 @@ set -- ${args[@]+"${args[@]}"}
 # name, and is deliberately NOT `readlink -f "$0"`. The reflex to resolve the
 # symlink is wrong here: sudoers grants are written per-path, one line per
 # harness symlink, and resolving through to vaulted-agent would miss all of them.
-if [[ "$invoked" == "$LAUNCHER_NAME" ]]; then
-  # `vaulted-agent codex ...`: the first argument, if it is not an option.
+if is_primary_cmd "$invoked"; then
+  # `vaulted-agent codex ...` or `va codex ...`: first arg is the harness
+  # when it is not an option.
   positional=""
   if (( $# )) && [[ "$1" != -* ]]; then positional="$1"; shift; fi
   # Refusing both at once closes the escape that would otherwise defeat a
@@ -362,14 +377,15 @@ if [[ "$invoked" == "$LAUNCHER_NAME" ]]; then
   if [[ "$HARNESS" == "uninstall" && ! -e "$HARNESS_DIR/uninstall.conf" ]]; then
     die "internal error: uninstall should have been handled earlier"
   fi
-  launcher_path="${LAUNCHER_BIN_DIR}/${LAUNCHER_NAME}"
+  # Keep the invoked name (va or vaulted-agent) so sudoers can grant either path.
+  launcher_path="${LAUNCHER_BIN_DIR}/${invoked}"
 else
   # A harness symlink was invoked, so the link name decides the harness and
   # -H is refused. Honouring -H here would let a caller who is entitled to a
   # narrow harness borrow a wider harness's manifest just by passing a flag.
   [[ -z "$harness_flag" ]] || die "-H is not accepted when invoked as '$invoked'"
   HARNESS="${invoked%"$LINK_SUFFIX"}"
-  [[ "$HARNESS" != "$invoked" ]] || die "symlink '$invoked' does not end in '$LINK_SUFFIX'"
+  [[ "$HARNESS" != "$invoked" ]] || die "symlink '$invoked' does not end in '$LINK_SUFFIX' (and is not '$LAUNCHER_NAME' or '$SHORT_NAME')"
   launcher_path="${LAUNCHER_BIN_DIR}/${invoked}"
 fi
 

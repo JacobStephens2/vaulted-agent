@@ -11,12 +11,16 @@ blast radii.
 **Thesis:** treat the agent as the unit of authorization. Manifests are
 blast-radius control, not containment.
 
+Daily use is short: `va claude` (alias of `vaulted-agent`). Install creates
+both names by default.
+
 | | |
 |---|---|
 | Platforms | **macOS** and **Linux** (including stock macOS `/bin/bash` 3.2). Not Windows natively (use WSL). |
+| Commands | `vaulted-agent` and short alias **`va`** |
 | Product page | [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent) |
 | Writeup | [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) |
-| Latest | [v0.1.2](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.1.2) |
+| Latest | [v0.1.3](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.1.3) |
 
 ```
 you $ vaulted-agent claude
@@ -48,15 +52,29 @@ curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 installer yourself:
 
 ```bash
-git clone --branch v0.1.2 --depth 1 \
+git clone --branch v0.1.3 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 ```
+
+After install you can use either name:
+
+```bash
+vaulted-agent claude
+va claude                 # same binary; default short alias
+va pick
+sudo va uninstall
+```
+
+Skip the short name with `sudo ./install.sh --no-va` (or pass `--no-va` through
+the one-liner: `… | bash -s -- --no-va`). If `va` already exists and is not
+ours, install refuses to overwrite unless you pass `--force`.
 
 **Uninstall** (after either path; no git tree required):
 
 ```bash
 sudo vaulted-agent uninstall
+# or:  sudo va uninstall
 # also remove config:  sudo vaulted-agent uninstall --purge
 ```
 
@@ -76,8 +94,9 @@ sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
 
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.1.2 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.1.3 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
 | Pass install flags | `curl -fsSL … \| bash -s -- --user agent --allow-user alice` |
+| Skip short alias | `… \| bash -s -- --no-va` |
 | Prefer not to pipe | `curl -fsSL -o install.sh https://stephens.page/vaulted-agent/install.sh && less install.sh && bash install.sh` |
 | Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault; macOS and Linux) |
 
@@ -177,11 +196,13 @@ config file you have edited. Useful flags:
 |---|---|
 | `--user NAME` | the service account to run agents as; defaults to you |
 | `--no-link` | skip the default `~/.local/bin` symlink |
+| `--no-va` | skip the short `va` alias (default is to install it) |
 | `--workdir DIR` | working directory; defaults to that account's home |
 | `--op-env FILE` | reuse a backend credential that already exists elsewhere |
 | `--links a,b,c` | also create `a-conductor`, `b-conductor`, … symlinks |
 | `--allow-user NAME` | write a sudoers rule letting NAME launch any harness |
 | `--link-user NAME` | symlink into NAME's `~/.local/bin`, so the command is on their PATH |
+| `--force` | replace a pre-existing path that is not our symlink |
 | `--dry-run` | print what it would do |
 
 If a symlink path is already taken by something that is not ours, it stops

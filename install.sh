@@ -10,6 +10,7 @@
 #
 #   sudo ./install.sh                          installs for you, no setup needed
 #   sudo ./install.sh --user agent             dedicated account (shared hosts)
+#   sudo ./install.sh --no-va                  skip the short `va` alias
 #   ./install.sh --user conductor --workdir /srv/orchestration --link-user alice \
 #                --op-env /etc/orchestration/op.env --allow-user alice
 #
@@ -35,6 +36,8 @@ LINKS=""                         # e.g. claude,codex,grok -> claude-conductor, .
 ALLOW_USER=""                    # write a sudoers rule for this user
 LINK_USER=""                     # symlink into this user's ~/.local/bin
 NO_LINK=0                        # skip the default ~/.local/bin symlink
+NO_VA=0                          # skip the short `va` alias symlink
+SHORT_NAME="va"                  # short alias for vaulted-agent
 USER_EXPLICIT=0
 FORCE=0
 DRY=0
@@ -105,6 +108,7 @@ while (( $# )); do
     --purge)      PURGE=1; shift ;;
     -y|--yes)     ASSUME_YES=1; shift ;;
     --no-link)    NO_LINK=1; shift ;;
+    --no-va)      NO_VA=1; shift ;;
     -h|--help)    sed -n "2,20p" "$0"; exit 0 ;;
     *)            die "unknown option '$1'" ;;
   esac
@@ -134,27 +138,30 @@ if (( UNINSTALL )); then
   # bash 3.2 has no associative arrays; track seen users as a space list.
   targets=(); foreign=(); seen_users=" "
 
+  consider() {
+    local p="$1"
+    if [[ -L "$p" && "$(resolve_path "$p")" == "$launcher" ]]; then
+      targets+=("$p")
+    elif [[ -e "$p" || -L "$p" ]]; then
+      foreign+=("$p")
+    fi
+  }
+
   shopt -s nullglob
   for link in "$PREFIX"/*-conductor; do
-    if [[ -L "$link" && "$(resolve_path "$link")" == "$launcher" ]]; then
-      targets+=("$link")
-    elif [[ -e "$link" || -L "$link" ]]; then
-      foreign+=("$link")
-    fi
+    consider "$link"
   done
   shopt -u nullglob
+
+  consider "$PREFIX/$SHORT_NAME"
 
   for u in ${LINK_USER:+"$LINK_USER"} ${SUDO_USER:+"$SUDO_USER"}; do
     if [[ "$seen_users" == *" $u "* ]]; then continue; fi
     seen_users="$seen_users$u "
     uh="$(user_home "$u" 2>/dev/null || true)"
     if [[ -z "$uh" ]]; then continue; fi
-    ul="$uh/.local/bin/vaulted-agent"
-    if [[ -L "$ul" && "$(resolve_path "$ul")" == "$launcher" ]]; then
-      targets+=("$ul")
-    elif [[ -e "$ul" || -L "$ul" ]]; then
-      foreign+=("$ul")
-    fi
+    consider "$uh/.local/bin/vaulted-agent"
+    consider "$uh/.local/bin/$SHORT_NAME"
   done
 
   if [[ -e "$launcher" ]]; then targets+=("$launcher"); fi
@@ -299,6 +306,33 @@ bash -n "$tmp" || die "patched launcher failed to parse; not installing"
 run install -m 0755 "$tmp" "$PREFIX/vaulted-agent"
 printf 'installed %s/vaulted-agent\n' "$PREFIX"
 
+# Short alias `va` -> vaulted-agent (collision-safe unless --force).
+link_alias() {
+  local dest="$1" label="${2:-}"
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    target="$(resolve_path "$dest")"
+    if [[ "$target" == "$PREFIX/vaulted-agent" ]]; then
+      printf 'link already correct: %s\n' "$dest"
+      return 0
+    fi
+    (( FORCE )) || die "$dest already exists and is not ours (-> ${target:-?}).
+  Refusing to overwrite. Pass --force to replace, or --no-va to skip the short alias."
+    printf 'REPLACING pre-existing %s\n' "$dest"
+  fi
+  run ln -sfn "$PREFIX/vaulted-agent" "$dest"
+  if [[ -n "$label" ]]; then
+    printf 'linked %s -> %s/vaulted-agent\n' "$dest" "$PREFIX"
+  else
+    printf 'linked %s\n' "$dest"
+  fi
+}
+
+if (( ! NO_VA )); then
+  link_alias "$PREFIX/$SHORT_NAME"
+else
+  printf 'skipped short alias %s (--no-va)\n' "$SHORT_NAME"
+fi
+
 # --- config directories and sample config, never overwriting ---------------
 run install -d -m 0755 "$CONFIG" "$CONFIG/harnesses.d" "$CONFIG/manifests"
 # Samples land with a .example suffix. They reference a vault that does not
@@ -344,11 +378,19 @@ fi
 # --- optional sudoers rule --------------------------------------------------
 if [[ -n "$ALLOW_USER" ]]; then
   sudoers="/etc/sudoers.d/vaulted-agent"
-  line="$ALLOW_USER ALL=($SERVICE_USER) NOPASSWD: $PREFIX/vaulted-agent"
+  # Grant both the long name and the short alias when the alias is installed.
+  lines=(
+    "$ALLOW_USER ALL=($SERVICE_USER) NOPASSWD: $PREFIX/vaulted-agent"
+  )
+  (( ! NO_VA )) && lines+=(
+    "$ALLOW_USER ALL=($SERVICE_USER) NOPASSWD: $PREFIX/$SHORT_NAME"
+  )
   if (( DRY )); then
-    printf '  would write %s:\n    %s\n' "$sudoers" "$line"
+    printf '  would write %s:\n' "$sudoers"
+    for line in "${lines[@]}"; do printf '    %s\n' "$line"; done
   else
-    printf '%s\n' "$line" > "$sudoers"
+    : > "$sudoers"
+    for line in "${lines[@]}"; do printf '%s\n' "$line" >> "$sudoers"; done
     chmod 0440 "$sudoers"
     visudo -cf "$sudoers" >/dev/null || { rm -f "$sudoers"; die "sudoers rule rejected"; }
     printf 'wrote %s\n' "$sudoers"
@@ -363,16 +405,19 @@ fi
 # link may live anywhere: the sudo re-exec always rebuilds the path as
 # $PREFIX/vaulted-agent, so the sudoers rule still matches either way.
 link_into_home() {
-  local u="$1" home grp
+  local u="$1" home grp dest
   home="$(user_home "$u")" || die "cannot find a home directory for '$u'"
   grp="$(id -gn "$u")"
   [[ -n "$home" && -d "$home" ]] || die "cannot find a home directory for '$u'"
   [[ -d "$home/.local/bin" ]] || run install -d -o "$u" -g "$grp" -m 0755 "$home/.local/bin"
-  run ln -sfn "$PREFIX/vaulted-agent" "$home/.local/bin/vaulted-agent"
-  # -h: change symlink ownership, not the target (GNU and BSD chown).
-  run chown -h "$u:$grp" "$home/.local/bin/vaulted-agent" 2>/dev/null \
-    || run chown "$u:$grp" "$home/.local/bin/vaulted-agent"
-  printf 'linked %s/.local/bin/vaulted-agent -> %s/vaulted-agent\n' "$home" "$PREFIX"
+  for dest in "$home/.local/bin/vaulted-agent" \
+              $( (( ! NO_VA )) && printf '%s' "$home/.local/bin/$SHORT_NAME" ); do
+    [[ -n "$dest" ]] || continue
+    run ln -sfn "$PREFIX/vaulted-agent" "$dest"
+    # -h: change symlink ownership, not the target (GNU and BSD chown).
+    run chown -h "$u:$grp" "$dest" 2>/dev/null || run chown "$u:$grp" "$dest"
+    printf 'linked %s -> %s/vaulted-agent\n' "$dest" "$PREFIX"
+  done
 }
 
 # Can this user resolve vaulted-agent on a login-ish PATH? Prefer sudo -iu
@@ -399,6 +444,7 @@ else
   # not. Shout on a definite failure; otherwise offer a check in their shell.
   who="${ALLOW_USER:-${SUDO_USER:-}}"
   fixcmd="mkdir -p ~/.local/bin && ln -s $PREFIX/vaulted-agent ~/.local/bin/vaulted-agent"
+  (( ! NO_VA )) && fixcmd="$fixcmd && ln -s $PREFIX/vaulted-agent ~/.local/bin/$SHORT_NAME"
   rerun="sudo $0 ${ORIG_ARGS[*]-} --link-user ${who:-YOU}"
   if [[ -n "$who" && "$(id -u)" -eq 0 ]] \
      && ! user_can_run_vaulted_agent "$who"; then
@@ -411,6 +457,7 @@ else
     printf '\nConfirm it is reachable from your own shell (this is the authoritative test,\n'
     printf 'since an installer cannot see your interactive PATH):\n'
     printf '    command -v vaulted-agent\n'
+    (( ! NO_VA )) && printf '    command -v %s\n' "$SHORT_NAME"
     printf '  Finding nothing means %s is not on your PATH. Then either:\n' "$PREFIX"
     printf '    %s\n' "$fixcmd"
     printf '  or re-run with:  --link-user %s\n' "${who:-<you>}"
@@ -421,7 +468,8 @@ fi
 printf '\nNext: put a backend credential at %s (0640 root:%s),\n' "$OP_ENV" "$SERVICE_USER"
 printf 'copy a harness into place:\n'
 printf '  cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
-printf 'then run:  vaulted-agent\n'
+printf 'then run:  vaulted-agent   (or the short alias:  %s)\n' "$SHORT_NAME"
+printf '  e.g.  %s claude\n' "$SHORT_NAME"
 printf '  (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
 printf '\nTo remove this install later:\n'
 printf '  sudo vaulted-agent uninstall\n'
