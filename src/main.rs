@@ -7,30 +7,31 @@ use std::env;
 use std::process;
 
 use vaulted_agent::config::{Harness, Paths, load_auth_mode, list_harness_names};
+use vaulted_agent::launch;
 
 fn main() {
+    // Preserve caller cwd for workdir=caller across future sudo re-exec.
+    if env::var_os("VAULTED_AGENT_CALLER_CWD").is_none() {
+        if let Ok(cwd) = env::current_dir() {
+            // SAFETY: single-threaded at startup before threads spawn
+            env::set_var("VAULTED_AGENT_CALLER_CWD", cwd);
+        }
+    }
+
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("version") | Some("--version") | Some("-V") => {
             println!("vaulted-agent {}", env!("CARGO_PKG_VERSION"));
         }
         Some("auth-mode") if matches!(args.next().as_deref(), None | Some("show")) => {
-            // Minimal show for config ticket (full set command later)
             let paths = Paths::discover();
             let mode = load_auth_mode(&paths);
             println!("auth_mode={}", mode.as_str());
         }
         Some(name) if !name.starts_with('-') => {
-            // Config load path: prove harness loading fails closed before launch exists
             let paths = Paths::discover();
-            match Harness::load(&paths, name) {
-                Ok(h) => {
-                    eprintln!(
-                        "vaulted-agent: harness '{name}' loaded (manifest={}, command={:?}); launch not implemented yet",
-                        h.manifest, h.command
-                    );
-                    process::exit(2);
-                }
+            let harness = match Harness::load(&paths, name) {
+                Ok(h) => h,
                 Err(e) => {
                     eprintln!("vaulted-agent: {e}");
                     if let Ok(names) = list_harness_names(&paths) {
@@ -40,6 +41,10 @@ fn main() {
                     }
                     process::exit(1);
                 }
+            };
+            if let Err(e) = launch::launch_harness(&paths, &harness) {
+                eprintln!("vaulted-agent: {e}");
+                process::exit(1);
             }
         }
         Some(other) => {
@@ -67,6 +72,8 @@ fn main() {
 
 fn usage() {
     eprintln!(
-        "usage: vaulted-agent <harness> | version | auth-mode show\n       (Rust runtime — launch backends still migrating from Bash)"
+        "usage: vaulted-agent <harness> | version | auth-mode show\n\
+         config: VAULTED_AGENT_CONFIG_DIR (default /etc/vaulted-agent)\n\
+         tests:  VAULTED_AGENT_HANDOFF=spawn to spawn instead of exec"
     );
 }

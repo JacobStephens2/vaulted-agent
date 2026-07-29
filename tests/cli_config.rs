@@ -17,7 +17,7 @@ fn unknown_harness_fails_closed_with_message() {
 }
 
 #[test]
-fn loads_harness_and_reports_not_implemented_launch() {
+fn loads_and_launches_plainfile_harness_with_true() {
     let seam = CliSeam::new();
     fs::write(
         seam.config_dir.join("harnesses.d/claude.conf"),
@@ -25,12 +25,17 @@ fn loads_harness_and_reports_not_implemented_launch() {
     )
     .unwrap();
     fs::write(seam.config_dir.join("manifests/empty.env"), "# empty\n").unwrap();
-    let out = seam.vaulted_agent().arg("claude").output().expect("run");
-    // exit 2 = loaded but launch not implemented
-    assert_eq!(out.status.code(), Some(2), "stderr={}", String::from_utf8_lossy(&out.stderr));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("loaded"), "{err}");
-    assert!(err.contains("empty.env"), "{err}");
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .arg("claude")
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
