@@ -2,25 +2,97 @@
 
 Give an AI coding agent real credentials without leaving them on disk.
 
-One small launcher resolves secrets from a vault into the agent's process
-environment at the moment it starts, runs it as a dedicated service account,
-and gives each agent only the secrets you named for it. Claude Code, Codex,
-and Grok all launch from the same launcher and the same vault, with different
-blast radii.
+One launcher, one vault, different blast radii per agent. Secrets resolve into
+the agent process at start - not into a pile of `.env` files.
 
-**Thesis:** treat the agent as the unit of authorization. Manifests are
-blast-radius control, not containment.
+**macOS and Linux.** Product page: [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent)
 
-Daily use is short: `va claude` (alias of `vaulted-agent`). Install creates
-both names by default.
+## Usage
+
+Day to day you name the harness as the first argument. Each harness is a
+config file with its own command and secret manifest:
+
+```bash
+vaulted-agent claude          # Claude Code, full (or whatever) manifest
+vaulted-agent codex           # Codex, often a narrower manifest
+vaulted-agent grok            # Grok
+vaulted-agent pick            # interactive chooser
+```
+
+Same binary under a short alias (installed by default):
+
+```bash
+va claude
+va codex
+va grok
+va pick
+```
+
+Extra args after the harness go to the agent:
+
+```bash
+vaulted-agent claude "fix the flaky test in auth"
+vaulted-agent codex --help
+```
+
+List configured harnesses (no name, or a typo):
+
+```bash
+vaulted-agent
+```
+
+Uninstall (no git tree required after a one-liner install):
+
+```bash
+sudo vaulted-agent uninstall
+# or:  sudo va uninstall
+# also drop config:  sudo vaulted-agent uninstall --purge
+```
+
+## Install
+
+**macOS · Linux** (not Windows natively - use WSL).
+
+```bash
+curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+```
+
+Or from a release tag:
+
+```bash
+git clone --branch v0.1.3 --depth 1 \
+  https://github.com/JacobStephens2/vaulted-agent-launcher
+cd vaulted-agent-launcher && sudo ./install.sh
+```
+
+Then put your vault token in `op.env` (path printed by the installer) and
+activate a harness:
+
+```bash
+# 1Password example - one credential on disk
+printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee op.env >/dev/null
+sudo chmod 0640 op.env
+
+# turn on a harness (drop the .example suffix)
+sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
+sudo cp harnesses.d/codex.conf.example  harnesses.d/codex.conf
+
+vaulted-agent claude
+vaulted-agent codex
+```
 
 | | |
 |---|---|
-| Platforms | **macOS** and **Linux** (including stock macOS `/bin/bash` 3.2). Not Windows natively (use WSL). |
-| Commands | `vaulted-agent` and short alias **`va`** |
-| Product page | [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent) |
-| Writeup | [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) |
-| Latest | [v0.1.3](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.1.3) |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.1.3 curl -fsSL …/install.sh \| bash` |
+| Skip short alias `va` | `… \| bash -s -- --no-va` |
+| Shared host / dedicated account | `… \| bash -s -- --user agent --allow-user alice` |
+| Prefer not to pipe | download `install.sh`, read it, then `bash install.sh` |
+| Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault) |
+
+More flags, shared-host setup, and uninstall detail:
+[Install details](#install-details) · [Uninstall](#uninstall)
+
+## How it works
 
 ```
 you $ vaulted-agent claude
@@ -38,70 +110,11 @@ you $ vaulted-agent claude
              └─ secrets live here, in this process, until it exits
 ```
 
-## Install
+**Thesis:** treat the agent as the unit of authorization. Manifests are
+blast-radius control, not containment.
 
-**One-liner** (macOS · Linux) - short URL on stephens.page; the script only
-bootstraps. The payload is always a **tagged GitHub release** tarball (not
-floating `main`):
-
-```bash
-curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
-```
-
-**From GitHub** (macOS · Linux) - clone a release tag and run the real
-installer yourself:
-
-```bash
-git clone --branch v0.1.3 --depth 1 \
-  https://github.com/JacobStephens2/vaulted-agent-launcher
-cd vaulted-agent-launcher && sudo ./install.sh
-```
-
-After install you can use either name:
-
-```bash
-vaulted-agent claude
-va claude                 # same binary; default short alias
-va pick
-sudo va uninstall
-```
-
-Skip the short name with `sudo ./install.sh --no-va` (or pass `--no-va` through
-the one-liner: `… | bash -s -- --no-va`). If `va` already exists and is not
-ours, install refuses to overwrite unless you pass `--force`.
-
-**Uninstall** (after either path; no git tree required):
-
-```bash
-sudo vaulted-agent uninstall
-# or:  sudo va uninstall
-# also remove config:  sudo vaulted-agent uninstall --purge
-```
-
-Either install path ends the same way: put the one vault credential on disk,
-then copy a harness into place. `install.sh` prints the config directory and
-the backend token path it expects; write the service-account token into that
-`op.env` (mode `0640`, readable by the service account):
-
-```bash
-# the one credential that stays on disk (1Password; see Backends for the rest)
-printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee op.env >/dev/null
-sudo chmod 0640 op.env
-
-# activate a harness sample (drop the .example suffix)
-sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
-```
-
-| | |
-|---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.1.3 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
-| Pass install flags | `curl -fsSL … \| bash -s -- --user agent --allow-user alice` |
-| Skip short alias | `… \| bash -s -- --no-va` |
-| Prefer not to pipe | `curl -fsSL -o install.sh https://stephens.page/vaulted-agent/install.sh && less install.sh && bash install.sh` |
-| Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault; macOS and Linux) |
-
-Details, shared-host setup, flags, and more uninstall options are under
-[Install details](#install-details) and [Uninstall](#uninstall) below.
+Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
+Latest: [v0.1.3](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.1.3)
 
 ## The honest claim
 
