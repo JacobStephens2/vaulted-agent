@@ -1,7 +1,20 @@
-# Bitwarden Secrets Manager: VAR=<secret-uuid>, one `bws secret get` per line.
-# Find ids with `bws secret list`.
+# Bitwarden Secrets Manager refs (no secret values in this file).
+# One `bws secret get` per line after name/project resolution.
+#
+# Reference forms:
+#   VAR=<secret-uuid>
+#   VAR=uuid:<secret-uuid>
+#   VAR=name:<secret-key>                 # unique key in the machine account
+#   VAR=project:<project-name>/<secret-key>
+#
+# List / pick interactively:
+#   vaulted-agent secrets list
+#   vaulted-agent setup          # Bitwarden → build a refs file from the list
+# Validate without launching:
+#   vaulted-agent secrets validate openai.env.refs bitwarden
+#   vaulted-agent doctor
 
-APP_DB_HOST=6a1c0e94-0000-0000-0000-000000000001
-APP_DB_USER=6a1c0e94-0000-0000-0000-000000000002
-APP_DB_PASS=6a1c0e94-0000-0000-0000-000000000003
-GH_TOKEN=6a1c0e94-0000-0000-0000-000000000004
+APP_DB_HOST=name:app-db-host
+APP_DB_USER=name:app-db-user
+APP_DB_PASS=name:app-db-pass
+GH_TOKEN=project:tools/github-token

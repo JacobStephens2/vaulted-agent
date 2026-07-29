@@ -26,11 +26,40 @@ After a fresh install, agents found on your PATH get harnesses that start with
 **no vault secrets** (`plainfile` + `empty.env`). Wire a vault when ready:
 
 ```bash
-vaulted-agent setup                 # interactive backend / token help
+vaulted-agent setup                 # interactive backend / token help (Bitwarden can build a refs file)
 vaulted-agent auth-mode             # file (token on disk) vs prompt (paste each launch)
+vaulted-agent doctor                # harnesses, backends, manifest syntax (no secret values)
+vaulted-agent version               # e.g. vaulted-agent 0.3.0
 va claude                           # with auth_mode=prompt: asks for vault token
 va claude -p                        # force prompt this launch only
 ```
+
+### One-shot commands (`va run`)
+
+Inject a manifest into any command without a harness file:
+
+```bash
+va run -m openai.env.refs --backend bitwarden -- \
+  python gpt_image.py generate "a lighthouse in a storm, gouache" --output out.png
+
+va run -m readonly.env --backend plainfile -- env | sort
+```
+
+Same scrub → resolve → drop token → `exec` path as harnesses. Use `-p` to paste
+the vault token for that launch only.
+
+### Secrets helpers
+
+```bash
+va secrets list                     # bws secret list (prompts for SM token if needed)
+va secrets get name:openai-api-key  # print one value
+va secrets which                    # harness → variable names only
+va secrets validate                 # every harness manifest
+va secrets validate openai.env.refs bitwarden
+```
+
+Bitwarden refs accept `UUID`, `uuid:UUID`, `name:KEY`, or `project:PROJECT/KEY`.
+Placeholder values (`REPLACE_…`, all-zero UUIDs, …) fail validation before launch.
 
 ### Resume sessions
 
@@ -88,7 +117,7 @@ va grok
 Or from a release tag / local clone:
 
 ```bash
-git clone --branch v0.2.0 --depth 1 \
+git clone --branch v0.3.0 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 # local tree with Bitwarden + prompt auth (no token file):
@@ -97,7 +126,7 @@ sudo ./install.sh --backend bitwarden --auth-mode prompt
 
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.2.0 curl -fsSL …/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.3.0 curl -fsSL …/install.sh \| bash` |
 | Skip short alias `va` | `… \| bash -s -- --no-va` |
 | Skip agent auto-detect | `… \| bash -s -- --no-auto-harness` |
 | Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
@@ -136,7 +165,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.2.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.2.0)
+Latest: [v0.3.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.3.0)
 
 ## The honest claim
 
@@ -476,7 +505,7 @@ Set per harness with `backend =`, or change `DEFAULT_BACKEND` in the launcher.
 | backend | manifest is | on-disk credential | resolves |
 |---|---|---|---|
 | `onepassword` | `VAR=op://vault/item/field` | `op.env` (`OP_SERVICE_ACCOUNT_TOKEN`) when `auth_mode=file` | whole file, one `op inject` |
-| `bitwarden` | `VAR=<secret-uuid>` | `bws.env` (`BWS_ACCESS_TOKEN`) when `auth_mode=file` | one `bws secret get` per line |
+| `bitwarden` | `VAR=<uuid\|uuid:…\|name:KEY\|project:P/KEY>` | `bws.env` (`BWS_ACCESS_TOKEN`) when `auth_mode=file` | one `bws secret get` per line (names resolved via `bws secret list`) |
 | `pass` | `VAR=store/entry/path` | the service account's GPG key | one `pass show` per line |
 | `sops` | a sops-encrypted dotenv | `age.key` | whole file, one `sops --decrypt` |
 | `plainfile` | a plain dotenv | the manifest itself | nothing to resolve |
@@ -527,8 +556,10 @@ would swap in `vault`, `chamber`, `aws-vault`, or `gopass`.
 > **Bitwarden:** `BWS_ACCESS_TOKEN` must be a **Secrets Manager access token**
 > (Machine Accounts → Access Tokens), not your vault password or a login API
 > key. Wrong token types fail with errors such as “Doesn't contain a decryption
-> key.” List secret UUIDs with `bws secret list`. The arm is written against the
-> documented `bws` CLI (`bws secret get <id> --output json`).
+> key.” Prefer `vaulted-agent secrets list` / `vaulted-agent setup` (Bitwarden)
+> over raw `bws` so auth matches launches. Refs may be a UUID, `uuid:…`,
+> `name:KEY`, or `project:PROJECT/KEY`. Placeholder values are rejected before
+> launch (`secrets validate`, also run by `doctor` and every launch).
 
 ## Making the manifest a real boundary
 

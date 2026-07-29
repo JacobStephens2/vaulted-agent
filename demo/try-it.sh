@@ -138,6 +138,47 @@ printf '   unreachable secrets   '; vaulted-agent broken 2>&1 | sed 's/.*: //' |
 ln -sf "$DEMO/bin/vaulted-agent" "$DEMO/bin/grok-conductor"
 printf '   borrowing a harness   '; grok-conductor -H claude 2>&1 | sed 's/.*: //' || true
 
+# --- 5. version / doctor / secrets which / run / validate ------------------
+step "Management commands and va run"
+# Drop the deliberately broken harness from step 4 so doctor is clean.
+rm -f "$DEMO/etc/harnesses.d/broken.conf"
+
+ver="$(vaulted-agent version 2>/dev/null || true)"
+printf '   version              %s\n' "${ver:-?}"
+[[ "$ver" == vaulted-agent\ * ]] || { printf '   FAIL: version\n'; exit 1; }
+
+vaulted-agent doctor >/dev/null
+printf '   doctor               ok (exit 0)\n'
+
+which_out="$(vaulted-agent secrets which)"
+printf '%s\n' "$which_out" | awk '
+  /^claude / { c=1; g=0; next }
+  /^grok /   { c=0; g=1; next }
+  /^[a-z]/   { c=0; g=0; next }
+  c && /GH_TOKEN/ { c_ok=1 }
+  g && /GH_TOKEN/ { g_bad=1 }
+  END {
+    if (!c_ok) { print "   FAIL: secrets which (claude missing GH_TOKEN)"; exit 1 }
+    if (g_bad) { print "   FAIL: secrets which (grok has GH_TOKEN)"; exit 1 }
+    print "   secrets which        claude has GH_TOKEN, grok does not"
+  }'
+
+# Placeholder manifest must fail validation (item 10).
+cat > "$DEMO/etc/manifests/bad-bw.refs" <<'EOF'
+OPENAI_API_KEY=REPLACE_WITH_BITWARDEN_SECRET_UUID
+EOF
+if vaulted-agent secrets validate bad-bw.refs bitwarden >/dev/null 2>&1; then
+  printf '   FAIL: placeholder should not validate\n'; exit 1
+else
+  printf '   secrets validate     rejects placeholder refs\n'
+fi
+
+# va run: inject full.env into a one-shot command (no harness).
+run_out="$(vaulted-agent run -m full.env --backend plainfile -- "$DEMO/agents/show-secrets")"
+printf '%s\n' "$run_out" | grep -qx 'GH_TOKEN' \
+  && printf '   run -m full.env      injects GH_TOKEN\n' \
+  || { printf '   FAIL: run did not inject GH_TOKEN\n  got:\n%s\n' "$run_out"; exit 1; }
+
 # --- done ------------------------------------------------------------------
 if (( KEEP )); then
   printf '\nTemp tree kept at %s\n' "$DEMO"

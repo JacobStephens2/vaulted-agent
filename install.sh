@@ -316,11 +316,41 @@ else
 fi
 
 printf 'vaulted-agent install\n'
+# Map --backend to the on-disk token path we talk about in the summary, and to
+# DEFAULT_BACKEND patched into the launcher (harnesses without backend= use it).
+BACKEND_TOKEN_PATH="$OP_ENV"
+DEFAULT_BACKEND_VALUE="onepassword"
+case "${BACKEND_CHOICE:-}" in
+  bitwarden|bws)
+    BACKEND_TOKEN_PATH="$CONFIG/bws.env"
+    DEFAULT_BACKEND_VALUE="bitwarden"
+    ;;
+  onepassword|op|1password)
+    BACKEND_TOKEN_PATH="$OP_ENV"
+    DEFAULT_BACKEND_VALUE="onepassword"
+    ;;
+  pass)
+    BACKEND_TOKEN_PATH="(pass: service-account GPG key; no token file)"
+    DEFAULT_BACKEND_VALUE="pass"
+    ;;
+  sops)
+    BACKEND_TOKEN_PATH="$CONFIG/age.key"
+    DEFAULT_BACKEND_VALUE="sops"
+    ;;
+  plainfile)
+    BACKEND_TOKEN_PATH="(plainfile: secrets live in the manifest)"
+    DEFAULT_BACKEND_VALUE="plainfile"
+    ;;
+  skip|'')
+    ;;
+esac
+
 printf '  service account : %s (workdir %s)%s\n' "$SERVICE_USER" "$WORKDIR" \
   "$( (( USER_EXPLICIT )) || printf '   <- you; --user <name> for a dedicated account' )"
 printf '  launcher        : %s/vaulted-agent\n' "$PREFIX"
 printf '  config          : %s\n' "$CONFIG"
-printf '  backend token   : %s\n' "$OP_ENV"
+printf '  default backend : %s\n' "$DEFAULT_BACKEND_VALUE"
+printf '  backend token   : %s\n' "$BACKEND_TOKEN_PATH"
 (( DRY )) && printf '  (dry run)\n'
 printf '\n'
 
@@ -331,6 +361,7 @@ sed -e "s|^SERVICE_USER=.*|SERVICE_USER=\"$SERVICE_USER\"|" \
     -e "s|^CONFIG_DIR=.*|CONFIG_DIR=\"$CONFIG\"|" \
     -e "s|^LAUNCHER_BIN_DIR=.*|LAUNCHER_BIN_DIR=\"$PREFIX\"|" \
     -e "s|^OP_ENV_FILE=.*|OP_ENV_FILE=\"$OP_ENV\"|" \
+    -e "s|^DEFAULT_BACKEND=.*|DEFAULT_BACKEND=\"$DEFAULT_BACKEND_VALUE\"|" \
     "$REPO/bin/vaulted-agent" > "$tmp"
 bash -n "$tmp" || die "patched launcher failed to parse; not installing"
 run install -m 0755 "$tmp" "$PREFIX/vaulted-agent"

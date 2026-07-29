@@ -16,7 +16,8 @@
 #   va codex [args...]                short alias (same binary)
 #   codex-conductor [args...]         harness from a per-harness symlink
 #   vaulted-agent pick [args...]      interactive harness chooser
-#   vaulted-agent uninstall [...]     remove what install.sh installed
+#   vaulted-agent run -m MANIFEST -- cmd [args...]
+#   vaulted-agent doctor|secrets|version|setup|auth-mode|uninstall
 #
 # The symlink form lets a sudoers rule name one path per harness, with no
 # argument matching. Prefer it when different people are entitled to different
@@ -25,6 +26,9 @@
 set -euo pipefail
 
 # ===== CONFIG ==============================================================
+# Bumped on each release tag (vX.Y.Z). install-remote.sh pins the same series.
+VERSION="0.3.0"
+
 SERVICE_USER="agent"                        # dedicated, non-human service account
 WORKDIR="/srv/agent"                        # agent's working directory
 CONFIG_DIR="/etc/vaulted-agent"
@@ -33,6 +37,7 @@ MANIFEST_DIR="${CONFIG_DIR}/manifests"      # per-harness secret manifests
 LAUNCHER_BIN_DIR="/usr/local/bin"           # where this file and its symlinks live
 
 # Secret backend. Set per harness with `backend =`; this is the default.
+# install.sh rewrites this from --backend when present.
 #   onepassword  1Password CLI, `op inject` over a file of op:// references
 #   bitwarden    Bitwarden Secrets Manager, `bws secret get` per reference
 #   sops         a sops-encrypted dotenv, decrypted at launch
@@ -117,6 +122,128 @@ trim() {
   printf '%s' "$s"
 }
 
+# UUID (any version) for bitwarden refs and session labels.
+uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+is_uuid() { [[ "$1" =~ $uuid_re ]]; }
+
+# True when a bitwarden manifest ref is a placeholder / not ready to resolve.
+is_placeholder_ref() {
+  local r="$1" low
+  low="$(printf '%s' "$r" | tr '[:upper:]' '[:lower:]')"
+  case "$low" in
+    ''|replace*|change_me*|changeme*|your_*|todo*|xxx*|example*|placeholder*) return 0 ;;
+  esac
+  # all-zero UUID variants
+  case "$low" in
+    *00000000-0000-0000-0000-000000000000*) return 0 ;;
+    *replace_with*) return 0 ;;
+  esac
+  return 1
+}
+
+# Resolve manifest path: absolute stays; relative is under MANIFEST_DIR.
+resolve_manifest_path() {
+  local m="$1"
+  [[ "$m" == /* ]] || m="${MANIFEST_DIR}/${m}"
+  printf '%s' "$m"
+}
+
+# Syntax-check a manifest for a backend. Does not fetch secrets.
+# $1=path $2=backend  → prints issues to stderr; returns non-zero if any.
+validate_manifest_syntax() {
+  local path="$1" backend="$2" raw var ref issues=0 lineno=0
+  [[ -r "$path" ]] || { printf 'cannot read manifest %s\n' "$path" >&2; return 1; }
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    lineno=$(( lineno + 1 ))
+    raw="$(trim "${raw%$'\r'}")"
+    [[ -z "$raw" || "$raw" == "#"* ]] && continue
+    if [[ "$raw" != *=* ]]; then
+      printf '%s:%d: expected VAR=reference (got %s)\n' "$path" "$lineno" "$raw" >&2
+      issues=$(( issues + 1 ))
+      continue
+    fi
+    var="$(trim "${raw%%=*}")"; ref="$(trim "${raw#*=}")"
+    if [[ ! "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      printf '%s:%d: bad variable name %s\n' "$path" "$lineno" "$var" >&2
+      issues=$(( issues + 1 ))
+    fi
+    if [[ -z "$ref" ]]; then
+      printf '%s:%d: empty reference for %s\n' "$path" "$lineno" "$var" >&2
+      issues=$(( issues + 1 ))
+      continue
+    fi
+    case "$backend" in
+      bitwarden)
+        if is_placeholder_ref "$ref"; then
+          printf '%s:%d: %s still has placeholder ref %s\n' "$path" "$lineno" "$var" "$ref" >&2
+          issues=$(( issues + 1 ))
+          continue
+        fi
+        # Accept UUID, uuid:UUID, name:NAME, project:PROJ/NAME
+        case "$ref" in
+          uuid:*)
+            if ! is_uuid "${ref#uuid:}"; then
+              printf '%s:%d: %s uuid: value is not a UUID: %s\n' "$path" "$lineno" "$var" "$ref" >&2
+              issues=$(( issues + 1 ))
+            fi ;;
+          name:*)
+            [[ -n "${ref#name:}" ]] || {
+              printf '%s:%d: %s empty name: ref\n' "$path" "$lineno" "$var" >&2
+              issues=$(( issues + 1 ))
+            } ;;
+          project:*)
+            if [[ "$ref" != project:*/* || "$ref" == project:/* || "$ref" == project:*/ ]]; then
+              printf '%s:%d: %s want project:PROJECT/SECRET (got %s)\n' \
+                "$path" "$lineno" "$var" "$ref" >&2
+              issues=$(( issues + 1 ))
+            fi ;;
+          *)
+            if ! is_uuid "$ref"; then
+              printf '%s:%d: %s bad bitwarden ref %s\n' "$path" "$lineno" "$var" "$ref" >&2
+              printf '  use UUID, uuid:UUID, name:NAME, or project:PROJECT/SECRET\n' >&2
+              issues=$(( issues + 1 ))
+            fi ;;
+        esac
+        ;;
+      onepassword)
+        case "$ref" in
+          op://*) ;;
+          *)
+            if is_placeholder_ref "$ref"; then
+              printf '%s:%d: %s still has placeholder ref %s\n' "$path" "$lineno" "$var" "$ref" >&2
+              issues=$(( issues + 1 ))
+            fi ;;
+        esac
+        ;;
+      pass)
+        if is_placeholder_ref "$ref"; then
+          printf '%s:%d: %s still has placeholder ref %s\n' "$path" "$lineno" "$var" "$ref" >&2
+          issues=$(( issues + 1 ))
+        fi
+        ;;
+      plainfile|sops)
+        if is_placeholder_ref "$ref" && [[ "$ref" == *REPLACE* || "$ref" == *CHANGE_ME* ]]; then
+          printf '%s:%d: %s looks like a placeholder value\n' "$path" "$lineno" "$var" >&2
+          issues=$(( issues + 1 ))
+        fi
+        ;;
+    esac
+  done < "$path"
+  (( issues == 0 ))
+}
+
+# List VAR names (not values) from a KEY=VALUE or KEY=ref manifest.
+manifest_var_names() {
+  local path="$1" raw var
+  [[ -r "$path" ]] || return 0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw="$(trim "${raw%$'\r'}")"
+    [[ -z "$raw" || "$raw" == "#"* || "$raw" != *=* ]] && continue
+    var="$(trim "${raw%%=*}")"
+    [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && printf '%s\n' "$var"
+  done < "$path"
+}
+
 invoked="${0##*/}"
 orig=( ${1+"$@"} )               # exact argv, replayed verbatim across the sudo hop
 # Directory the human was in when they typed `va …`. Survives the sudo hop via
@@ -127,6 +254,10 @@ CALLER_CWD="${VAULTED_AGENT_CALLER_CWD:-$PWD}"
 # Primary entrypoints (full name and short alias). Not harness-conductor links.
 is_primary_cmd() {
   [[ "$1" == "$LAUNCHER_NAME" || "$1" == "$SHORT_NAME" ]]
+}
+
+do_version() {
+  printf 'vaulted-agent %s\n' "$VERSION"
 }
 
 # Read the harness names, plus a one-line summary of each, out of harnesses.d.
@@ -177,14 +308,21 @@ usage() {
   read_auth_mode 2>/dev/null || true
   printf 'usage: %s <harness> [args...]\n' "$LAUNCHER_NAME" >&2
   printf '       %s <harness> [args...]             short alias\n' "$SHORT_NAME" >&2
+  printf '       %s|%s run -m MANIFEST [--backend NAME] -- cmd [args...]\n' \
+    "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s pick [args...]    choose one interactively\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s doctor            check install / harnesses / manifests\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s secrets …         list / get / which / validate (vault helpers)\n' \
+    "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s setup             configure vault backend / token\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s auth-mode [mode]  show or set default auth mode\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s version           print version (%s)\n' "$LAUNCHER_NAME" "$SHORT_NAME" "$VERSION" >&2
   printf '       %s|%s uninstall [opts]  remove this install (needs root)\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       <harness>%s [args...]\n\n' "$LINK_SUFFIX" >&2
   printf 'launcher flags:  --prompt-auth|-p   prompt for vault token this launch (not written to disk)\n' >&2
   printf 'default auth_mode: %s  (file = token on disk; prompt = paste each launch)\n' \
     "${AUTH_MODE:-$DEFAULT_AUTH_MODE}" >&2
+  printf 'default backend:   %s\n' "$DEFAULT_BACKEND" >&2
   printf 'uninstall options: --purge  --dry-run  -y|--yes  --link-user NAME\n\n' >&2
   printf 'harnesses in %s:\n' "$HARNESS_DIR" >&2
   if compgen -G "$HARNESS_DIR/*.conf" >/dev/null 2>&1; then
@@ -423,10 +561,164 @@ do_auth_mode() {
   esac
 }
 
+# Write a vault token file as 0640 root:SERVICE_USER (uses sudo when needed).
+write_backend_token_file() {
+  local path="$1" var="$2" token="$3"
+  if [[ "$(id -u)" -ne 0 ]]; then
+    printf '%s=%s\n' "$var" "$token" | sudo tee "$path" >/dev/null
+    sudo chmod 0640 "$path"
+    sudo chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
+  else
+    printf '%s=%s\n' "$var" "$token" > "$path"
+    chmod 0640 "$path"
+    chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
+  fi
+  printf 'wrote %s\n' "$path"
+}
+
+# Prompt text for vault tokens (Bitwarden SM is often confused with vault password).
+auth_prompt_label() {
+  case "$1" in
+    BWS_ACCESS_TOKEN)
+      printf 'Bitwarden Secrets Manager access token (Machine Accounts → Access Tokens; not your vault password)'
+      ;;
+    OP_SERVICE_ACCOUNT_TOKEN)
+      printf '1Password service-account token (OP_SERVICE_ACCOUNT_TOKEN)'
+      ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Interactive Bitwarden: token → optional secret pick → refs manifest.
+# Uses BWS_ACCESS_TOKEN already in the environment when set.
+setup_bitwarden_guided() {
+  local token path="$BWS_ENV_FILE" json man_path choice n id key proj line
+  local -a ids keys projs
+  printf '\nBitwarden Secrets Manager\n'
+  printf '  Needs a Machine Account access token (BWS_ACCESS_TOKEN),\n'
+  printf '  not your personal vault master password or login API key.\n\n'
+  if [[ -z "${BWS_ACCESS_TOKEN-}" ]]; then
+    printf '%s\n(hidden, not echoed): ' "$(auth_prompt_label BWS_ACCESS_TOKEN)"
+    [[ -r /dev/tty ]] || die "setup needs a terminal"
+    read -rs token < /dev/tty || token=""
+    printf '\n'
+    [[ -n "$token" ]] || die "empty token"
+    export BWS_ACCESS_TOKEN="$token"
+  else
+    printf 'Using BWS_ACCESS_TOKEN already in the environment.\n'
+  fi
+  if [[ "$AUTH_MODE" == file ]]; then
+    write_backend_token_file "$path" BWS_ACCESS_TOKEN "$BWS_ACCESS_TOKEN"
+  else
+    printf 'auth_mode=prompt — token not written to disk (good).\n'
+    printf '  To store it anyway: %s auth-mode file, then re-run setup.\n' "$LAUNCHER_NAME"
+  fi
+  command -v bws >/dev/null 2>&1 || die "bws not on PATH (install Bitwarden Secrets Manager CLI)"
+  command -v python3 >/dev/null 2>&1 || die "python3 required to parse bws JSON"
+  if ! json="$(bws secret list --output json 2>/dev/null)"; then
+    die "bws secret list failed — is BWS_ACCESS_TOKEN a Secrets Manager access token?"
+  fi
+  # Fill parallel arrays of id / key / project name.
+  ids=(); keys=(); projs=()
+  while IFS=$'\t' read -r id key proj; do
+    [[ -n "$id" ]] || continue
+    ids+=("$id"); keys+=("$key"); projs+=("$proj")
+  done < <(printf '%s' "$json" | python3 -c '
+import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(data, dict):
+    data=data.get("data") or data.get("secrets") or []
+for s in data or []:
+    i=s.get("id") or ""
+    k=s.get("key") or s.get("name") or ""
+    p=(s.get("project") or {})
+    if isinstance(p, dict):
+        pn=p.get("name") or ""
+    else:
+        pn=str(p or "")
+    print(i+"\t"+k+"\t"+pn)
+')
+  if (( ${#ids[@]} == 0 )); then
+    printf 'No secrets in this machine account yet. Create one in the SM UI, then:\n'
+    printf '  %s secrets list\n' "$LAUNCHER_NAME"
+    printf '  edit a refs manifest: VAR=name:your-secret-key\n'
+    return 0
+  fi
+  printf '\nSecrets visible to this token:\n'
+  for n in "${!ids[@]}"; do
+    printf '  %2d) %-36s  %s%s\n' "$(( n + 1 ))" "${ids[n]}" "${keys[n]}" \
+      "$( [[ -n "${projs[n]}" ]] && printf '  (project: %s)' "${projs[n]}" )"
+  done
+  printf '\nBuild a refs manifest from these? [y/N]: '
+  read -r choice < /dev/tty || choice=""
+  case "$choice" in y|Y|yes|YES) ;; *) printf 'Skipped manifest builder.\n'; return 0 ;; esac
+  printf 'Manifest basename under %s [openai.env.refs]: ' "$MANIFEST_DIR"
+  read -r man_path < /dev/tty || man_path=""
+  man_path="$(trim "${man_path:-openai.env.refs}")"
+  [[ "$man_path" == /* ]] || man_path="${MANIFEST_DIR}/${man_path}"
+  printf 'Pick secrets (comma-separated numbers, or "all"): '
+  read -r choice < /dev/tty || choice=""
+  choice="$(trim "$choice")"
+  {
+    printf '# Bitwarden Secrets Manager refs (no secret values). Generated by vaulted-agent setup.\n'
+    printf '# Forms: UUID | uuid:UUID | name:KEY | project:PROJECT/KEY\n'
+    printf '# List again: vaulted-agent secrets list\n\n'
+    if [[ "$choice" == "all" ]]; then
+      for n in "${!ids[@]}"; do
+        # Prefer name: when key is a valid shell-ish token; else bare UUID.
+        if [[ "${keys[n]}" =~ ^[A-Za-z0-9_./-]+$ && -n "${keys[n]}" ]]; then
+          if [[ -n "${projs[n]}" ]]; then
+            # VAR from key: uppercase, non-alnum → _
+            line="$(printf '%s' "${keys[n]}" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g')"
+            [[ "$line" =~ ^[A-Z_] ]] || line="SECRET_$line"
+            printf '%s=name:%s\n' "$line" "${keys[n]}"
+          else
+            line="$(printf '%s' "${keys[n]}" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g')"
+            [[ "$line" =~ ^[A-Z_] ]] || line="SECRET_$line"
+            printf '%s=name:%s\n' "$line" "${keys[n]}"
+          fi
+        else
+          printf 'SECRET_%d=%s\n' "$(( n + 1 ))" "${ids[n]}"
+        fi
+      done
+    else
+      _old_ifs="$IFS"
+      IFS=','
+      for num in $choice; do
+        num="$(trim "$num")"
+        [[ "$num" =~ ^[0-9]+$ ]] || continue
+        n=$(( num - 1 ))
+        (( n >= 0 && n < ${#ids[@]} )) || continue
+        if [[ "${keys[n]}" =~ ^[A-Za-z0-9_./-]+$ && -n "${keys[n]}" ]]; then
+          line="$(printf '%s' "${keys[n]}" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g')"
+          [[ "$line" =~ ^[A-Z_] ]] || line="SECRET_$line"
+          printf '%s=name:%s\n' "$line" "${keys[n]}"
+        else
+          printf 'SECRET_%d=%s\n' "$num" "${ids[n]}"
+        fi
+      done
+      IFS="$_old_ifs"
+      unset _old_ifs num
+    fi
+  } > /tmp/vaulted-agent-refs.$$
+  if [[ "$(id -u)" -ne 0 ]]; then
+    sudo install -m 0644 /tmp/vaulted-agent-refs.$$ "$man_path"
+  else
+    install -m 0644 /tmp/vaulted-agent-refs.$$ "$man_path"
+  fi
+  rm -f /tmp/vaulted-agent-refs.$$
+  printf 'wrote %s\n' "$man_path"
+  printf 'Wire a harness: backend = bitwarden  and  manifest = %s\n' "${man_path##*/}"
+  printf 'Or one-shot: %s run -m %s --backend bitwarden -- your-command\n' \
+    "$LAUNCHER_NAME" "${man_path##*/}"
+}
+
 # Interactive vault token / backend help. Reserved name unless setup.conf exists.
 do_setup() {
-  local choice token path grp
-  grp="$(id -gn 2>/dev/null || true)"
+  local choice token path
   read_auth_mode
   printf 'vaulted-agent setup\n\n'
   printf 'Configure a vault backend credential for this machine.\n'
@@ -434,7 +726,7 @@ do_setup() {
   printf 'after this if you want vault injection.\n'
   printf 'Current auth_mode: %s  (change with: vaulted-agent auth-mode)\n\n' "$AUTH_MODE"
   printf '  1) 1Password  (writes op.env with OP_SERVICE_ACCOUNT_TOKEN)\n'
-  printf '  2) Bitwarden  (writes bws.env with BWS_ACCESS_TOKEN)\n'
+  printf '  2) Bitwarden  (SM access token; optional secret → refs manifest)\n'
   printf '  3) Show pass / sops notes only\n'
   printf '  4) Change default auth mode (file vs prompt)\n'
   printf '  q) Quit\n\n'
@@ -444,20 +736,11 @@ do_setup() {
   case "$choice" in
     1|onepassword|op)
       path="$OP_ENV_FILE"
-      printf 'OP_SERVICE_ACCOUNT_TOKEN (hidden, not echoed): '
+      printf '%s\n(hidden, not echoed): ' "$(auth_prompt_label OP_SERVICE_ACCOUNT_TOKEN)"
       read -rs token < /dev/tty || token=""
       printf '\n'
       [[ -n "$token" ]] || die "empty token"
-      if [[ "$(id -u)" -ne 0 ]]; then
-        printf '%s=%s\n' OP_SERVICE_ACCOUNT_TOKEN "$token" | sudo tee "$path" >/dev/null
-        sudo chmod 0640 "$path"
-        sudo chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
-      else
-        printf '%s=%s\n' OP_SERVICE_ACCOUNT_TOKEN "$token" > "$path"
-        chmod 0640 "$path"
-        chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
-      fi
-      printf 'wrote %s\n' "$path"
+      write_backend_token_file "$path" OP_SERVICE_ACCOUNT_TOKEN "$token"
       printf 'Next: set backend=onepassword and a real manifest on each harness.\n'
       if [[ "$AUTH_MODE" == prompt ]]; then
         printf 'Note: auth_mode is prompt — launches still ask for the token unless you run:\n'
@@ -465,24 +748,9 @@ do_setup() {
       fi
       ;;
     2|bitwarden|bws)
-      path="$BWS_ENV_FILE"
-      printf 'BWS_ACCESS_TOKEN (hidden, not echoed): '
-      read -rs token < /dev/tty || token=""
-      printf '\n'
-      [[ -n "$token" ]] || die "empty token"
-      if [[ "$(id -u)" -ne 0 ]]; then
-        printf '%s=%s\n' BWS_ACCESS_TOKEN "$token" | sudo tee "$path" >/dev/null
-        sudo chmod 0640 "$path"
-        sudo chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
-      else
-        printf '%s=%s\n' BWS_ACCESS_TOKEN "$token" > "$path"
-        chmod 0640 "$path"
-        chown "root:${SERVICE_USER}" "$path" 2>/dev/null || true
-      fi
-      printf 'wrote %s\n' "$path"
-      printf 'Next: set backend=bitwarden and UUID refs in the harness manifest.\n'
+      setup_bitwarden_guided
       if [[ "$AUTH_MODE" == prompt ]]; then
-        printf 'Note: auth_mode is prompt — launches still ask for the token unless you run:\n'
+        printf 'Note: auth_mode is prompt — each launch asks for the SM access token unless you run:\n'
         printf '  %s auth-mode file\n' "$LAUNCHER_NAME"
       fi
       ;;
@@ -498,6 +766,325 @@ do_setup() {
     *) die "unknown choice" ;;
   esac
 }
+
+# Health check: install paths, harnesses, backends, manifest syntax (no secret values).
+do_doctor() {
+  local f name be man conf cmd_line bin_dir issues=0 warn=0 status
+  local workdir_key have_bws=0 have_op=0 have_sops=0 have_pass=0
+  read_auth_mode 2>/dev/null || true
+  printf 'vaulted-agent doctor  (v%s)\n\n' "$VERSION"
+  printf 'Launcher\n'
+  printf '  binary       : %s\n' "$(command -v "$LAUNCHER_NAME" 2>/dev/null || printf '%s/%s' "$LAUNCHER_BIN_DIR" "$LAUNCHER_NAME")"
+  printf '  version      : %s\n' "$VERSION"
+  printf '  service user : %s\n' "$SERVICE_USER"
+  printf '  config       : %s\n' "$CONFIG_DIR"
+  printf '  default backend : %s\n' "$DEFAULT_BACKEND"
+  printf '  auth_mode    : %s' "$AUTH_MODE"
+  if [[ -r "$DEFAULTS_FILE" ]]; then printf '  (%s)\n' "$DEFAULTS_FILE"
+  else printf '  (built-in default; no %s)\n' "$DEFAULTS_FILE"; fi
+  printf '\nBackend CLIs\n'
+  if command -v bws >/dev/null 2>&1; then have_bws=1; printf '  bws   : %s\n' "$(command -v bws)"
+  else printf '  bws   : missing (needed for backend=bitwarden)\n'; fi
+  if command -v op >/dev/null 2>&1; then have_op=1; printf '  op    : %s\n' "$(command -v op)"
+  else printf '  op    : missing (needed for backend=onepassword)\n'; fi
+  if command -v sops >/dev/null 2>&1; then have_sops=1; printf '  sops  : %s\n' "$(command -v sops)"
+  else printf '  sops  : missing (needed for backend=sops)\n'; fi
+  if command -v pass >/dev/null 2>&1; then have_pass=1; printf '  pass  : %s\n' "$(command -v pass)"
+  else printf '  pass  : missing (needed for backend=pass)\n'; fi
+  printf '\nAuth files\n'
+  for f in \
+    "op.env:$OP_ENV_FILE" \
+    "bws.env:$BWS_ENV_FILE" \
+    "age.key:$AGE_KEY_FILE"
+  do
+    name="${f%%:*}"; apath="${f#*:}"
+    if [[ -r "$apath" ]]; then
+      printf '  %-8s present %s\n' "$name" "$apath"
+    else
+      printf '  %-8s absent  %s\n' "$name" "$apath"
+    fi
+  done
+  unset apath
+  if [[ "$AUTH_MODE" == prompt ]]; then
+    printf '  (auth_mode=prompt: token files optional; launches prompt on a TTY)\n'
+  fi
+  printf '\nHarnesses in %s\n' "$HARNESS_DIR"
+  if ! compgen -G "$HARNESS_DIR/*.conf" >/dev/null 2>&1; then
+    printf '  (none)\n'
+    warn=$(( warn + 1 ))
+  fi
+  shopt -s nullglob
+  for conf in "$HARNESS_DIR"/*.conf; do
+    name="${conf##*/}"; name="${name%.conf}"
+    be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    cmd_line="$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    bin_dir="$(sed -n 's/^[[:space:]]*bin[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    workdir_key="$(sed -n 's/^[[:space:]]*workdir[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    be="$(trim "${be:-$DEFAULT_BACKEND}")"
+    man="$(trim "$man")"
+    status="ok"
+    printf '  %s\n' "$name"
+    printf '    backend=%s  manifest=%s  workdir=%s\n' \
+      "$be" "${man:-?}" "${workdir_key:-"(install default)"}"
+    if [[ -z "$cmd_line" ]]; then
+      printf '    ERROR: no command =\n'; issues=$(( issues + 1 )); status=err
+    fi
+    if [[ -z "$man" ]]; then
+      printf '    ERROR: no manifest =\n'; issues=$(( issues + 1 )); status=err
+    else
+      man_path="$(resolve_manifest_path "$man")"
+      if [[ ! -r "$man_path" ]]; then
+        printf '    ERROR: cannot read %s\n' "$man_path"; issues=$(( issues + 1 )); status=err
+      elif ! validate_manifest_syntax "$man_path" "$be" 2>/dev/null; then
+        printf '    ERROR: manifest syntax problems:\n'
+        validate_manifest_syntax "$man_path" "$be" 2>&1 | sed 's/^/      /' || true
+        issues=$(( issues + 1 )); status=err
+      else
+        printf '    manifest syntax ok (%s)\n' "$man_path"
+      fi
+    fi
+    case "$be" in
+      bitwarden) (( have_bws )) || { printf '    ERROR: bws not on PATH\n'; issues=$(( issues + 1 )); } ;;
+      onepassword) (( have_op )) || { printf '    ERROR: op not on PATH\n'; issues=$(( issues + 1 )); } ;;
+      sops) (( have_sops )) || { printf '    ERROR: sops not on PATH\n'; issues=$(( issues + 1 )); } ;;
+      pass) (( have_pass )) || { printf '    ERROR: pass not on PATH\n'; issues=$(( issues + 1 )); } ;;
+      plainfile) ;;
+      *) printf '    ERROR: unknown backend %s\n' "$be"; issues=$(( issues + 1 )) ;;
+    esac
+    case "$name" in
+      claude|codex|grok)
+        if [[ "$workdir_key" != "caller" ]]; then
+          printf '    WARN: agent harness without workdir=caller (resume/sessions often need it)\n'
+          warn=$(( warn + 1 ))
+        fi
+        ;;
+    esac
+    # command first word on PATH if bin set
+    if [[ -n "$bin_dir" && -n "$cmd_line" ]]; then
+      bin_dir="${bin_dir//\$\{HOME\}/$HOME}"; bin_dir="${bin_dir//\$HOME/$HOME}"
+      first="${cmd_line%% *}"
+      if [[ "$first" != /* && ! -x "$bin_dir/$first" && ! -x "$(command -v "$first" 2>/dev/null || true)" ]]; then
+        if [[ ! -x "$bin_dir/$first" ]]; then
+          printf '    WARN: %s not found under bin=%s (may still resolve at launch)\n' "$first" "$bin_dir"
+          warn=$(( warn + 1 ))
+        fi
+      fi
+    fi
+    unset man_path first
+  done
+  shopt -u nullglob
+  printf '\nSummary: %d error(s), %d warning(s)\n' "$issues" "$warn"
+  if (( issues )); then
+    printf 'Fix errors before relying on launches. Try: %s setup\n' "$LAUNCHER_NAME"
+    return 1
+  fi
+  printf 'Ready (syntax checks only; live vault access not probed).\n'
+  return 0
+}
+
+# Load BWS or OP auth for helper subcommands (secrets list/get) without scrubbing.
+# Reuses the same prompt/file rules as launch, after read_auth_mode + PROMPT_AUTH.
+ensure_helper_auth() {
+  local backend="$1"
+  case "$backend" in
+    bitwarden)
+      # Inline minimal load: prefer env, then file, then prompt.
+      if [[ -n "${BWS_ACCESS_TOKEN-}" ]]; then return 0; fi
+      if (( PROMPT_AUTH )) || [[ ! -r "$BWS_ENV_FILE" ]]; then
+        if [[ -r /dev/tty ]]; then
+          printf '%s\n(hidden, not written to disk): ' "$(auth_prompt_label BWS_ACCESS_TOKEN)" >/dev/tty
+          local token=""
+          read -rs token < /dev/tty || token=""
+          printf '\n' >/dev/tty
+          [[ -n "$token" ]] || die "empty BWS_ACCESS_TOKEN"
+          export BWS_ACCESS_TOKEN="$token"
+          return 0
+        fi
+      fi
+      if [[ -r "$BWS_ENV_FILE" ]]; then
+        set -a
+        # shellcheck source=/dev/null
+        . "$BWS_ENV_FILE"
+        set +a
+        [[ -n "${BWS_ACCESS_TOKEN-}" ]] || die "$BWS_ENV_FILE does not define BWS_ACCESS_TOKEN"
+        return 0
+      fi
+      die "need BWS_ACCESS_TOKEN (export it, use -p, or write $BWS_ENV_FILE)"
+      ;;
+    onepassword)
+      if [[ -n "${OP_SERVICE_ACCOUNT_TOKEN-}" ]]; then return 0; fi
+      if [[ -r "$OP_ENV_FILE" ]]; then
+        set -a
+        # shellcheck source=/dev/null
+        . "$OP_ENV_FILE"
+        set +a
+        return 0
+      fi
+      die "need OP_SERVICE_ACCOUNT_TOKEN or $OP_ENV_FILE"
+      ;;
+  esac
+}
+
+do_secrets() {
+  local sub="${1-}" ref man conf be man_path var
+  read_auth_mode 2>/dev/null || true
+  # Honour -p already folded into PROMPT_AUTH by caller when we are dispatched early.
+  case "$sub" in
+    -h|--help|help|'')
+      printf 'usage: %s secrets list\n' "$LAUNCHER_NAME"
+      printf '       %s secrets get <ref>\n' "$LAUNCHER_NAME"
+      printf '       %s secrets which\n' "$LAUNCHER_NAME"
+      printf '       %s secrets validate [manifest-or-harness]\n' "$LAUNCHER_NAME"
+      printf '\nrefs: UUID | uuid:UUID | name:KEY | project:PROJECT/KEY\n'
+      printf 'list/get use Bitwarden Secrets Manager (bws) with the same auth as launches.\n'
+      return 0
+      ;;
+    list)
+      ensure_helper_auth bitwarden
+      command -v bws >/dev/null 2>&1 || die "bws not on PATH"
+      bws secret list --output table 2>/dev/null || bws secret list
+      unset BWS_ACCESS_TOKEN
+      return 0
+      ;;
+    get)
+      ref="${2-}"
+      [[ -n "$ref" ]] || die "usage: $LAUNCHER_NAME secrets get <ref>"
+      ensure_helper_auth bitwarden
+      command -v bws >/dev/null 2>&1 || die "bws not on PATH"
+      # Resolve name: / project: to UUID then get — reuse python list lookup.
+      ref="$(bws_resolve_ref_to_id "$ref")" || die "could not resolve ref"
+      bws secret get "$ref" --output json \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])'
+      unset BWS_ACCESS_TOKEN
+      return 0
+      ;;
+    which)
+      printf 'Harness → variables (names only; values never printed)\n\n'
+      shopt -s nullglob
+      for conf in "$HARNESS_DIR"/*.conf; do
+        name="${conf##*/}"; name="${name%.conf}"
+        be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+        man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+        be="$(trim "${be:-$DEFAULT_BACKEND}")"
+        man="$(trim "$man")"
+        printf '%s  (backend=%s manifest=%s)\n' "$name" "$be" "${man:-?}"
+        if [[ -n "$man" ]]; then
+          man_path="$(resolve_manifest_path "$man")"
+          if [[ -r "$man_path" ]]; then
+            while IFS= read -r var; do
+              printf '  %s\n' "$var"
+            done < <(manifest_var_names "$man_path")
+          else
+            printf '  (manifest missing: %s)\n' "$man_path"
+          fi
+        fi
+      done
+      shopt -u nullglob
+      return 0
+      ;;
+    validate)
+      man="${2-}"
+      if [[ -z "$man" ]]; then
+        # validate every harness manifest
+        local err=0
+        shopt -s nullglob
+        for conf in "$HARNESS_DIR"/*.conf; do
+          name="${conf##*/}"; name="${name%.conf}"
+          be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+          man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+          be="$(trim "${be:-$DEFAULT_BACKEND}")"
+          man_path="$(resolve_manifest_path "$(trim "$man")")"
+          printf '%s: ' "$name"
+          if validate_manifest_syntax "$man_path" "$be"; then
+            printf 'ok\n'
+          else
+            printf 'FAIL\n'; err=1
+          fi
+        done
+        shopt -u nullglob
+        return "$err"
+      fi
+      # harness name or manifest path
+      if [[ -r "$HARNESS_DIR/${man}.conf" ]]; then
+        conf="$HARNESS_DIR/${man}.conf"
+        be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+        man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+        be="$(trim "${be:-$DEFAULT_BACKEND}")"
+        man_path="$(resolve_manifest_path "$(trim "$man")")"
+      else
+        man_path="$(resolve_manifest_path "$man")"
+        be="${3:-$DEFAULT_BACKEND}"
+      fi
+      validate_manifest_syntax "$man_path" "$be"
+      ;;
+    *)
+      die "unknown secrets subcommand '$sub' (try: list, get, which, validate)"
+      ;;
+  esac
+}
+
+# Map a bitwarden ref to a secret id (UUID). Needs BWS_ACCESS_TOKEN set.
+# Prints the UUID only.
+bws_resolve_ref_to_id() {
+  local ref="$1" bare
+  case "$ref" in
+    uuid:*) bare="${ref#uuid:}" ;;
+    *) bare="$ref" ;;
+  esac
+  if is_uuid "$bare"; then
+    printf '%s' "$bare"
+    return 0
+  fi
+  case "$ref" in
+    name:*|project:*)
+      command -v python3 >/dev/null 2>&1 || die "python3 required for name: / project: refs"
+      bws secret list --output json | python3 -c '
+import json,sys
+ref=sys.argv[1]
+data=json.load(sys.stdin)
+if isinstance(data, dict):
+    data=data.get("data") or data.get("secrets") or []
+want_name=None
+want_proj=None
+if ref.startswith("name:"):
+    want_name=ref[5:]
+elif ref.startswith("project:"):
+    rest=ref[8:]
+    if "/" not in rest:
+        sys.stderr.write("project: ref needs PROJECT/SECRET\n"); sys.exit(2)
+    want_proj, want_name=rest.split("/",1)
+else:
+    sys.stderr.write("bad ref\n"); sys.exit(2)
+matches=[]
+for s in data or []:
+    key=s.get("key") or s.get("name") or ""
+    if key != want_name:
+        continue
+    p=s.get("project") or {}
+    pn=p.get("name") if isinstance(p, dict) else str(p or "")
+    if want_proj is not None and pn != want_proj:
+        continue
+    matches.append(s.get("id") or "")
+if not matches:
+    sys.stderr.write("no secret matched %r\n" % (ref,)); sys.exit(1)
+if len(matches) > 1 and want_proj is None:
+    sys.stderr.write("multiple secrets named %r; use project:PROJECT/%s\n" % (want_name, want_name)); sys.exit(1)
+sys.stdout.write(matches[0])
+' "$ref"
+      ;;
+    *)
+      die "bad bitwarden ref '$ref' (UUID, uuid:UUID, name:KEY, or project:PROJECT/KEY)"
+      ;;
+  esac
+}
+
+# --- Reserved: version (no config, no root) --------------------------------
+if is_primary_cmd "$invoked" \
+   && { [[ "${1-}" == "version" ]] || [[ "${1-}" == "--version" ]] || [[ "${1-}" == "-V" ]]; }; then
+  do_version
+  exit 0
+fi
 
 # --- Reserved: uninstall (must run as root, never as the agent user) --------
 if is_primary_cmd "$invoked" \
@@ -581,16 +1168,30 @@ if is_primary_cmd "$invoked"; then
   if [[ "$HARNESS" == "uninstall" && ! -e "$HARNESS_DIR/uninstall.conf" ]]; then
     die "internal error: uninstall should have been handled earlier"
   fi
-  # setup: interactive vault backend help (does not need the agent hop).
+  # Reserved management commands (no service-user hop, no agent).
+  # A real harness of the same name wins if harnesses.d/<name>.conf exists.
+  if [[ "$HARNESS" == "version" || "$HARNESS" == "--version" || "$HARNESS" == "-V" ]] \
+     && [[ ! -e "$HARNESS_DIR/version.conf" ]]; then
+    do_version
+    exit 0
+  fi
   if [[ "$HARNESS" == "setup" && ! -e "$HARNESS_DIR/setup.conf" ]]; then
     do_setup
     exit 0
   fi
-  # auth-mode: show or set machine-wide default (file vs prompt).
   if [[ "$HARNESS" == "auth-mode" && ! -e "$HARNESS_DIR/auth-mode.conf" ]]; then
     do_auth_mode ${1+"$@"}
     exit 0
   fi
+  if [[ "$HARNESS" == "doctor" && ! -e "$HARNESS_DIR/doctor.conf" ]]; then
+    do_doctor
+    exit $?
+  fi
+  if [[ "$HARNESS" == "secrets" && ! -e "$HARNESS_DIR/secrets.conf" ]]; then
+    do_secrets ${1+"$@"}
+    exit $?
+  fi
+  # `run` continues into the service-user path (needs scrub + resolve + exec).
   # Keep the invoked name (va or vaulted-agent) so sudoers can grant either path.
   launcher_path="${LAUNCHER_BIN_DIR}/${invoked}"
 else
@@ -618,53 +1219,127 @@ if [[ "$(id -un)" != "$SERVICE_USER" ]]; then
     "$launcher_path" ${orig[@]+"${orig[@]}"}
 fi
 
-# --- Read the harness definition -------------------------------------------
+# --- Read the harness definition (or parse `run`) --------------------------
 # One file per harness, `key = value`, one setting per line. The file is
 # parsed, never sourced and never eval'd. Sourcing is less code and is what
 # most shell projects reach for, but it makes the config file arbitrary code
 # executed as the service account that holds the vault token.
-conf="${HARNESS_DIR}/${HARNESS}.conf"
-[[ -r "$conf" ]] || die "unknown harness '$HARNESS' (no readable $conf)"
+#
+# `va run -m MANIFEST [--backend NAME] [--workdir DIR] -- cmd [args…]`
+# skips harnesses.d and injects into an arbitrary command (same scrub + resolve).
 
 bin_dir=""; manifest=""; labels="no"; keep_extra=""; backend=""; workdir_key=""
 cmd=(); extra_args=()
-lineno=0
-while IFS= read -r raw || [[ -n "$raw" ]]; do
-  lineno=$(( lineno + 1 ))
-  raw="${raw%$'\r'}"                                  # tolerate CRLF
-  entry="$(trim "$raw")"
-  [[ -z "$entry" || "$entry" == "#"* ]] && continue
-  [[ "$entry" == *=* ]] || die "$conf:$lineno: expected 'key = value'"
-  key="$(trim "${entry%%=*}")"
-  val="$(trim "${entry#*=}")"
-  case "$key" in
-    bin)      bin_dir="$val" ;;
-    manifest) manifest="$val" ;;
-    labels)   labels="$val" ;;
-    keep)     keep_extra="$val" ;;
-    backend)  backend="$val" ;;
-    workdir)  workdir_key="$val" ;;
-    command)
-      # Word-split on whitespace only: no globbing, no expansion, no eval.
-      # Use `arg =` lines for any argument that contains a space.
-      set -f; _oifs="$IFS"; IFS=$' \t'
-      # shellcheck disable=SC2206
-      cmd=( $val )
-      IFS="$_oifs"; set +f; unset _oifs ;;
-    arg)      extra_args+=("$val") ;;                 # taken verbatim, spaces and all
-    *)        die "$conf:$lineno: unknown key '$key'" ;;
-  esac
-done < "$conf"
+conf=""
+RUN_MODE=0
 
-(( ${#cmd[@]} )) || die "$conf: no 'command =' line"
-[[ -n "$manifest" ]] || die "$conf: no 'manifest =' line"
-cmd+=( ${extra_args[@]+"${extra_args[@]}"} )
-backend="${backend:-$DEFAULT_BACKEND}"
+if [[ "$HARNESS" == "run" && ! -e "$HARNESS_DIR/run.conf" ]]; then
+  RUN_MODE=1
+  workdir_key="caller"
+  backend="$DEFAULT_BACKEND"
+  run_manifest=""; run_backend=""; run_workdir=""
+  # Parse run flags from remaining argv; command starts after -- (or first non-flag).
+  while (( $# )); do
+    case "$1" in
+      -m|--manifest)
+        (( $# >= 2 )) || die "run: $1 needs a manifest path"
+        run_manifest="$2"; shift 2 ;;
+      --manifest=*)
+        run_manifest="${1#*=}"; shift ;;
+      --backend)
+        (( $# >= 2 )) || die "run: --backend needs a name"
+        run_backend="$2"; shift 2 ;;
+      --backend=*)
+        run_backend="${1#*=}"; shift ;;
+      --workdir)
+        (( $# >= 2 )) || die "run: --workdir needs a path or 'caller'"
+        run_workdir="$2"; shift 2 ;;
+      --workdir=*)
+        run_workdir="${1#*=}"; shift ;;
+      -h|--help)
+        printf 'usage: %s run -m MANIFEST [--backend NAME] [--workdir DIR] -- cmd [args...]\n' \
+          "$LAUNCHER_NAME"
+        printf '\nInject vault-resolved secrets into any command (no harness file).\n'
+        printf '  -m, --manifest   refs file (relative paths are under %s)\n' "$MANIFEST_DIR"
+        printf '  --backend        onepassword|bitwarden|sops|pass|plainfile (default: %s)\n' \
+          "$DEFAULT_BACKEND"
+        printf '  --workdir        caller (default) | absolute path | \$HOME/…\n'
+        printf '  -p               prompt for vault token this launch\n'
+        printf '\nExample:\n'
+        printf '  %s run -m openai.env.refs --backend bitwarden -- \\\\\n' "$LAUNCHER_NAME"
+        printf '    python gpt_image.py generate "a lighthouse" --output out.png\n'
+        exit 0
+        ;;
+      --)
+        shift
+        break ;;
+      -*)
+        die "run: unknown option '$1' (want -m/--manifest, --backend, --workdir, or --)"
+        ;;
+      *)
+        # bare command without -- is allowed: va run -m x env
+        break ;;
+    esac
+  done
+  (( $# )) || die "run: missing command after options (try: run -m MANIFEST -- cmd)"
+  [[ -n "$run_manifest" ]] || die "run: need -m/--manifest"
+  manifest="$run_manifest"
+  [[ -n "$run_backend" ]] && backend="$run_backend"
+  [[ -n "$run_workdir" ]] && workdir_key="$run_workdir"
+  cmd=( "$@" )
+  set --
+  backend="${backend:-$DEFAULT_BACKEND}"
+else
+  conf="${HARNESS_DIR}/${HARNESS}.conf"
+  [[ -r "$conf" ]] || die "unknown harness '$HARNESS' (no readable $conf)"
+
+  lineno=0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    lineno=$(( lineno + 1 ))
+    raw="${raw%$'\r'}"                                  # tolerate CRLF
+    entry="$(trim "$raw")"
+    [[ -z "$entry" || "$entry" == "#"* ]] && continue
+    [[ "$entry" == *=* ]] || die "$conf:$lineno: expected 'key = value'"
+    key="$(trim "${entry%%=*}")"
+    val="$(trim "${entry#*=}")"
+    case "$key" in
+      bin)      bin_dir="$val" ;;
+      manifest) manifest="$val" ;;
+      labels)   labels="$val" ;;
+      keep)     keep_extra="$val" ;;
+      backend)  backend="$val" ;;
+      workdir)  workdir_key="$val" ;;
+      command)
+        # Word-split on whitespace only: no globbing, no expansion, no eval.
+        # Use `arg =` lines for any argument that contains a space.
+        set -f; _oifs="$IFS"; IFS=$' \t'
+        # shellcheck disable=SC2206
+        cmd=( $val )
+        IFS="$_oifs"; set +f; unset _oifs ;;
+      arg)      extra_args+=("$val") ;;                 # taken verbatim, spaces and all
+      *)        die "$conf:$lineno: unknown key '$key'" ;;
+    esac
+  done < "$conf"
+
+  (( ${#cmd[@]} )) || die "$conf: no 'command =' line"
+  [[ -n "$manifest" ]] || die "$conf: no 'manifest =' line"
+  cmd+=( ${extra_args[@]+"${extra_args[@]}"} )
+  backend="${backend:-$DEFAULT_BACKEND}"
+fi
 
 # Expand $HOME by substitution rather than eval, for the same reason as above.
 bin_dir="${bin_dir//\$\{HOME\}/$HOME}"; bin_dir="${bin_dir//\$HOME/$HOME}"
-[[ "$manifest" == /* ]] || manifest="${MANIFEST_DIR}/${manifest}"
+# Also expand $HOME in command[0] when it is a path (tool CLIs under $HOME/…).
+if (( ${#cmd[@]} )) && [[ "${cmd[0]}" == *'$HOME'* || "${cmd[0]}" == *'${HOME}'* ]]; then
+  cmd[0]="${cmd[0]//\$\{HOME\}/$HOME}"
+  cmd[0]="${cmd[0]//\$HOME/$HOME}"
+fi
+manifest="$(resolve_manifest_path "$manifest")"
 [[ -r "$manifest" ]] || die "cannot read manifest $manifest"
+# Fail closed on placeholder refs / bad UUIDs before talking to the vault.
+if ! validate_manifest_syntax "$manifest" "$backend"; then
+  die "manifest validation failed for $manifest (backend=$backend). Fix refs or run: $LAUNCHER_NAME secrets validate"
+fi
 
 # Working directory for the agent process.
 #   (unset)     → WORKDIR from install (service account home / --workdir)
@@ -785,8 +1460,9 @@ load_auth() {                                # $1 = file, $2 = variable it must 
   if [[ -n "${!var-}" ]]; then return 0; fi
 
   if (( PROMPT_AUTH )); then
-    [[ -r /dev/tty ]] || die "auth_mode=prompt needs a terminal (or export $var)"
-    printf '%s (not written to disk): ' "$var" >/dev/tty
+    [[ -r /dev/tty ]] || die "auth_mode=prompt needs a terminal (or export $var)
+  For agent→agent launches: auth-mode file + $file, or export $var in the parent."
+    printf '%s\n(not written to disk): ' "$(auth_prompt_label "$var")" >/dev/tty
     read -rs token < /dev/tty || token=""
     printf '\n' >/dev/tty
     [[ -n "$token" ]] || die "empty $var"
@@ -806,7 +1482,8 @@ load_auth() {                                # $1 = file, $2 = variable it must 
   # No file and not forced prompt: offer a one-shot prompt when a TTY is present.
   if [[ -r /dev/tty ]]; then
     printf 'vaulted-agent: %s missing %s\n' "$backend" "$file" >/dev/tty
-    printf '  enter %s for this launch only (empty to abort): ' "$var" >/dev/tty
+    printf '  enter %s for this launch only (empty to abort):\n  ' \
+      "$(auth_prompt_label "$var")" >/dev/tty
     read -rs token < /dev/tty || token=""
     printf '\n' >/dev/tty
     [[ -n "$token" ]] || die "backend '$backend' needs $file (or: auth-mode prompt / -p / export $var)"
@@ -814,7 +1491,11 @@ load_auth() {                                # $1 = file, $2 = variable it must 
     return 0
   fi
 
-  die "backend '$backend' needs $file (is this the service account?). Or: $LAUNCHER_NAME auth-mode prompt"
+  die "backend '$backend' needs $file (is this the service account?).
+  No TTY for a token prompt. For agent→agent launches either:
+    - auth_mode=file + $file (0640), or
+    - export $var in the parent before $LAUNCHER_NAME …
+  Or run from a terminal: $LAUNCHER_NAME auth-mode prompt / -p"
 }
 
 auth_vars=()
@@ -845,17 +1526,19 @@ case "$backend" in
     # bws: fetch then parse. A pipe to python turned auth failures into a
     # confusing JSONDecodeError ("Expecting value") after bws printed the real
     # reason (often: token is not a Secrets Manager access token).
+    # Refs: UUID | uuid:UUID | name:KEY | project:PROJECT/KEY
     bws_secret_value() {
-      local ref="$1" errf json val
+      local ref="$1" id errf json val
+      id="$(bws_resolve_ref_to_id "$ref")" || die "could not resolve bitwarden ref '$ref'"
       errf="$(mktemp)" || die "mktemp failed"
-      if ! json="$(bws secret get "$ref" --output json 2>"$errf")"; then
+      if ! json="$(bws secret get "$id" --output json 2>"$errf")"; then
         val="$(tr -d '\r' < "$errf" | head -c 500)"
         rm -f "$errf"
-        die "bws secret get '$ref' failed${val:+
+        die "bws secret get '$ref' (id $id) failed${val:+
   $val}
   BWS_ACCESS_TOKEN must be a Bitwarden Secrets Manager access token
   (Machine Accounts → Access Tokens), not your vault password or login API key.
-  List secret ids: bws secret list"
+  List secrets: $LAUNCHER_NAME secrets list"
       fi
       rm -f "$errf"
       val="$(printf '%s' "$json" | python3 -c \

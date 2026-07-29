@@ -13,7 +13,7 @@
 #
 # Pin a version (recommended for shared hosts / repeatable deploys):
 #
-#   VAULTED_AGENT_VERSION=v0.2.0 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+#   VAULTED_AGENT_VERSION=v0.3.0 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 #
 # Pass flags through to install.sh after --:
 #
@@ -26,14 +26,16 @@
 #   bash /tmp/vaulted-agent-install.sh
 #
 # The vault token is never written by this script. After install you still put
-# the service-account token in op.env (or your chosen backend) yourself.
+# the service-account token in op.env / bws.env (or your chosen backend) yourself,
+# or use auth_mode=prompt and paste it each launch.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent-launcher}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # Bump this when cutting a release so unpinned one-liners stay intentional.
-DEFAULT_VERSION="v0.2.0"
+# Must match a published GitHub release tag (and bin/vaulted-agent VERSION).
+DEFAULT_VERSION="v0.3.0"
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"
@@ -44,6 +46,9 @@ need() { command -v "$1" >/dev/null 2>&1 || die "need '$1' on PATH"; }
 need curl
 need tar
 need mktemp
+
+printf 'vaulted-agent remote install (pin %s; override with VAULTED_AGENT_VERSION=…)\n' \
+  "$VERSION"
 
 # Resolve "latest" via the GitHub releases API when asked. A missing release
 # is a hard error — floating main is deliberately not a fallback.
