@@ -312,9 +312,11 @@ usage() {
     "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s pick [args...]    choose one interactively\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s doctor            check install / harnesses / manifests\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
-  printf '       %s|%s secrets …         list / get / which / validate (vault helpers)\n' \
+  printf '       %s|%s secrets …         list / get / which / validate / refresh\n' \
     "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s setup             configure vault backend / token\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
+  printf '       %s|%s refresh [file]    rebuild Bitwarden refs after adding SM secrets\n' \
+    "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s auth-mode [mode]  show or set default auth mode\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
   printf '       %s|%s version           print version (%s)\n' "$LAUNCHER_NAME" "$SHORT_NAME" "$VERSION" >&2
   printf '       %s|%s uninstall [opts]  remove this install (needs root)\n' "$LAUNCHER_NAME" "$SHORT_NAME" >&2
