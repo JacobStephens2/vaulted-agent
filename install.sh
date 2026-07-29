@@ -15,9 +15,14 @@
 #   ./install.sh --user conductor --workdir /srv/orchestration --link-user alice \
 #                --op-env /etc/orchestration/op.env --allow-user alice
 #
-# To remove it again, use ./uninstall.sh (a front door onto --uninstall here):
+# To remove an install, prefer the installed binary (no git tree needed):
 #
-#   ./install.sh --uninstall [--link-user alice] [--purge] [--dry-run] [--yes]
+#   sudo vaulted-agent uninstall [--purge] [--dry-run] [--yes] [--link-user alice]
+#   sudo va uninstall …
+#
+# From this tree before/without an install, the same code path is:
+#
+#   sudo ./install.sh --uninstall …
 #
 # Uninstall removes the launcher, any symlinks that point at it, and the
 # sudoers rule. It keeps your config unless you add --purge, and it never

@@ -405,55 +405,31 @@ boundary above it decorative.
 
 ## Uninstall
 
-If you installed with the one-liner (or any path that left `vaulted-agent` on
-your PATH), remove it the same way you run agents:
+Remove it the same way you run agents - uninstall lives **in the installed
+binary**, so you do not need the git tree (works after a `curl | bash` install):
 
 ```bash
 sudo vaulted-agent uninstall              # interactive; keeps config
 sudo vaulted-agent uninstall --purge      # also remove config
 sudo vaulted-agent uninstall --dry-run    # show the plan only
 sudo vaulted-agent uninstall --yes        # no prompts (scripts/cron)
+# short alias:
+sudo va uninstall --purge
 ```
 
-That works after a `curl | bash` install because uninstall lives **in the
-installed binary** - you do not need the git tree anymore.
+It prompts when a terminal is present, lists the exact paths it would remove,
+and asks once more before deleting. A symlink is only removed when it resolves
+to this launcher; anything else at those paths is left alone (“not ours”).
 
-From a checkout of this repo you can still use the older front door:
-
-```console
-$ sudo ./uninstall.sh
-
-Found:
-  /usr/local/bin/vaulted-agent
-  /etc/sudoers.d/vaulted-agent
-  /home/alice/.local/bin/vaulted-agent
-  /etc/vaulted-agent  (2 live harnesses, 5 manifests)
-  /usr/local/bin/claude-conductor  (not ours, will be left alone)
-
-  1) Remove the launcher, its symlinks and the sudoers rule; keep config
-  2) Remove all of that, and /etc/vaulted-agent as well
-  3) Show what would happen, change nothing
-  q) Quit
-
-choice [1-3, q]:
-```
-
-It prompts when a terminal is present, then lists the exact paths and asks
-once more before deleting anything. `uninstall.sh` forwards to
-`install.sh --uninstall` for the same discovery rules.
-
-It removes a symlink only when that link resolves to the launcher it is
-uninstalling, and reports anything else at those paths as "left alone (not
-ours)". A box with its own launchers using the same names keeps them.
-
-Config is kept without `--purge`, since harness files are usually
-hand-written. **Backend credentials are never removed** - `op.env`, `bws.env`
-and `age.key` may be shared with other tooling, particularly if you installed
-with `--op-env` pointing at a file that already existed. Delete those yourself
-if you want them gone.
+Config is kept without `--purge`, since harness files are usually hand-written.
+**Backend credentials are never removed** - `op.env`, `bws.env` and `age.key`
+may be shared with other tooling. Delete those yourself if you want them gone.
 
 Add `--link-user NAME` to also remove that user's `~/.local/bin` symlink; the
 user who invoked sudo is checked automatically.
+
+From a checkout (no installed binary yet), the same logic is also reachable as
+`sudo ./install.sh --uninstall …`.
 
 ## Configuration
 
