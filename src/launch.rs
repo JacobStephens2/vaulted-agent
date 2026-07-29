@@ -143,7 +143,7 @@ pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Re
         .unwrap_or(&program);
 
     let mut extra = opts.extra_args.clone();
-    extra = resume::normalize_argv(agent_base, &extra, harness.labels);
+    extra = resume::normalize_argv(agent_base, &extra, harness.labels)?;
 
     let mut cmd = Command::new(&program);
     cmd.args(&cmdline)

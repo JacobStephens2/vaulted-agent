@@ -39,14 +39,66 @@ pub fn line_for_secret(id: &str, key: &str) -> String {
     }
 }
 
+/// True if the refs file already maps this secret (id or name:KEY on a VAR= line).
 fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
-    if text.contains(id) {
-        return true;
-    }
-    if !key.is_empty() && text.contains(&format!("name:{key}")) {
-        return true;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
+            continue;
+        }
+        let Some((_, v)) = line.split_once('=') else {
+            continue;
+        };
+        let r = v.trim();
+        if !id.is_empty() {
+            if r == id || r == format!("uuid:{id}") {
+                return true;
+            }
+        }
+        if !key.is_empty() {
+            if r == format!("name:{key}") {
+                return true;
+            }
+            // project:PROJECT/KEY also counts as mapped for this key
+            if let Some(rest) = r.strip_prefix("project:") {
+                if rest.rsplit_once('/').map(|(_, s)| s) == Some(key) {
+                    return true;
+                }
+            }
+        }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substring_uuid_in_comment_is_not_a_hit() {
+        let text = "# note about 00000000-0000-0000-0000-000000000001\nOPENAI=name:other\n";
+        assert!(!text_has_secret(
+            text,
+            "00000000-0000-0000-0000-000000000001",
+            "openai-api-key"
+        ));
+    }
+
+    #[test]
+    fn name_ref_line_is_a_hit() {
+        let text = "OPENAI_API_KEY=name:openai-api-key\n";
+        assert!(text_has_secret(text, "id-x", "openai-api-key"));
+    }
+
+    #[test]
+    fn bare_uuid_value_is_a_hit() {
+        let text = "X=00000000-0000-0000-0000-000000000099\n";
+        assert!(text_has_secret(
+            text,
+            "00000000-0000-0000-0000-000000000099",
+            "anything"
+        ));
+    }
 }
 
 pub fn write_refs_replace(

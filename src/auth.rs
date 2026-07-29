@@ -1,7 +1,7 @@
 //! Load vault manager tokens from env, file, or TTY prompt.
 
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::Write;
 use std::path::Path;
 
 use crate::config::{AuthMode, Paths};
@@ -67,28 +67,32 @@ fn read_token_file(path: &Path, key: &str) -> Result<Option<ManagerToken>> {
 }
 
 fn prompt_token(kind: TokenKind) -> Result<ManagerToken> {
-    let tty = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty");
-    let Ok(mut tty) = tty else {
+    // Prefer /dev/tty so prompts work when stdout is piped (bash parity).
+    if !Path::new("/dev/tty").exists() {
         return Err(Error::Message(format!(
             "auth_mode=prompt needs a terminal (or export {})\n  For agent→agent launches: auth-mode file + token file, or export {}",
             kind.env_var(),
             kind.env_var()
         )));
-    };
-    writeln!(tty, "{}\n(hidden, not written to disk): ", kind.prompt_label())
+    }
+    if let Ok(mut tty) = fs::OpenOptions::new().write(true).open("/dev/tty") {
+        writeln!(
+            tty,
+            "{}\n(hidden, not written to disk): ",
+            kind.prompt_label()
+        )
         .map_err(|e| Error::Message(format!("tty write: {e}")))?;
-    // Best-effort: read a line (echo may still be on without termios; acceptable for v1)
-    let mut line = String::new();
-    let mut reader = io::BufReader::new(
-        fs::File::open("/dev/tty").map_err(|e| Error::Message(format!("tty open: {e}")))?,
-    );
-    reader
-        .read_line(&mut line)
-        .map_err(|e| Error::Message(format!("tty read: {e}")))?;
-    let token = line.trim().to_string();
+        tty.flush().ok();
+    }
+    // No-echo read (bash `read -rs` parity). rpassword uses termios when available.
+    let token = rpassword::read_password().map_err(|e| {
+        Error::Message(format!(
+            "could not read {} from terminal: {e}\n  export {} or write token file",
+            kind.env_var(),
+            kind.env_var()
+        ))
+    })?;
+    let token = token.trim().to_string();
     if token.is_empty() {
         return Err(Error::Message(format!("empty {}", kind.env_var())));
     }

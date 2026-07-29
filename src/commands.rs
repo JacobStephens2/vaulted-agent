@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::launch::{self, LaunchOpts};
 use crate::refs;
 use crate::secret::ManagerToken;
-use crate::validate::{self, validate_manifest_file};
+use crate::validate::validate_manifest_file;
 
 pub fn default_backend(paths: &Paths) -> String {
     crate::config::load_default_backend(paths)
@@ -151,9 +151,8 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                 .get(1)
                 .ok_or_else(|| Error::Message("usage: vaulted-agent secrets get <ref>".into()))?;
             let token = load_bws(paths)?;
-            // resolve via temporary empty manifest path? use backend helpers
-            let id = resolve_ref_id(&token, r)?;
-            let value = get_bws_value(&token, &id)?;
+            let id = backend::bws_resolve_ref(&token, r)?;
+            let value = backend::bws_secret_value(&token, &id)?;
             drop(token);
             println!("{value}");
             Ok(())
@@ -238,75 +237,6 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
             "unknown secrets subcommand '{other}' (try: list, get, which, validate, refresh)"
         ))),
     }
-}
-
-fn resolve_ref_id(token: &ManagerToken, r: &str) -> Result<String> {
-    // Reuse backend resolution by writing a one-line temp isn't needed —
-    // call through public resolve path via a tiny inline duplicate of uuid path.
-    let bare = r.strip_prefix("uuid:").unwrap_or(r);
-    if validate::is_uuid(bare) {
-        return Ok(bare.to_string());
-    }
-    // Use list + match
-    let rows = backend::bws_list_secrets(token)?;
-    if let Some(rest) = r.strip_prefix("name:") {
-        let matches: Vec<_> = rows.iter().filter(|(_, k, _)| k == rest).collect();
-        if matches.is_empty() {
-            return Err(Error::Message(format!("no secret matched {r}")));
-        }
-        if matches.len() > 1 {
-            return Err(Error::Message(format!(
-                "multiple secrets named {rest}; use project:PROJECT/{rest}"
-            )));
-        }
-        return Ok(matches[0].0.clone());
-    }
-    if let Some(rest) = r.strip_prefix("project:") {
-        let Some((p, s)) = rest.split_once('/') else {
-            return Err(Error::Message("project: ref needs PROJECT/SECRET".into()));
-        };
-        let m = rows
-            .iter()
-            .find(|(_, k, proj)| k == s && proj == p)
-            .ok_or_else(|| Error::Message(format!("no secret matched {r}")))?;
-        return Ok(m.0.clone());
-    }
-    Err(Error::Message(format!("bad bitwarden ref {r}")))
-}
-
-fn get_bws_value(token: &ManagerToken, id: &str) -> Result<String> {
-    // Resolve via a temp one-entry plain approach: call bws get
-    let out = Command::new("bws")
-        .args(["secret", "get", id, "--output", "json"])
-        .env("BWS_ACCESS_TOKEN", token.expose())
-        .output()
-        .map_err(|e| Error::Message(format!("bws: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::Message(format!(
-            "bws secret get failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )));
-    }
-    let parsed = Command::new("python3")
-        .arg("-c")
-        .arg("import json,sys; print(json.load(sys.stdin)['value'], end='')")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(&out.stdout)?;
-            child.wait_with_output()
-        })
-        .map_err(|e| Error::Message(format!("parse: {e}")))?;
-    if !parsed.status.success() {
-        return Err(Error::Message("unparseable bws get JSON".into()));
-    }
-    Ok(String::from_utf8_lossy(&parsed.stdout).into_owned())
 }
 
 pub fn cmd_doctor(paths: &Paths) -> Result<()> {
@@ -518,57 +448,148 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
-    let _ = args;
-    println!("vaulted-agent setup");
-    println!("config: {}", paths.config_dir.display());
-    // Non-interactive friendly: if BWS token available, write default refs with --all semantics
-    if env::var_os("BWS_ACCESS_TOKEN").is_some()
-        || paths.bws_env_file.is_file()
-        || force_prompt()
-        || auth_mode(paths) == AuthMode::Prompt
-    {
-        println!("\nBitwarden Secrets Manager path");
-        let token = match load_bws(paths) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("Could not load BWS token: {e}");
-                println!("Export BWS_ACCESS_TOKEN or write {} then re-run setup.", paths.bws_env_file.display());
-                return Ok(());
-            }
-        };
-        // Optionally persist token when auth_mode=file
-        if auth_mode(paths) == AuthMode::File && !paths.bws_env_file.is_file() {
+fn load_op(paths: &Paths) -> Result<ManagerToken> {
+    auth::load_manager_token(paths, auth_mode(paths), TokenKind::Op, force_prompt())
+}
+
+fn setup_bitwarden(paths: &Paths) -> Result<()> {
+    println!("\nBitwarden Secrets Manager");
+    println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
+    println!("  not your personal vault master password or login API key.\n");
+    let token = load_bws(paths)?;
+    if auth_mode(paths) == AuthMode::File {
+        if !paths.bws_env_file.is_file() {
             auth::write_token_file(&paths.bws_env_file, "BWS_ACCESS_TOKEN", &token)?;
             println!("wrote {}", paths.bws_env_file.display());
-        } else if auth_mode(paths) == AuthMode::Prompt {
-            println!("auth_mode=prompt — token not written to disk.");
         }
-        let secrets = backend::bws_list_secrets(&token)?;
-        drop(token);
-        if secrets.is_empty() {
-            println!("No secrets in this machine account yet. Create one in SM, then:");
-            println!("  vaulted-agent secrets list");
-            println!("  vaulted-agent refresh");
-            return Ok(());
-        }
-        println!("\n{} secret(s) visible.", secrets.len());
-        let man_path = paths.manifest_dir.join("openai.env.refs");
-        fs::create_dir_all(&paths.manifest_dir).ok();
-        if man_path.is_file() {
-            let added =
-                refs::write_refs_merge(&man_path, &secrets, None, "vaulted-agent setup")?;
-            println!("Merged into {} (+{added})", man_path.display());
-        } else {
-            refs::write_refs_replace(&man_path, &secrets, None, "vaulted-agent setup")?;
-            println!("Wrote {}", man_path.display());
-        }
-        println!("Point a harness at it with: manifest = openai.env.refs");
+    } else {
+        println!("auth_mode=prompt — token not written to disk.");
+    }
+    let secrets = backend::bws_list_secrets(&token)?;
+    drop(token);
+    if secrets.is_empty() {
+        println!("No secrets in this machine account yet. Create one in SM, then:");
+        println!("  vaulted-agent secrets list");
+        println!("  vaulted-agent refresh");
         return Ok(());
     }
+    println!("{} secret(s) visible.", secrets.len());
+    let man_path = paths.manifest_dir.join("openai.env.refs");
+    fs::create_dir_all(&paths.manifest_dir).ok();
+    if man_path.is_file() {
+        let added = refs::write_refs_merge(&man_path, &secrets, None, "vaulted-agent setup")?;
+        println!("Merged into {} (+{added})", man_path.display());
+    } else {
+        refs::write_refs_replace(&man_path, &secrets, None, "vaulted-agent setup")?;
+        println!("Wrote {}", man_path.display());
+    }
+    println!("Point a harness at it with: manifest = openai.env.refs");
+    Ok(())
+}
+
+fn setup_onepassword(paths: &Paths) -> Result<()> {
+    println!("\n1Password service account");
+    println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
+    let token = load_op(paths)?;
+    if auth_mode(paths) == AuthMode::File {
+        auth::write_token_file(
+            &paths.op_env_file,
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            &token,
+        )?;
+        println!("wrote {} (0640)", paths.op_env_file.display());
+    } else {
+        println!("auth_mode=prompt — token not written to disk (good).");
+        println!("  To store it: vaulted-agent auth-mode file, then re-run setup onepassword.");
+    }
+    drop(token);
+    println!("Manifests use op:// references; op inject runs at launch.");
+    println!("Example harness: backend = onepassword");
+    Ok(())
+}
+
+pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
+    println!("vaulted-agent setup");
+    println!("config: {}", paths.config_dir.display());
+    println!("auth_mode: {}", auth_mode(paths).as_str());
+
+    // Explicit backend: setup [bitwarden|onepassword|bws|op]
+    let want = args
+        .first()
+        .map(|s| s.as_str())
+        .filter(|s| !s.starts_with('-'));
+
+    let choose = |name: &str| -> Result<()> {
+        match name {
+            "bitwarden" | "bws" => setup_bitwarden(paths),
+            "onepassword" | "op" | "1password" => setup_onepassword(paths),
+            "pass" => {
+                println!("\npass backend uses the passwordstore.org store (GPG).");
+                println!("No token file. Ensure `pass` is on PATH for the service account.");
+                Ok(())
+            }
+            "sops" => {
+                println!("\nsops backend uses age identity at {}", paths.age_key_file.display());
+                println!("Place the age key there (0640) and encrypt manifests with sops.");
+                Ok(())
+            }
+            other => Err(Error::Message(format!(
+                "setup: unknown backend '{other}' (want bitwarden, onepassword, pass, sops)"
+            ))),
+        }
+    };
+
+    if let Some(name) = want {
+        return choose(name);
+    }
+
+    // Auto: prefer whichever token is already available (env or file).
+    if env::var_os("BWS_ACCESS_TOKEN").is_some() || paths.bws_env_file.is_file() {
+        return setup_bitwarden(paths);
+    }
+    if env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || paths.op_env_file.is_file() {
+        return setup_onepassword(paths);
+    }
+
+    // Interactive menu when TTY; else print usage.
+    if io::IsTerminal::is_terminal(&io::stdin()) && Path::new("/dev/tty").exists() {
+        eprintln!("Choose vault backend:");
+        eprintln!("  1) bitwarden   (Bitwarden Secrets Manager)");
+        eprintln!("  2) onepassword (1Password service account)");
+        eprintln!("  3) pass");
+        eprintln!("  4) sops");
+        eprint!("backend [1-4]: ");
+        let _ = io::stderr().flush();
+        let mut line = String::new();
+        let mut tty = io::BufReader::new(fs::File::open("/dev/tty").map_err(|e| {
+            Error::Message(format!("tty: {e}"))
+        })?);
+        tty.read_line(&mut line)
+            .map_err(|e| Error::Message(format!("tty read: {e}")))?;
+        let choice = line.trim();
+        let name = match choice {
+            "1" | "bitwarden" | "bws" => "bitwarden",
+            "2" | "onepassword" | "op" | "1password" => "onepassword",
+            "3" | "pass" => "pass",
+            "4" | "sops" => "sops",
+            "" => {
+                println!("Nothing configured. Re-run: vaulted-agent setup bitwarden|onepassword");
+                return Ok(());
+            }
+            other => {
+                return Err(Error::Message(format!("setup: bad choice '{other}'")));
+            }
+        };
+        return choose(name);
+    }
+
     println!(
-        "No vault token yet. For Bitwarden:\n  export BWS_ACCESS_TOKEN=…\n  vaulted-agent setup\nOr write {} and re-run.",
-        paths.bws_env_file.display()
+        "No vault token yet. Non-interactive examples:\n\
+         \x20 export BWS_ACCESS_TOKEN=… && vaulted-agent setup bitwarden\n\
+         \x20 export OP_SERVICE_ACCOUNT_TOKEN=… && vaulted-agent setup onepassword\n\
+         \x20 Or write {} / {} and re-run setup.",
+        paths.bws_env_file.display(),
+        paths.op_env_file.display()
     );
     Ok(())
 }

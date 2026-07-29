@@ -1,31 +1,18 @@
 //! Resume argv normalization for claude/codex/grok/kimi.
 
+use crate::error::{Error, Result};
 use crate::validate::is_uuid;
 
-fn label_to_uuid(label: &str, namespace: &str) -> String {
-    // UUIDv5 via python for stability matching bash (uuid.NAMESPACE_URL style with custom ns)
-    let out = std::process::Command::new("python3")
-        .arg("-c")
-        .arg(
-            "import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[2]+':'+sys.argv[1]))",
-        )
-        .arg(label)
-        .arg(namespace)
-        .output()
-        .ok();
-    out.and_then(|o| {
-        if o.status.success() {
-            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-        } else {
-            None
-        }
-    })
-    .unwrap_or_else(|| label.to_string())
+/// UUIDv5 over NAMESPACE_URL of `namespace:label` — matches prior bash/python:
+/// `uuid.uuid5(uuid.NAMESPACE_URL, f"{namespace}:{label}")`.
+pub fn label_to_uuid(label: &str, namespace: &str) -> String {
+    let name = format!("{namespace}:{label}");
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes()).to_string()
 }
 
-fn map_labels(args: &[String], labels: bool) -> Vec<String> {
+fn map_labels(args: &[String], labels: bool) -> Result<Vec<String>> {
     if !labels {
-        return args.to_vec();
+        return Ok(args.to_vec());
     }
     let mut out = Vec::new();
     let mut i = 0;
@@ -35,22 +22,38 @@ fn map_labels(args: &[String], labels: bool) -> Vec<String> {
             out.push(a.clone());
             i += 1;
             if i < args.len() && !args[i].starts_with('-') {
-                let mut v = args[i].clone();
-                if !is_uuid(&v) {
-                    v = label_to_uuid(&v, "vaulted-agent");
+                let v = &args[i];
+                if is_uuid(v) {
+                    out.push(v.clone());
+                } else {
+                    let mapped = label_to_uuid(v, "vaulted-agent");
+                    if !is_uuid(&mapped) {
+                        return Err(Error::Message(format!(
+                            "labels: failed to map session label {v:?} to UUID"
+                        )));
+                    }
+                    out.push(mapped);
                 }
-                out.push(v);
                 i += 1;
             }
             continue;
         }
-        if let Some(rest) = a.strip_prefix("--session-id=").or_else(|| a.strip_prefix("--resume=")) {
+        if let Some(rest) = a
+            .strip_prefix("--session-id=")
+            .or_else(|| a.strip_prefix("--resume="))
+        {
             let flag = a.split('=').next().unwrap();
-            let mut v = rest.to_string();
-            if !is_uuid(&v) {
-                v = label_to_uuid(&v, "vaulted-agent");
+            if is_uuid(rest) {
+                out.push(format!("{flag}={rest}"));
+            } else {
+                let mapped = label_to_uuid(rest, "vaulted-agent");
+                if !is_uuid(&mapped) {
+                    return Err(Error::Message(format!(
+                        "labels: failed to map session label {rest:?} to UUID"
+                    )));
+                }
+                out.push(format!("{flag}={mapped}"));
             }
-            out.push(format!("{flag}={v}"));
             i += 1;
             continue;
         }
@@ -58,11 +61,18 @@ fn map_labels(args: &[String], labels: bool) -> Vec<String> {
             out.push(a.clone());
             i += 1;
             if i < args.len() && !args[i].starts_with('-') {
-                let mut v = args[i].clone();
-                if !is_uuid(&v) {
-                    v = label_to_uuid(&v, "vaulted-agent");
+                let v = &args[i];
+                if is_uuid(v) {
+                    out.push(v.clone());
+                } else {
+                    let mapped = label_to_uuid(v, "vaulted-agent");
+                    if !is_uuid(&mapped) {
+                        return Err(Error::Message(format!(
+                            "labels: failed to map session label {v:?} to UUID"
+                        )));
+                    }
+                    out.push(mapped);
                 }
-                out.push(v);
                 i += 1;
             }
             continue;
@@ -70,7 +80,7 @@ fn map_labels(args: &[String], labels: bool) -> Vec<String> {
         out.push(a.clone());
         i += 1;
     }
-    out
+    Ok(out)
 }
 
 fn normalize_codex(args: &[String]) -> Vec<String> {
@@ -119,13 +129,13 @@ fn normalize_flag_resume(args: &[String]) -> Vec<String> {
 }
 
 /// Apply label mapping then agent-specific resume normalization.
-pub fn normalize_argv(agent_base: &str, args: &[String], labels: bool) -> Vec<String> {
-    let args = map_labels(args, labels);
-    match agent_base {
+pub fn normalize_argv(agent_base: &str, args: &[String], labels: bool) -> Result<Vec<String>> {
+    let args = map_labels(args, labels)?;
+    Ok(match agent_base {
         "codex" => normalize_codex(&args),
         "claude" | "grok" | "kimi" => normalize_flag_resume(&args),
         _ => args,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -138,13 +148,35 @@ mod tests {
             "codex",
             &["--resume".into(), "abc".into()],
             false,
-        );
+        )
+        .unwrap();
         assert_eq!(a, vec!["resume", "abc"]);
     }
 
     #[test]
     fn claude_bare_resume_to_flag() {
-        let a = normalize_argv("claude", &["resume".into(), "abc".into()], false);
+        let a = normalize_argv("claude", &["resume".into(), "abc".into()], false).unwrap();
         assert_eq!(a, vec!["--resume", "abc"]);
+    }
+
+    #[test]
+    fn label_maps_to_stable_uuidv5_python_parity() {
+        let u = label_to_uuid("my-label", "vaulted-agent");
+        // python3: uuid.uuid5(uuid.NAMESPACE_URL, "vaulted-agent:my-label")
+        assert_eq!(u, "d248adc0-ec24-5347-a7f7-d3cd06a1c790");
+        assert_eq!(u, label_to_uuid("my-label", "vaulted-agent"));
+    }
+
+    #[test]
+    fn labels_maps_session_arg() {
+        let a = normalize_argv(
+            "claude",
+            &["--resume".into(), "my-label".into()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(a[0], "--resume");
+        assert!(is_uuid(&a[1]), "{a:?}");
+        assert_ne!(a[1], "my-label");
     }
 }
