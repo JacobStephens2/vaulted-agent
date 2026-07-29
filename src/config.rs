@@ -186,10 +186,9 @@ impl Harness {
     }
 }
 
-pub fn load_auth_mode(paths: &Paths) -> AuthMode {
-    let Ok(text) = fs::read_to_string(&paths.defaults_file) else {
-        return AuthMode::File;
-    };
+/// Read a single `key = value` from defaults.conf (first match wins).
+pub fn load_default(paths: &Paths, key: &str) -> Option<String> {
+    let text = fs::read_to_string(&paths.defaults_file).ok()?;
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') || !line.contains('=') {
@@ -198,13 +197,40 @@ pub fn load_auth_mode(paths: &Paths) -> AuthMode {
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
-        if k.trim() == "auth_mode" {
-            if let Some(mode) = AuthMode::parse(v) {
-                return mode;
+        if k.trim() == key {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
             }
         }
     }
-    AuthMode::File
+    None
+}
+
+pub fn load_auth_mode(paths: &Paths) -> AuthMode {
+    load_default(paths, "auth_mode")
+        .and_then(|s| AuthMode::parse(&s))
+        .unwrap_or(AuthMode::File)
+}
+
+/// Service account for sudo re-exec (optional). Env VAULTED_AGENT_SERVICE_USER wins.
+pub fn load_service_user(paths: &Paths) -> Option<String> {
+    if let Ok(v) = std::env::var("VAULTED_AGENT_SERVICE_USER") {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    load_default(paths, "service_user")
+}
+
+/// Default vault backend when harness omits backend=.
+pub fn load_default_backend(paths: &Paths) -> String {
+    if let Ok(v) = std::env::var("VAULTED_AGENT_DEFAULT_BACKEND") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    load_default(paths, "default_backend").unwrap_or_else(|| "onepassword".into())
 }
 
 pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {

@@ -34,8 +34,8 @@ set -euo pipefail
 REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent-launcher}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # Bump this when cutting a release so unpinned one-liners stay intentional.
-# Must match a published GitHub release tag (and bin/vaulted-agent VERSION).
-DEFAULT_VERSION="v0.3.0"
+# Must match a published GitHub release tag (and Cargo.toml version).
+DEFAULT_VERSION="v0.4.0"
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"
@@ -75,6 +75,20 @@ VERSION="$(resolve_version "$VERSION")"
 # GitHub archive URLs accept both "v0.1.0" and "0.1.0"; tags in this repo use v*.
 ARCHIVE_URL="${VAULTED_AGENT_ARCHIVE_URL:-$GITHUB/$REPO/archive/refs/tags/${VERSION}.tar.gz}"
 
+# Prefer a release binary asset when present (no Rust toolchain on the host).
+detect_asset() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "$os:$arch" in
+    Linux:x86_64)  printf 'vaulted-agent-x86_64-unknown-linux-gnu' ;;
+    Linux:aarch64|Linux:arm64) printf 'vaulted-agent-aarch64-unknown-linux-gnu' ;;
+    Darwin:x86_64) printf 'vaulted-agent-x86_64-apple-darwin' ;;
+    Darwin:arm64)  printf 'vaulted-agent-aarch64-apple-darwin' ;;
+    *) return 1 ;;
+  esac
+}
+
 printf 'vaulted-agent remote install\n'
 printf '  repo    : %s\n' "$REPO"
 printf '  version : %s\n' "$VERSION"
@@ -85,8 +99,26 @@ workdir="$(mktemp -d "${TMPDIR:-/tmp}/vaulted-agent.XXXXXX")"
 cleanup() { rm -rf "$workdir"; }
 trap cleanup EXIT
 
+# Optional prebuilt binary (Rust runtime). Falls back to source-only install
+# which builds with cargo if needed.
+ASSET_NAME="$(detect_asset || true)"
+if [[ -n "$ASSET_NAME" ]]; then
+  asset_url="$GITHUB/$REPO/releases/download/${VERSION}/${ASSET_NAME}.tar.gz"
+  printf 'trying release binary: %s\n' "$asset_url"
+  if curl -fsSL -o "$workdir/bin.tgz" "$asset_url" 2>/dev/null; then
+    tar -xzf "$workdir/bin.tgz" -C "$workdir"
+    if [[ -f "$workdir/$ASSET_NAME" ]]; then
+      chmod +x "$workdir/$ASSET_NAME"
+      export VAULTED_AGENT_BIN="$workdir/$ASSET_NAME"
+      printf '  using prebuilt binary %s\n' "$VAULTED_AGENT_BIN"
+    fi
+  else
+    printf '  (no binary asset; will build from source if cargo is available)\n'
+  fi
+fi
+
 tarball="$workdir/src.tar.gz"
-printf 'downloading…\n'
+printf 'downloading source…\n'
 curl -fsSL -o "$tarball" "$ARCHIVE_URL" \
   || die "download failed: $ARCHIVE_URL
   Check that tag $VERSION exists on $REPO."
@@ -109,9 +141,13 @@ if [[ "$(id -u)" -ne 0 ]]; then
       "SUDO_USER=${SUDO_USER:-$(id -un)}" \
       "SUDO_UID=${SUDO_UID:-$(id -u)}" \
       "SUDO_GID=${SUDO_GID:-$(id -g)}" \
+      ${VAULTED_AGENT_BIN:+VAULTED_AGENT_BIN="$VAULTED_AGENT_BIN"} \
       bash "$src/install.sh" "$@"
   fi
   die "need root to install (re-run under sudo, or as root)"
 fi
 
+if [[ -n "${VAULTED_AGENT_BIN:-}" ]]; then
+  export VAULTED_AGENT_BIN
+fi
 bash "$src/install.sh" "$@"

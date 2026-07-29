@@ -9,7 +9,8 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent) ·
-Latest: [v0.3.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.3.0)
+Latest: [v0.4.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.0)
+(Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
 
@@ -41,7 +42,7 @@ vaulted-agent setup                 # backend / token; Bitwarden can build a ref
 vaulted-agent refresh               # rebuild refs after adding secrets in Bitwarden SM
 vaulted-agent auth-mode             # file (token on disk) vs prompt (paste each launch)
 vaulted-agent doctor                # harnesses, backends, manifest syntax (no secret values)
-vaulted-agent version               # e.g. vaulted-agent 0.3.0
+vaulted-agent version               # e.g. vaulted-agent 0.4.0
 va claude                           # with auth_mode=prompt: asks for vault token
 va claude -p                        # force prompt this launch only
 ```
@@ -150,7 +151,7 @@ va claude -c                          # continue latest (claude native)
 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 ```
 
-The remote installer pins a **tagged release** (default `v0.3.0`, not floating
+The remote installer pins a **tagged release** (default `v0.4.0`, not floating
 `main`). Override with `VAULTED_AGENT_VERSION=…` or `latest`.
 
 The installer:
@@ -174,7 +175,7 @@ va kimi
 Or from a release tag / local clone:
 
 ```bash
-git clone --branch v0.3.0 --depth 1 \
+git clone --branch v0.4.0 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 # local tree with Bitwarden + prompt auth (no token file):
@@ -183,7 +184,7 @@ sudo ./install.sh --backend bitwarden --auth-mode prompt
 
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.3.0 curl -fsSL …/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.4.0 curl -fsSL …/install.sh \| bash` |
 | Skip short alias `va` | `… \| bash -s -- --no-va` |
 | Skip agent auto-detect | `… \| bash -s -- --no-auto-harness` |
 | Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
@@ -221,7 +222,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.3.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.3.0)
+Latest: [v0.4.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.0)
 
 ## The honest claim
 

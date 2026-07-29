@@ -7,10 +7,12 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::auth::{self, TokenKind};
 use crate::backend;
-use crate::config::{Harness, Paths};
+use crate::config::{AuthMode, Harness, Paths, load_auth_mode};
 use crate::env_scrub::{build_child_env, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
+use crate::resume;
 use crate::secret::SecretValue;
 
 fn expand_home(s: &str) -> String {
@@ -38,11 +40,10 @@ fn resolve_workdir(harness: &Harness, caller_cwd: &Path) -> Result<PathBuf> {
     }
 }
 
-fn default_backend() -> String {
-    env::var("VAULTED_AGENT_DEFAULT_BACKEND").unwrap_or_else(|_| "onepassword".into())
+fn default_backend(paths: &Paths) -> String {
+    crate::config::load_default_backend(paths)
 }
 
-/// When set to "spawn", do not exec — spawn and wait (CLI acceptance tests).
 fn handoff_mode_spawn() -> bool {
     matches!(
         env::var("VAULTED_AGENT_HANDOFF").as_deref(),
@@ -50,7 +51,25 @@ fn handoff_mode_spawn() -> bool {
     )
 }
 
-pub fn launch_harness(paths: &Paths, harness: &Harness) -> Result<()> {
+fn force_prompt_from_env() -> bool {
+    env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+pub struct LaunchOpts {
+    pub force_prompt: bool,
+    pub extra_args: Vec<String>,
+}
+
+impl Default for LaunchOpts {
+    fn default() -> Self {
+        Self {
+            force_prompt: false,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Result<()> {
     let manifest = harness.resolve_manifest_path(paths);
     if !manifest.is_file() {
         return Err(Error::Io {
@@ -62,8 +81,39 @@ pub fn launch_harness(paths: &Paths, harness: &Harness) -> Result<()> {
     let backend_name = harness
         .backend
         .clone()
-        .unwrap_or_else(default_backend);
-    let secrets: HashMap<String, SecretValue> = backend::resolve(&backend_name, &manifest)?;
+        .unwrap_or_else(|| default_backend(paths));
+
+    let mode = match env::var("VAULTED_AGENT_AUTH_MODE").as_deref() {
+        Ok("prompt") => AuthMode::Prompt,
+        Ok("file") => AuthMode::File,
+        _ => load_auth_mode(paths),
+    };
+    let force = opts.force_prompt || force_prompt_from_env();
+
+    let token = match backend_name.as_str() {
+        "bitwarden" => Some(auth::load_manager_token(
+            paths,
+            mode,
+            TokenKind::Bws,
+            force,
+        )?),
+        "onepassword" => Some(auth::load_manager_token(
+            paths,
+            mode,
+            TokenKind::Op,
+            force,
+        )?),
+        _ => None,
+    };
+
+    let secrets: HashMap<String, SecretValue> =
+        backend::resolve(&backend_name, &manifest, paths, token.as_ref())?;
+
+    // Drop token from process env after resolve (best-effort)
+    drop(token);
+    for &name in MANAGER_TOKEN_VARS {
+        env::remove_var(name);
+    }
 
     let caller_cwd = env::current_dir().map_err(|e| Error::Message(format!("cwd: {e}")))?;
     let workdir = resolve_workdir(harness, &caller_cwd)?;
@@ -79,18 +129,25 @@ pub fn launch_harness(paths: &Paths, harness: &Harness) -> Result<()> {
         let path = child_env
             .get(std::ffi::OsStr::new("PATH"))
             .map(|p| format!("{bin}:{}", p.to_string_lossy()))
-            .unwrap_or(bin);
+            .unwrap_or_else(|| bin.clone());
         child_env.insert(OsString::from("PATH"), OsString::from(path));
     }
 
     if cmdline.is_empty() {
         return Err(Error::Message("empty command".into()));
     }
-    let program = cmdline.remove(0);
-    let program = expand_home(&program);
+    let program = expand_home(&cmdline.remove(0));
+    let agent_base = Path::new(&program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&program);
+
+    let mut extra = opts.extra_args.clone();
+    extra = resume::normalize_argv(agent_base, &extra, harness.labels);
 
     let mut cmd = Command::new(&program);
     cmd.args(&cmdline)
+        .args(&extra)
         .current_dir(&workdir)
         .env_clear()
         .envs(&child_env)
@@ -99,18 +156,49 @@ pub fn launch_harness(paths: &Paths, harness: &Harness) -> Result<()> {
         .stderr(Stdio::inherit());
 
     if handoff_mode_spawn() {
-        let status = cmd.status().map_err(|e| Error::Message(format!(
-            "failed to spawn {program}: {e}"
-        )))?;
+        let status = cmd
+            .status()
+            .map_err(|e| Error::Message(format!("failed to spawn {program}: {e}")))?;
         if status.success() {
             Ok(())
         } else {
-            Err(Error::Message(format!(
-                "command exited with {status}"
-            )))
+            Err(Error::Message(format!("command exited with {status}")))
         }
     } else {
         let err = cmd.exec();
         Err(Error::Message(format!("exec {program}: {err}")))
     }
+}
+
+pub fn launch_run(
+    paths: &Paths,
+    manifest: &Path,
+    backend: &str,
+    workdir: Option<&str>,
+    command: &[String],
+    force_prompt: bool,
+) -> Result<()> {
+    let h = Harness {
+        name: "run".into(),
+        backend: Some(backend.into()),
+        manifest: manifest.display().to_string(),
+        bin_dir: None,
+        workdir: workdir.map(|s| s.to_string()),
+        labels: false,
+        keep: vec![],
+        command: command.to_vec(),
+    };
+    // For run, manifest may be absolute already
+    let mut h = h;
+    if manifest.is_absolute() {
+        h.manifest = manifest.display().to_string();
+    }
+    launch_harness(
+        paths,
+        &h,
+        &LaunchOpts {
+            force_prompt,
+            extra_args: vec![],
+        },
+    )
 }

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RETIRED — not installed as runtime as of 0.4.0 (Rust binary is the launcher).
+# Kept for historical reference only. See MIGRATION.md.
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # vaulted-agent — run an AI coding agent as a dedicated service account with
 # vault-resolved secrets injected into its process environment at launch.
