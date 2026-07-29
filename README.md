@@ -164,7 +164,6 @@ sudo ./install.sh --backend bitwarden --auth-mode prompt
 | Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
 | Prompt each launch (no token file) | `… \| bash -s -- --backend bitwarden --auth-mode prompt` |
 | Shared host | `… \| bash -s -- --user agent --allow-user alice` |
-| Try without installing | `git clone … && ./demo/try-it.sh` |
 
 `curl … \| bash` can still prompt on a real terminal (answers are read from
 `/dev/tty`). In CI or non-TTY environments, pass `--backend` / `--auth-mode`
@@ -248,24 +247,6 @@ credential handling should not leave you to discover these:
   service account to a single vault, and only the items an agent needs.
 - **Root can read everything.** Nothing here defends against a compromised
   host.
-
-## Try it first
-
-No root, no vault, nothing installed, nothing written outside a temp
-directory:
-
-```bash
-git clone https://github.com/JacobStephens2/vaulted-agent-launcher
-cd vaulted-agent-launcher && ./demo/try-it.sh
-```
-
-It stands up a throwaway config with two stub agents and then demonstrates
-each claim on this page: a narrow manifest withholding secrets a wider one
-gets, a secret in the caller's environment failing to reach the agent, the
-secret being absent from `/proc/<pid>/cmdline` while present in the
-environment, and the launcher refusing to start an agent it could not fully
-feed. On v0.3+ it also checks `version`, `doctor`, `secrets which` /
-`secrets validate` (placeholders fail), and `va run -m … --backend plainfile`.
 
 ## Install details
 
@@ -715,9 +696,9 @@ the mechanism is the point: a caller can export a function named `git`,
 `curl`, or `ssh`, and the agent calls it instead of the binary it meant to
 run. The fix is a second pass with `declare -Fx` and `unset -f`.
 
-This one was found by the demo in this repo, which is the argument for
-shipping a demo that prints what the agent actually received rather than one
-that asserts everything is fine.
+This one is easy to miss if you only inspect `compgen -e` or a success banner:
+inspect what the agent process actually received (`/proc/<pid>/environ`, or a
+one-shot harness that prints env) after a scrub.
 
 ## Dependencies
 
