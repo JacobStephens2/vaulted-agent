@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# vaulted-agent — run an AI coding agent as a dedicated service account with
+# vault-resolved secrets injected into its process environment at launch.
+#
+# Properties this is built to hold:
+#   * resolved secrets are never written to disk
+#   * resolved secrets never appear on argv, so `ps` shows nothing
+#   * each harness receives only the secrets its own manifest names
+#   * the vault token that unlocks everything is dropped before the agent runs
+#   * injection failure aborts the launch; the agent never starts half-fed
+#
+# Two ways to invoke it, and the difference matters only to sudoers:
+#
+#   vaulted-agent codex [args...]     harness as the first argument
+#   codex-conductor [args...]         harness from a per-harness symlink
+#
+# The symlink form lets a sudoers rule name one path per harness, with no
+# argument matching. Prefer it when different people are entitled to different
+# harnesses. See "Harness selection" and the README.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+# ===== CONFIG ==============================================================
+SERVICE_USER="agent"                        # dedicated, non-human service account
+WORKDIR="/srv/agent"                        # agent's working directory
+CONFIG_DIR="/etc/vaulted-agent"
+HARNESS_DIR="${CONFIG_DIR}/harnesses.d"     # one <name>.conf per harness
+MANIFEST_DIR="${CONFIG_DIR}/manifests"      # per-harness secret manifests
+LAUNCHER_BIN_DIR="/usr/local/bin"           # where this file and its symlinks live
+
+# Secret backend. Set per harness with `backend =`; this is the default.
+#   onepassword  1Password CLI, `op inject` over a file of op:// references
+#   bitwarden    Bitwarden Secrets Manager, `bws secret get` per reference
+#   sops         a sops-encrypted dotenv, decrypted at launch
+#   pass         the passwordstore.org store, `pass show` per reference
+#   plainfile    a root-owned KEY=VALUE file. Least protection; see README.
+DEFAULT_BACKEND="onepassword"
+
+# Credentials that unlock each backend, all 0640 root:agent. Only the one
+# belonging to the selected backend is ever read, and it is dropped from the
+# environment before the agent starts.
+OP_ENV_FILE="${CONFIG_DIR}/op.env"          # OP_SERVICE_ACCOUNT_TOKEN
+BWS_ENV_FILE="${CONFIG_DIR}/bws.env"        # BWS_ACCESS_TOKEN
+AGE_KEY_FILE="${CONFIG_DIR}/age.key"        # age identity for sops
+LAUNCHER_NAME="vaulted-agent"
+LINK_SUFFIX="-conductor"                    # claude-conductor -> harness "claude"
+LABEL_NAMESPACE="vaulted-agent"              # UUIDv5 namespace for session labels
+
+# Everything not named here, and not named by the harness's manifest or its
+# keep= setting, is removed from the environment before the agent starts.
+# Keep this list as short as the agent will tolerate.
+PASSTHROUGH_VARS=(HOME PATH USER LOGNAME SHELL TERM COLORTERM TZ LANG LC_ALL)
+# ===========================================================================
+
+die() { printf '%s: %s\n' "${0##*/}" "$*" >&2; exit 1; }
+
+# Strip leading and trailing whitespace. Pure parameter expansion.
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+invoked="${0##*/}"
+orig=( ${1+"$@"} )               # exact argv, replayed verbatim across the sudo hop
+
+# Read the harness names, plus a one-line summary of each, out of harnesses.d.
+# Fills the parallel arrays HNAMES / HCMDS / HMANIFESTS.
+read_harnesses() {
+  local f
+  HNAMES=(); HCMDS=(); HMANIFESTS=()
+  compgen -G "$HARNESS_DIR/*.conf" >/dev/null 2>&1 || return 1
+  for f in "$HARNESS_DIR"/*.conf; do
+    local n="${f##*/}"; n="${n%.conf}"
+    HNAMES+=("$n")
+    HCMDS+=("$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$f" 2>/dev/null | head -1)")
+    HMANIFESTS+=("$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$f" 2>/dev/null | head -1)")
+  done
+}
+
+# Interactive chooser for `vaulted-agent pick`. Prompts on stderr and reads
+# from /dev/tty, so it still works when stdout is being captured. Sets PICKED.
+pick_harness() {
+  local i choice
+  read_harnesses || die "no harnesses configured in $HARNESS_DIR"
+  [[ -t 1 && -r /dev/tty ]] || \
+    die "'pick' needs an interactive terminal; name the harness instead"
+  {
+    printf '\n'
+    for i in "${!HNAMES[@]}"; do
+      printf '  %2d) %-16s %-38s %s\n' \
+        "$(( i + 1 ))" "${HNAMES[i]}" "${HCMDS[i]}" "${HMANIFESTS[i]}"
+    done
+    printf '\n'
+  } >&2
+  while :; do
+    printf 'harness [1-%d, q to quit]: ' "${#HNAMES[@]}" >&2
+    read -r choice < /dev/tty || { printf '\n' >&2; exit 130; }
+    case "$choice" in
+      q|Q|quit|exit) printf 'Nothing launched.\n' >&2; exit 0 ;;
+      ''|*[!0-9]*)   printf '  not a number\n' >&2; continue ;;
+    esac
+    if (( choice >= 1 && choice <= ${#HNAMES[@]} )); then
+      PICKED="${HNAMES[choice-1]}"; return 0
+    fi
+    printf '  out of range\n' >&2
+  done
+}
+
+usage() {
+  local f name cmdline
+  printf 'usage: %s <harness> [args...]\n' "$LAUNCHER_NAME" >&2
+  printf '       %s pick [args...]      choose one interactively\n' "$LAUNCHER_NAME" >&2
+  printf '       <harness>%s [args...]\n\n' "$LINK_SUFFIX" >&2
+  printf 'harnesses in %s:\n' "$HARNESS_DIR" >&2
+  if compgen -G "$HARNESS_DIR/*.conf" >/dev/null 2>&1; then
+    for f in "$HARNESS_DIR"/*.conf; do
+      name="${f##*/}"; name="${name%.conf}"
+      cmdline="$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$f" 2>/dev/null | head -1)"
+      printf '  %-16s %s\n' "$name" "$cmdline" >&2
+    done
+  else
+    printf '  (none configured; copy a .conf.example and drop the suffix)\n' >&2
+  fi
+}
+
+# --- Pull -H/--harness out of the argument list ----------------------------
+# Everything not consumed here is passed through to the agent untouched.
+harness_flag=""
+args=()
+while (( $# )); do
+  case "$1" in
+    -H|--harness) (( $# >= 2 )) || die "-H requires a value"; harness_flag="$2"; shift 2 ;;
+    --harness=*)  harness_flag="${1#*=}"; shift ;;
+    --)           args+=("$@"); break ;;
+    *)            args+=("$1"); shift ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+# --- Harness selection -----------------------------------------------------
+# The re-exec path is rebuilt from a configured directory plus the *invoked*
+# name, and is deliberately NOT `readlink -f "$0"`. The reflex to resolve the
+# symlink is wrong here: sudoers grants are written per-path, one line per
+# harness symlink, and resolving through to vaulted-agent would miss all of them.
+if [[ "$invoked" == "$LAUNCHER_NAME" ]]; then
+  # `vaulted-agent codex ...`: the first argument, if it is not an option.
+  positional=""
+  if (( $# )) && [[ "$1" != -* ]]; then positional="$1"; shift; fi
+  # Refusing both at once closes the escape that would otherwise defeat a
+  # sudoers rule of the form `vaulted-agent codex *`, which would happily
+  # match a trailing `-H claude`.
+  [[ -z "$positional" || -z "$harness_flag" ]] || \
+    die "harness given twice: '$positional' and -H '$harness_flag'"
+  HARNESS="${positional:-$harness_flag}"
+  [[ -n "$HARNESS" ]] || { usage; exit 1; }
+  # `pick` is a reserved name, unless a harness genuinely called pick exists.
+  # Choosing resolves to a concrete harness and then rewrites the argument list
+  # to the form the user could have typed, so the sudo hop below asks for the
+  # chosen harness and the ordinary per-harness sudoers rules still apply.
+  if [[ "$HARNESS" == "pick" && ! -e "$HARNESS_DIR/pick.conf" ]]; then
+    pick_harness
+    HARNESS="$PICKED"
+    orig=( "$HARNESS" ${1+"$@"} )
+  fi
+  launcher_path="${LAUNCHER_BIN_DIR}/${LAUNCHER_NAME}"
+else
+  # A harness symlink was invoked, so the link name decides the harness and
+  # -H is refused. Honouring -H here would let a caller who is entitled to a
+  # narrow harness borrow a wider harness's manifest just by passing a flag.
+  [[ -z "$harness_flag" ]] || die "-H is not accepted when invoked as '$invoked'"
+  HARNESS="${invoked%"$LINK_SUFFIX"}"
+  [[ "$HARNESS" != "$invoked" ]] || die "symlink '$invoked' does not end in '$LINK_SUFFIX'"
+  launcher_path="${LAUNCHER_BIN_DIR}/${invoked}"
+fi
+
+# Constrain the name before it is used to build a path.
+[[ "$HARNESS" =~ ^[A-Za-z0-9_-]+$ ]] || die "invalid harness name '$HARNESS'"
+
+# --- Become the service account --------------------------------------------
+# Replay the original argv exactly, so a sudoers rule matches the command line
+# as typed. Rewriting `vaulted-agent codex` into `vaulted-agent -H codex` here
+# would force every rule to be written in a form the user never types.
+if [[ "$(id -un)" != "$SERVICE_USER" ]]; then
+  exec sudo -u "$SERVICE_USER" "$launcher_path" ${orig[@]+"${orig[@]}"}
+fi
+
+cd "$WORKDIR" || die "cannot cd to $WORKDIR"
+
+# --- Read the harness definition -------------------------------------------
+# One file per harness, `key = value`, one setting per line. The file is
+# parsed, never sourced and never eval'd. Sourcing is less code and is what
+# most shell projects reach for, but it makes the config file arbitrary code
+# executed as the service account that holds the vault token.
+conf="${HARNESS_DIR}/${HARNESS}.conf"
+[[ -r "$conf" ]] || die "unknown harness '$HARNESS' (no readable $conf)"
+
+bin_dir=""; manifest=""; labels="no"; keep_extra=""; backend=""; cmd=(); extra_args=()
+lineno=0
+while IFS= read -r raw || [[ -n "$raw" ]]; do
+  lineno=$(( lineno + 1 ))
+  raw="${raw%$'\r'}"                                  # tolerate CRLF
+  entry="$(trim "$raw")"
+  [[ -z "$entry" || "$entry" == "#"* ]] && continue
+  [[ "$entry" == *=* ]] || die "$conf:$lineno: expected 'key = value'"
+  key="$(trim "${entry%%=*}")"
+  val="$(trim "${entry#*=}")"
+  case "$key" in
+    bin)      bin_dir="$val" ;;
+    manifest) manifest="$val" ;;
+    labels)   labels="$val" ;;
+    keep)     keep_extra="$val" ;;
+    backend)  backend="$val" ;;
+    command)
+      # Word-split on whitespace only: no globbing, no expansion, no eval.
+      # Use `arg =` lines for any argument that contains a space.
+      set -f; _oifs="$IFS"; IFS=$' \t'
+      # shellcheck disable=SC2206
+      cmd=( $val )
+      IFS="$_oifs"; set +f; unset _oifs ;;
+    arg)      extra_args+=("$val") ;;                 # taken verbatim, spaces and all
+    *)        die "$conf:$lineno: unknown key '$key'" ;;
+  esac
+done < "$conf"
+
+(( ${#cmd[@]} )) || die "$conf: no 'command =' line"
+[[ -n "$manifest" ]] || die "$conf: no 'manifest =' line"
+cmd+=( ${extra_args[@]+"${extra_args[@]}"} )
+backend="${backend:-$DEFAULT_BACKEND}"
+
+# Expand $HOME by substitution rather than eval, for the same reason as above.
+bin_dir="${bin_dir//\$\{HOME\}/$HOME}"; bin_dir="${bin_dir//\$HOME/$HOME}"
+[[ "$manifest" == /* ]] || manifest="${MANIFEST_DIR}/${manifest}"
+[[ -r "$manifest" ]] || die "cannot read manifest $manifest"
+
+# --- Scrub the inherited environment ---------------------------------------
+# Without this the manifest only ever ADDS variables, and every secret already
+# in the caller's environment rides along. `sudo` resets the environment on the
+# cross-user path, so it is easy to believe this is handled -- but the launcher
+# is also run with no sudo hop at all: from cron as the service account, from a
+# service-account login shell, and, most importantly here, by one agent
+# shelling out to another. In that last case a harness with a deliberately
+# narrow manifest would inherit the full set from its parent, and the manifests
+# would be describing a boundary that does not exist.
+keep=( ${PASSTHROUGH_VARS[@]+"${PASSTHROUGH_VARS[@]}"} )
+if [[ -n "$keep_extra" ]]; then
+  _oifs="$IFS"; IFS=', '
+  # shellcheck disable=SC2206
+  keep+=( $keep_extra )
+  IFS="$_oifs"; unset _oifs
+fi
+mapfile -t exported < <(compgen -e)          # names only; no values are copied
+for name in ${exported[@]+"${exported[@]}"}; do
+  for k in "${keep[@]}"; do
+    [[ "$name" == "$k" ]] && continue 2
+  done
+  unset "$name"
+done
+
+# Exported shell FUNCTIONS are not variables and do not appear in `compgen -e`.
+# Bash ships them in the environment as BASH_FUNC_<name>%% and rebuilds them in
+# the child, so the loop above cannot see them and `unset` would not remove
+# them. Left in place, a caller could export a function named `git`, `curl` or
+# `ssh` and have the agent call it instead of the real binary.
+mapfile -t exported_fns < <(declare -Fx | awk '{print $3}')
+for name in ${exported_fns[@]+"${exported_fns[@]}"}; do
+  for k in "${keep[@]}"; do
+    [[ "$name" == "$k" ]] && continue 2
+  done
+  unset -f "$name"
+done
+unset exported exported_fns name k
+
+# --- Resolve the manifest into this process's environment ------------------
+# Backends come in two shapes. STREAM backends hand back the whole KEY=VALUE
+# document in one call. PER-KEY backends take a manifest of VAR=<reference>
+# lines and are asked for one secret at a time; they cost one round trip per
+# variable, but a value containing a newline cannot corrupt the next one.
+
+export_line() {
+  local l; l="$(trim "$1")"
+  [[ -z "$l" || "$l" == "#"* || "$l" != *=* ]] && return 0
+  # export, never eval: values legitimately contain $, backticks and quotes.
+  # shellcheck disable=SC2163
+  export "$l"
+}
+
+# Walk resolved text with parameter expansion only. The obvious spelling,
+#   while IFS= read -r line; do ...; done <<< "$text"
+# is a trap: bash serves a here-string from a pipe only while it fits in the
+# pipe buffer, and spills to a /tmp/sh-thd.XXXXXX file above it (64KiB on
+# Linux; older bash writes the file unconditionally). That would put every
+# resolved secret on disk, silently, the first time a manifest outgrew the
+# buffer. This never leaves memory, and runs in the current shell so that the
+# exports survive.
+export_stream() {
+  local text="$1" line
+  while [[ -n "$text" ]]; do
+    line="${text%%$'\n'*}"
+    if [[ "$line" == "$text" ]]; then text=""; else text="${text#*$'\n'}"; fi
+    export_line "$line"
+  done
+}
+
+load_auth() {                                # $1 = file, $2 = variable it must set
+  [[ -r "$1" ]] || die "backend '$backend' needs $1 (is this the service account?)"
+  set -a
+  # shellcheck source=/dev/null
+  . "$1"
+  set +a
+  [[ -n "${!2-}" ]] || die "$1 does not define $2"
+}
+
+auth_vars=()
+case "$backend" in
+  onepassword)
+    load_auth "$OP_ENV_FILE" OP_SERVICE_ACCOUNT_TOKEN; auth_vars=(OP_SERVICE_ACCOUNT_TOKEN)
+    resolved="$(op inject -i "$manifest")" \
+      || die "op inject failed for $manifest; refusing to launch"
+    export_stream "$resolved"; unset resolved ;;
+
+  sops)
+    [[ -r "$AGE_KEY_FILE" ]] || die "backend 'sops' needs $AGE_KEY_FILE"
+    export SOPS_AGE_KEY_FILE="$AGE_KEY_FILE"; auth_vars=(SOPS_AGE_KEY_FILE)
+    resolved="$(sops --decrypt "$manifest")" \
+      || die "sops could not decrypt $manifest; refusing to launch"
+    export_stream "$resolved"; unset resolved ;;
+
+  plainfile)
+    # The manifest IS the secrets here. Nothing is resolved and nothing is
+    # revocable centrally; this exists so the pattern can be demonstrated
+    # without an account anywhere. Keep it 0600 root:agent.
+    resolved="$(cat -- "$manifest")" || die "cannot read $manifest"
+    export_stream "$resolved"; unset resolved ;;
+
+  pass|bitwarden)
+    [[ "$backend" != bitwarden ]] || { load_auth "$BWS_ENV_FILE" BWS_ACCESS_TOKEN
+                                       auth_vars=(BWS_ACCESS_TOKEN); }
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      raw="$(trim "${raw%$'\r'}")"
+      [[ -z "$raw" || "$raw" == "#"* || "$raw" != *=* ]] && continue
+      var="$(trim "${raw%%=*}")"; ref="$(trim "${raw#*=}")"
+      [[ "$var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "$manifest: bad variable name '$var'"
+      if [[ "$backend" == pass ]]; then
+        value="$(pass show "$ref")" || die "pass show '$ref' failed; refusing to launch"
+        value="${value%%$'\n'*}"             # line 1 is the secret, by convention
+      else
+        # --output env would save a dependency, but its quoting rules are not
+        # documented; json plus the python3 already required by `labels` is
+        # unambiguous. The reference is on argv, never the value.
+        value="$(bws secret get "$ref" --output json \
+                 | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])')" \
+          || die "bws secret get '$ref' failed; refusing to launch"
+      fi
+      export "$var=$value"
+    done < "$manifest"
+    unset raw var ref value ;;
+
+  *) die "unknown backend '$backend' (onepassword|bitwarden|sops|pass|plainfile)" ;;
+esac
+
+# Drop the backend credential before handing off. Without this the agent
+# inherits the key that unlocks the whole store, which would make the
+# per-harness manifests decorative -- any harness could read the rest itself.
+for v in ${auth_vars[@]+"${auth_vars[@]}"}; do unset "$v"; done
+unset auth_vars v
+
+# --- Optional: friendly session labels -------------------------------------
+# Maps any non-UUID --resume/--session-id value to a stable UUIDv5, so a
+# conversation can be resumed by name instead of by copied UUID.
+if [[ "$labels" == "yes" ]]; then
+  uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  label_to_uuid() {
+    python3 -c 'import uuid,sys; print(uuid.uuid5(uuid.NAMESPACE_URL, sys.argv[2]+":"+sys.argv[1]))' \
+      "$1" "$LABEL_NAMESPACE"
+  }
+  mapped=()
+  while (( $# )); do
+    case "$1" in
+      --session-id|-r|--resume)
+        flag="$1"; shift
+        if (( $# )) && [[ "$1" != -* ]]; then
+          val="$1"; shift
+          [[ "$val" =~ $uuid_re ]] || val="$(label_to_uuid "$val")"
+          mapped+=("$flag" "$val")
+        else
+          mapped+=("$flag")
+        fi ;;
+      --session-id=*|--resume=*)
+        flag="${1%%=*}"; val="${1#*=}"; shift
+        [[ "$val" =~ $uuid_re ]] || val="$(label_to_uuid "$val")"
+        mapped+=("$flag" "$val") ;;
+      *) mapped+=("$1"); shift ;;
+    esac
+  done
+  set -- ${mapped[@]+"${mapped[@]}"}
+fi
+
+# --- Hand off --------------------------------------------------------------
+[[ -n "$bin_dir" ]] && export PATH="${bin_dir}:$PATH"
+exec "${cmd[@]}" ${1+"$@"}

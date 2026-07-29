@@ -1,0 +1,7 @@
+# Bitwarden Secrets Manager: VAR=<secret-uuid>, one `bws secret get` per line.
+# Find ids with `bws secret list`.
+
+APP_DB_HOST=6a1c0e94-0000-0000-0000-000000000001
+APP_DB_USER=6a1c0e94-0000-0000-0000-000000000002
+APP_DB_PASS=6a1c0e94-0000-0000-0000-000000000003
+GH_TOKEN=6a1c0e94-0000-0000-0000-000000000004

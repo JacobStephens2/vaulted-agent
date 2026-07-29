@@ -1,0 +1,7 @@
+# passwordstore.org: VAR=entry/path, one `pass show` per line.
+# The first line of the entry is taken as the secret.
+
+APP_DB_HOST=agent/app-database/hostname
+APP_DB_USER=agent/app-database/username
+APP_DB_PASS=agent/app-database/password
+GH_TOKEN=agent/github/token

@@ -1,0 +1,27 @@
+Each *.conf in this directory defines one harness. The filename is the harness
+name: claude.conf is reached by `vaulted-agent claude`, or by the
+claude-conductor symlink. `vaulted-agent pick` chooses from a menu.
+
+`pick` is reserved: a harness named pick.conf shadows the chooser.
+
+Recognised keys, all optional except command and manifest:
+
+  backend  = onepassword | bitwarden | sops | pass | plainfile
+             Defaults to DEFAULT_BACKEND in the launcher.
+  manifest = the secrets to load. Relative names resolve under ../manifests/.
+             This is the blast radius. Its format depends on the backend:
+               onepassword  VAR=op://vault/item/field, resolved by `op inject`
+               bitwarden    VAR=<secret-uuid>, one `bws secret get` each
+               pass         VAR=store/entry/path, one `pass show` each
+               sops         a sops-encrypted dotenv; the file IS the secrets
+               plainfile    a plain dotenv; the file IS the secrets
+  bin      = directory prepended to PATH before exec; $HOME expands
+  labels   = yes|no. Map non-UUID --resume/--session-id values to a UUIDv5.
+  keep     = extra environment variables surviving the scrub, comma separated.
+  command  = the command line, split on whitespace
+  arg      = one further argument, taken verbatim. Repeatable. Use this for
+             any argument containing a space; `command` cannot express one.
+
+Whitespace around the key, the `=`, and the value is ignored, so align them
+however you like. Lines beginning with # are comments. The files are parsed,
+never sourced: a value cannot execute shell.
