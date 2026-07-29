@@ -38,6 +38,7 @@ After a fresh install, agents found on your PATH get harnesses that start with
 
 ```bash
 vaulted-agent setup                 # backend / token; Bitwarden can build a refs file
+vaulted-agent refresh               # rebuild refs after adding secrets in Bitwarden SM
 vaulted-agent auth-mode             # file (token on disk) vs prompt (paste each launch)
 vaulted-agent doctor                # harnesses, backends, manifest syntax (no secret values)
 vaulted-agent version               # e.g. vaulted-agent 0.3.0
@@ -79,6 +80,9 @@ va secrets get name:openai-api-key  # print one value
 va secrets which                    # harness → variable names only
 va secrets validate                 # every harness manifest
 va secrets validate openai.env.refs bitwarden
+va refresh openai.env.refs          # rebuild refs after adding secrets in SM
+va refresh openai.env.refs --all    # non-interactive: include every secret
+va secrets refresh                  # same as va refresh
 ```
 
 **`va doctor`** reports version, service user, auth mode, whether
@@ -88,6 +92,16 @@ syntax** (placeholders fail). It does not call the vault for live values.
 
 **`va secrets`** reuses the same token rules as launches (env → file → TTY
 prompt). Prefer it over raw `bws` so auth matches.
+
+**Updating secrets (Bitwarden SM).** The refs file never stores secret *values*
+- only which env vars map to which SM secrets. Values are fetched live on every
+launch (`bws secret get`). So:
+
+| You did in Bitwarden SM | What to run |
+|---|---|
+| Rotated a secret’s **value** | Nothing - next `va claude` / `va run` gets the new value |
+| **Added** a new secret you want in a harness | `va refresh openai.env.refs` (or edit the refs file by hand) |
+| Removed a secret from a harness | Edit the refs file (or refresh and re-pick) |
 
 Bitwarden refs accept `UUID`, `uuid:UUID`, `name:KEY`, or `project:PROJECT/KEY`.
 Placeholder values (`REPLACE_…`, all-zero UUIDs, …) fail validation before
@@ -618,9 +632,9 @@ Names resolve via `bws secret list` once per process. Prefer
 `vaulted-agent secrets list` / `vaulted-agent setup` over raw `bws` so auth
 matches launches.
 
-**Refs file (what setup asks for).** After listing secrets, setup can write a
-**refs file** under `/etc/vaulted-agent/manifests/` (default name
-`openai.env.refs`). That is only a filename for lines like
+**Refs file (what setup / refresh write).** After listing secrets, setup (or
+`va refresh`) can write a **refs file** under `/etc/vaulted-agent/manifests/`
+(default name `openai.env.refs`). That is only a filename for lines like
 `OPENAI_API_KEY=name:…` - not a secret, not the access token. Point a harness
 at it with `backend = bitwarden` and `manifest = openai.env.refs`, or:
 
@@ -628,7 +642,15 @@ at it with `backend = bitwarden` and `manifest = openai.env.refs`, or:
 va run -m openai.env.refs --backend bitwarden -p -- your-command
 ```
 
-Placeholder values (`REPLACE_…`, all-zero UUIDs, …) are rejected by
+When you **add** secrets in Secrets Manager later:
+
+```bash
+va refresh openai.env.refs          # pick which to include
+va refresh openai.env.refs --all    # every secret the token can see
+```
+
+Rotating a secret’s **value** in SM needs no refresh - the next launch fetches
+it live. Placeholder values (`REPLACE_…`, all-zero UUIDs, …) are rejected by
 `secrets validate`, `doctor`, and every launch before talking to the vault.
 
 ## Making the manifest a real boundary
