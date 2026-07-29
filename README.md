@@ -8,6 +8,16 @@ and gives each agent only the secrets you named for it. Claude Code, Codex,
 and Grok all launch from the same launcher and the same vault, with different
 blast radii.
 
+**Thesis:** treat the agent as the unit of authorization. Manifests are
+blast-radius control, not containment.
+
+| | |
+|---|---|
+| Platforms | **macOS** and **Linux** (including stock macOS `/bin/bash` 3.2). Not Windows natively (use WSL). |
+| Product page | [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent) |
+| Writeup | [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) |
+| Latest | [v0.1.2](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.1.2) |
+
 ```
 you $ vaulted-agent claude
       │
@@ -26,18 +36,16 @@ you $ vaulted-agent claude
 
 ## Install
 
-Product page (what it does + copy-paste install commands):
-[stephens.page/vaulted-agent](https://stephens.page/vaulted-agent)
-
-**One-liner** - short URL on stephens.page; the script only bootstraps. The
-payload is always a **tagged GitHub release** tarball (not floating `main`).
-Works on **macOS and Linux** (same shape as Claude Code's install):
+**One-liner** (macOS · Linux) - short URL on stephens.page; the script only
+bootstraps. The payload is always a **tagged GitHub release** tarball (not
+floating `main`):
 
 ```bash
 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 ```
 
-**From GitHub** — clone a release tag and run the real installer yourself:
+**From GitHub** (macOS · Linux) - clone a release tag and run the real
+installer yourself:
 
 ```bash
 git clone --branch v0.1.2 --depth 1 \
@@ -45,10 +53,17 @@ git clone --branch v0.1.2 --depth 1 \
 cd vaulted-agent-launcher && sudo ./install.sh
 ```
 
-Either path ends the same way: put the one vault credential on disk, then copy
-a harness into place. `install.sh` prints the config directory and the backend
-token path it expects; write the service-account token into that `op.env`
-(mode `0640`, readable by the service account):
+**Uninstall** (after either path; no git tree required):
+
+```bash
+sudo vaulted-agent uninstall
+# also remove config:  sudo vaulted-agent uninstall --purge
+```
+
+Either install path ends the same way: put the one vault credential on disk,
+then copy a harness into place. `install.sh` prints the config directory and
+the backend token path it expects; write the service-account token into that
+`op.env` (mode `0640`, readable by the service account):
 
 ```bash
 # the one credential that stays on disk (1Password; see Backends for the rest)
@@ -62,13 +77,12 @@ sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
 | | |
 |---|---|
 | Pin a version | `VAULTED_AGENT_VERSION=v0.1.2 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
-| Uninstall | `sudo vaulted-agent uninstall` (or `--purge` to drop config too) |
 | Pass install flags | `curl -fsSL … \| bash -s -- --user agent --allow-user alice` |
 | Prefer not to pipe | `curl -fsSL -o install.sh https://stephens.page/vaulted-agent/install.sh && less install.sh && bash install.sh` |
-| Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault) |
+| Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault; macOS and Linux) |
 
-Details, shared-host setup, flags, and uninstall are under
-[Install details](#install-details) below.
+Details, shared-host setup, flags, and more uninstall options are under
+[Install details](#install-details) and [Uninstall](#uninstall) below.
 
 ## The honest claim
 
