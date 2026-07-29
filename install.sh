@@ -23,6 +23,9 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# Works on stock macOS (/bin/bash 3.2) and modern Linux bash. Avoid mapfile,
+# associative arrays, and Linux-only tools (getent, GNU readlink -f).
+
 SERVICE_USER=""                  # default: whoever invoked this script
 WORKDIR=""                       # default: the service account's home
 PREFIX="/usr/local/bin"
@@ -43,6 +46,48 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ORIG_ARGS=( ${1+"$@"} )          # kept for the re-run hint; the parse loop below consumes $@
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 run() { if (( DRY )); then printf '  would: %s\n' "$*"; else "$@"; fi; }
+
+# Home directory for a username. Linux: getent. macOS: dscl / python pwd.
+# Falls back to ~user expansion when the shell can resolve it.
+user_home() {
+  local u="$1" h=""
+  if command -v getent >/dev/null 2>&1; then
+    h="$(getent passwd "$u" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -n "$h" ]]; then printf '%s\n' "$h"; return 0; fi
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    h="$(python3 -c 'import pwd,sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)' "$u" 2>/dev/null || true)"
+    if [[ -n "$h" ]]; then printf '%s\n' "$h"; return 0; fi
+  fi
+  if command -v dscl >/dev/null 2>&1; then
+    h="$(dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)"
+    if [[ -n "$h" ]]; then printf '%s\n' "$h"; return 0; fi
+  fi
+  h="$(eval printf '%s' "~$u" 2>/dev/null || true)"
+  if [[ -n "$h" && "$h" != "~$u" ]]; then printf '%s\n' "$h"; return 0; fi
+  return 1
+}
+
+# Absolute path of a file/symlink, portable across GNU and BSD userland.
+resolve_path() {
+  local p="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$p" 2>/dev/null || true
+    return 0
+  fi
+  # GNU readlink -f; BSD readlink has no -f (and may error).
+  if readlink -f "$p" >/dev/null 2>&1; then
+    readlink -f "$p" 2>/dev/null || true
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null || true
+    return 0
+  fi
+  if [[ -L "$p" ]]; then readlink "$p" 2>/dev/null || true
+  else printf '%s\n' "$p"
+  fi
+}
 
 while (( $# )); do
   case "$1" in
@@ -86,11 +131,12 @@ if (( UNINSTALL )); then
 
   # Work out what would go before touching anything. The prompt, --dry-run and
   # the real removal all render from these same two lists.
-  targets=(); foreign=(); declare -A seen_user=()
+  # bash 3.2 has no associative arrays; track seen users as a space list.
+  targets=(); foreign=(); seen_users=" "
 
   shopt -s nullglob
   for link in "$PREFIX"/*-conductor; do
-    if [[ -L "$link" && "$(readlink -f "$link" 2>/dev/null || true)" == "$launcher" ]]; then
+    if [[ -L "$link" && "$(resolve_path "$link")" == "$launcher" ]]; then
       targets+=("$link")
     elif [[ -e "$link" || -L "$link" ]]; then
       foreign+=("$link")
@@ -99,12 +145,12 @@ if (( UNINSTALL )); then
   shopt -u nullglob
 
   for u in ${LINK_USER:+"$LINK_USER"} ${SUDO_USER:+"$SUDO_USER"}; do
-    if [[ -n "${seen_user[$u]-}" ]]; then continue; fi
-    seen_user[$u]=1
-    uh="$(getent passwd "$u" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ "$seen_users" == *" $u "* ]]; then continue; fi
+    seen_users="$seen_users$u "
+    uh="$(user_home "$u" 2>/dev/null || true)"
     if [[ -z "$uh" ]]; then continue; fi
     ul="$uh/.local/bin/vaulted-agent"
-    if [[ -L "$ul" && "$(readlink -f "$ul" 2>/dev/null || true)" == "$launcher" ]]; then
+    if [[ -L "$ul" && "$(resolve_path "$ul")" == "$launcher" ]]; then
       targets+=("$ul")
     elif [[ -e "$ul" || -L "$ul" ]]; then
       foreign+=("$ul")
@@ -202,7 +248,9 @@ fi
 
 id -u "$SERVICE_USER" >/dev/null 2>&1 || \
   die "service account '$SERVICE_USER' does not exist. Create it first, e.g.
-  useradd --system --home-dir /srv/$SERVICE_USER --create-home --shell /bin/bash $SERVICE_USER"
+  # Linux:
+  useradd --system --home-dir /srv/$SERVICE_USER --create-home --shell /bin/bash $SERVICE_USER
+  # macOS: System Settings → Users, or dscl(1)"
 
 # Put the command on the invoking user's PATH by default: /usr/local/bin is
 # absent from it more often than people expect, and a launcher you cannot type
@@ -211,12 +259,24 @@ if [[ -z "$LINK_USER" ]] && (( ! NO_LINK )) && [[ -n "${SUDO_USER:-}" ]]; then
   LINK_USER="$SUDO_USER"
 fi
 
-[[ -n "$WORKDIR" ]] || WORKDIR="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
+if [[ -z "$WORKDIR" ]]; then
+  WORKDIR="$(user_home "$SERVICE_USER")" \
+    || die "cannot find home directory for '$SERVICE_USER'"
+fi
 [[ -n "$OP_ENV" ]]  || OP_ENV="${CONFIG}/op.env"
 
-for d in "$PREFIX" "$(dirname "$CONFIG")" ${ALLOW_USER:+/etc/sudoers.d}; do
-  [[ -w "$d" ]] || die "$d is not writable; re-run with sudo"
-done
+# Create install targets when missing (fresh macOS often lacks /usr/local/bin).
+if (( DRY )); then
+  printf '  would ensure directories: %s  %s\n' "$PREFIX" "$(dirname "$CONFIG")"
+else
+  install -d -m 0755 "$PREFIX" "$(dirname "$CONFIG")" 2>/dev/null \
+    || die "cannot create $PREFIX or $(dirname "$CONFIG"); re-run with sudo"
+  for d in "$PREFIX" "$(dirname "$CONFIG")" ${ALLOW_USER:+/etc/sudoers.d}; do
+    [[ -z "$d" ]] && continue
+    [[ -d "$d" ]] || die "$d does not exist; re-run with sudo"
+    [[ -w "$d" ]] || die "$d is not writable; re-run with sudo"
+  done
+fi
 
 printf 'vaulted-agent install\n'
 printf '  service account : %s (workdir %s)%s\n' "$SERVICE_USER" "$WORKDIR" \
@@ -261,11 +321,14 @@ done
 
 # --- optional per-harness symlinks -----------------------------------------
 if [[ -n "$LINKS" ]]; then
+  # bash 3.2: read -a from a here-string is fine; avoid mapfile.
   IFS=',' read -r -a wanted <<< "$LINKS"
   for name in "${wanted[@]}"; do
+    name="$(printf '%s' "$name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -n "$name" ]] || continue
     link="$PREFIX/${name}-conductor"
     if [[ -e "$link" || -L "$link" ]]; then
-      target="$(readlink -f "$link" 2>/dev/null || true)"
+      target="$(resolve_path "$link")"
       if [[ "$target" == "$PREFIX/vaulted-agent" ]]; then
         printf 'link already correct: %s\n' "$link"; continue
       fi
@@ -301,13 +364,28 @@ fi
 # $PREFIX/vaulted-agent, so the sudoers rule still matches either way.
 link_into_home() {
   local u="$1" home grp
-  home="$(getent passwd "$u" | cut -d: -f6)"
+  home="$(user_home "$u")" || die "cannot find a home directory for '$u'"
   grp="$(id -gn "$u")"
   [[ -n "$home" && -d "$home" ]] || die "cannot find a home directory for '$u'"
   [[ -d "$home/.local/bin" ]] || run install -d -o "$u" -g "$grp" -m 0755 "$home/.local/bin"
   run ln -sfn "$PREFIX/vaulted-agent" "$home/.local/bin/vaulted-agent"
-  run chown -h "$u:$grp" "$home/.local/bin/vaulted-agent"
+  # -h: change symlink ownership, not the target (GNU and BSD chown).
+  run chown -h "$u:$grp" "$home/.local/bin/vaulted-agent" 2>/dev/null \
+    || run chown "$u:$grp" "$home/.local/bin/vaulted-agent"
   printf 'linked %s/.local/bin/vaulted-agent -> %s/vaulted-agent\n' "$home" "$PREFIX"
+}
+
+# Can this user resolve vaulted-agent on a login-ish PATH? Prefer sudo -iu
+# (works on both Linux and macOS); fall back to su -l.
+user_can_run_vaulted_agent() {
+  local u="$1"
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -niu "$u" -- command -v vaulted-agent >/dev/null 2>&1 && return 0
+  fi
+  if command -v su >/dev/null 2>&1; then
+    su -l "$u" -c 'command -v vaulted-agent' >/dev/null 2>&1 && return 0
+  fi
+  return 1
 }
 
 if [[ -n "$LINK_USER" ]]; then
@@ -316,21 +394,19 @@ if [[ -n "$LINK_USER" ]]; then
 else
   # The check below is deliberately one-sided. A login shell FAILING to
   # resolve the command is conclusive: it is definitely not reachable. A login
-  # shell finding it proves little, because `su -l` synthesizes a PATH from
-  # /etc/login.defs and `$PATH` here is root's secure_path -- both routinely
-  # contain /usr/local/bin when the user's actual interactive shell does not.
-  # So: shout on a definite failure, and otherwise offer a check the reader
-  # can run in their own shell, where the answer is authoritative.
+  # shell finding it proves little, because root's PATH and a synthetic login
+  # PATH often contain /usr/local/bin when the user's interactive shell does
+  # not. Shout on a definite failure; otherwise offer a check in their shell.
   who="${ALLOW_USER:-${SUDO_USER:-}}"
-  home="${who:+$(getent passwd "$who" | cut -d: -f6)}"
   fixcmd="mkdir -p ~/.local/bin && ln -s $PREFIX/vaulted-agent ~/.local/bin/vaulted-agent"
   rerun="sudo $0 ${ORIG_ARGS[*]-} --link-user ${who:-YOU}"
   if [[ -n "$who" && "$(id -u)" -eq 0 ]] \
-     && ! su -l "$who" -c 'command -v vaulted-agent' >/dev/null 2>&1; then
+     && ! user_can_run_vaulted_agent "$who"; then
     printf '\nNOT REACHABLE: %s cannot run `vaulted-agent`; %s is not on their PATH.\n' \
       "$who" "$PREFIX"
     printf '  Fix it for them:   %s\n' "$rerun"
     printf '  Or, as %s:   %s\n' "$who" "$fixcmd"
+    printf '  On macOS, also ensure ~/.local/bin is on your PATH (e.g. in ~/.zprofile).\n'
   else
     printf '\nConfirm it is reachable from your own shell (this is the authoritative test,\n'
     printf 'since an installer cannot see your interactive PATH):\n'
@@ -339,10 +415,11 @@ else
     printf '    %s\n' "$fixcmd"
     printf '  or re-run with:  --link-user %s\n' "${who:-<you>}"
   fi
-  unset who home fixcmd rerun
+  unset who fixcmd rerun
 fi
 
 printf '\nNext: put a backend credential at %s (0640 root:%s),\n' "$OP_ENV" "$SERVICE_USER"
 printf 'copy a harness into place:\n'
 printf '  cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
-printf 'then run:  sudo -u %s %s/vaulted-agent\n' "$SERVICE_USER" "$PREFIX"
+printf 'then run:  vaulted-agent\n'
+printf '  (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"

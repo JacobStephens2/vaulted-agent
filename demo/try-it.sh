@@ -89,11 +89,14 @@ vaulted-agent 2>&1 | sed -n '/^  [a-z]/p' || true
 
 # --- 2. The point: different harnesses get different secrets ---------------
 step "Each receives only what its own manifest names"
-mapfile -t c_secrets < <(vaulted-agent claude)
-mapfile -t g_secrets < <(vaulted-agent grok)
+# bash 3.2 (stock macOS) has no mapfile.
+c_secrets=(); g_secrets=()
+while IFS= read -r line; do [[ -n "$line" ]] && c_secrets+=("$line"); done < <(vaulted-agent claude)
+while IFS= read -r line; do [[ -n "$line" ]] && g_secrets+=("$line"); done < <(vaulted-agent grok)
 has() { local n="$1"; shift; local x; for x in "$@"; do [[ "$x" == "$n" ]] && return 0; done; return 1; }
 printf '   %-16s %-8s %s\n' "" "claude" "grok"
 while read -r name; do
+  [[ -n "$name" ]] || continue
   has "$name" ${c_secrets[@]+"${c_secrets[@]}"} && a="yes" || a=" -"
   has "$name" ${g_secrets[@]+"${g_secrets[@]}"} && b="yes" || b=" -"
   printf '   %-16s %-8s %s\n' "$name" "$a" "$b"
@@ -104,12 +107,20 @@ note "grok's manifest never named GH_TOKEN or SMTP_PASS, so grok cannot see them
 step "They reach the agent's environment, and nowhere else"
 cat > "$DEMO/agents/probe" <<'EOF'
 #!/usr/bin/env bash
-# $$, not /proc/self: in a redirection that resolves to the reading process.
+# Prefer /proc (Linux); fall back to ps (macOS and others).
 printf '   in its environment   APP_DB_PASS=%s\n' "${APP_DB_PASS-<unset>}"
-printf '   on its command line  %s\n' "$(tr '\0' ' ' < "/proc/$$/cmdline")"
-grep -qa 'corr3ct-h0rse' "/proc/$$/cmdline" \
-  && printf '   LEAK: the secret is on the command line\n' \
-  || printf '   from the caller      CALLER_SECRET=%s\n' "${CALLER_SECRET-removed by the scrub}"
+cmdline=""
+if [[ -r "/proc/$$/cmdline" ]]; then
+  cmdline="$(tr '\0' ' ' < "/proc/$$/cmdline")"
+elif command -v ps >/dev/null 2>&1; then
+  cmdline="$(ps -p $$ -o args= 2>/dev/null || ps -p $$ -o command= 2>/dev/null || true)"
+fi
+printf '   on its command line  %s\n' "${cmdline:-unknown}"
+if printf '%s' "$cmdline" | grep -q 'corr3ct-h0rse'; then
+  printf '   LEAK: the secret is on the command line\n'
+else
+  printf '   from the caller      CALLER_SECRET=%s\n' "${CALLER_SECRET-removed by the scrub}"
+fi
 EOF
 chmod +x "$DEMO/agents/probe"
 sed 's/^command  = .*/command  = probe/' "$DEMO/etc/harnesses.d/claude.conf" \

@@ -29,8 +29,9 @@ you $ vaulted-agent claude
 Product page (what it does + copy-paste install commands):
 [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent)
 
-**One-liner** — short URL on stephens.page; the script only bootstraps. The
-payload is always a **tagged GitHub release** tarball (not floating `main`):
+**One-liner** - short URL on stephens.page; the script only bootstraps. The
+payload is always a **tagged GitHub release** tarball (not floating `main`).
+Works on **macOS and Linux** (same shape as Claude Code's install):
 
 ```bash
 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
@@ -39,7 +40,7 @@ curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 **From GitHub** — clone a release tag and run the real installer yourself:
 
 ```bash
-git clone --branch v0.1.0 --depth 1 \
+git clone --branch v0.1.1 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 ```
@@ -60,7 +61,7 @@ sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
 
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.1.0 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.1.1 curl -fsSL https://stephens.page/vaulted-agent/install.sh \| bash` |
 | Pass install flags | `curl -fsSL … \| bash -s -- --user agent --allow-user alice` |
 | Prefer not to pipe | `curl -fsSL -o install.sh https://stephens.page/vaulted-agent/install.sh && less install.sh && bash install.sh` |
 | Try without installing | `git clone … && ./demo/try-it.sh` (no root, no vault) |

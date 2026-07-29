@@ -251,7 +251,11 @@ if [[ -n "$keep_extra" ]]; then
   keep+=( $keep_extra )
   IFS="$_oifs"; unset _oifs
 fi
-mapfile -t exported < <(compgen -e)          # names only; no values are copied
+# names only; no values are copied. Built without mapfile (bash 3.2 / macOS).
+exported=()
+while IFS= read -r name; do
+  [[ -n "$name" ]] && exported+=("$name")
+done < <(compgen -e)
 for name in ${exported[@]+"${exported[@]}"}; do
   for k in "${keep[@]}"; do
     [[ "$name" == "$k" ]] && continue 2
@@ -264,12 +268,15 @@ done
 # the child, so the loop above cannot see them and `unset` would not remove
 # them. Left in place, a caller could export a function named `git`, `curl` or
 # `ssh` and have the agent call it instead of the real binary.
-mapfile -t exported_fns < <(declare -Fx | awk '{print $3}')
+exported_fns=()
+while IFS= read -r name; do
+  [[ -n "$name" ]] && exported_fns+=("$name")
+done < <(declare -Fx 2>/dev/null | awk '{print $3}')
 for name in ${exported_fns[@]+"${exported_fns[@]}"}; do
   for k in "${keep[@]}"; do
     [[ "$name" == "$k" ]] && continue 2
   done
-  unset -f "$name"
+  unset -f "$name" 2>/dev/null || true
 done
 unset exported exported_fns name k
 
