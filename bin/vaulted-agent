@@ -863,7 +863,7 @@ do_doctor() {
       *) printf '    ERROR: unknown backend %s\n' "$be"; issues=$(( issues + 1 )) ;;
     esac
     case "$name" in
-      claude|codex|grok)
+      claude|codex|grok|kimi)
         if [[ "$workdir_key" != "caller" ]]; then
           printf '    WARN: agent harness without workdir=caller (resume/sessions often need it)\n'
           warn=$(( warn + 1 ))
@@ -1584,11 +1584,12 @@ unset auth_vars v
 # --- Session resume argv ---------------------------------------------------
 # Agents disagree on CLI shape. After the harness name we pass args through,
 # with small normalizations so a common `va <agent> resume|‑‑resume <id>`
-# habit works for all three:
+# habit works across vendors:
 #
-#   labels=yes     map non-UUID resume targets to a stable UUIDv5
-#   codex          native is `resume <id>`; rewrite --resume/-r → resume
-#   claude / grok  native is --resume/-r; rewrite bare `resume` → --resume
+#   labels=yes           map non-UUID resume targets to a stable UUIDv5
+#   codex                native is `resume <id>`; rewrite --resume/-r → resume
+#   claude / grok / kimi native is --resume/-r (kimi: --session/-S; --resume
+#                        is a documented hidden alias); rewrite bare `resume`
 #
 # Examples:
 #   va claude --resume b03ca221-…-…
@@ -1596,7 +1597,9 @@ unset auth_vars v
 #   va codex resume 019fabc2-…-…
 #   va codex --resume 019fabc2-…-…
 #   va grok --resume 019fabc1-…-…
-#   va grok resume 019fabc1-…-…
+#   va kimi --continue
+#   va kimi --session abc123
+#   va kimi resume abc123
 
 uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 label_to_uuid() {
@@ -1656,8 +1659,9 @@ case "$agent_base" in
     done
     set -- ${mapped[@]+"${mapped[@]}"}
     ;;
-  claude|grok)
-    # Claude/grok speak `--resume` / `-r`. Bare `resume <id>` is rewritten.
+  claude|grok|kimi)
+    # Claude/grok: --resume / -r. Kimi Code: --session / -S (and --resume / -r
+    # as hidden aliases). Bare `resume <id>` is rewritten to --resume.
     mapped=()
     while (( $# )); do
       case "$1" in
@@ -1678,6 +1682,7 @@ unset agent_base mapped uuid_re
 
 # --- Hand off --------------------------------------------------------------
 # Everything after the harness name is the agent's argv (e.g. grok --resume UUID,
-# codex resume UUID, claude --resume UUID). Only launcher flags are stripped.
+# codex resume UUID, claude --resume UUID, kimi --session ID). Only launcher
+# flags are stripped.
 [[ -n "$bin_dir" ]] && export PATH="${bin_dir}:$PATH"
 exec "${cmd[@]}" ${1+"$@"}

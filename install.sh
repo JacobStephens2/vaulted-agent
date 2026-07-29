@@ -38,7 +38,7 @@ ALLOW_USER=""                    # write a sudoers rule for this user
 LINK_USER=""                     # symlink into this user's ~/.local/bin
 NO_LINK=0                        # skip the default ~/.local/bin symlink
 NO_VA=0                          # skip the short `va` alias symlink
-NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok
+NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok/kimi
 NO_SETUP=0                       # skip interactive vault backend questions
 SHORT_NAME="va"                  # short alias for vaulted-agent
 BACKEND_CHOICE=""                # onepassword|bitwarden|pass|sops|plainfile|skip
@@ -490,11 +490,18 @@ if (( ! NO_AUTO_HARNESS )); then
   else
     printf '  %-8s not found (skipped)\n' grok
   fi
+  # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
+  if p="$(find_user_bin kimi)"; then
+    write_auto_harness kimi "$p" "kimi"
+    found_any=1
+  else
+    printf '  %-8s not found (skipped)\n' kimi
+  fi
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
-    printf '  Try:  va claude   /   va codex   /   va grok\n'
+    printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi\n'
   else
-    printf '  No claude/codex/grok found. Install an agent CLI, then re-run install\n'
+    printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
   fi
   unset found_any p
@@ -557,9 +564,9 @@ ensure_ref_manifest() {
   printf '  wrote %s  (add VAR=reference lines when ready)\n' "$path"
 }
 
-# Personal installs: agent sessions (grok/claude/codex) are cwd-scoped. Ensure
-# live harnesses use workdir=caller so `va grok --resume …` matches a normal
-# `grok --resume …` from the same directory. Only adds the key when missing.
+# Personal installs: agent sessions (claude/codex/grok/kimi) are cwd-scoped.
+# Ensure live harnesses use workdir=caller so `va grok --resume …` / `va kimi
+# --continue` match a normal launch from the same directory.
 ensure_workdir_caller() {
   local conf tmp
   shopt -s nullglob
@@ -997,7 +1004,8 @@ if [[ -z "$REFS_MANIFEST_PATH" ]]; then
   printf '    cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
 fi
 printf '  then run:  vaulted-agent   (or the short alias:  %s)\n' "$SHORT_NAME"
-printf '    e.g.  %s claude   /   %s grok\n' "$SHORT_NAME" "$SHORT_NAME"
+printf '    e.g.  %s claude   /   %s grok   /   %s kimi\n' \
+  "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME"
 printf '    (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
 printf '\nTo remove this install later:\n'
 printf '  sudo vaulted-agent uninstall\n'

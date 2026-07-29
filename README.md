@@ -1,7 +1,7 @@
 # vaulted-agent-launcher
 
-Give Claude Code, Codex, and Grok real vault credentials **in-process** - without
-leaving a pile of `.env` files on disk.
+Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
+**in-process** - without leaving a pile of `.env` files on disk.
 
 One launcher (`va`), one secrets backend (1Password, Bitwarden Secrets Manager,
 pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt
@@ -28,6 +28,7 @@ Day to day you name the harness as the first argument:
 va claude
 va codex
 va grok
+va kimi                  # Kimi Code CLI (binary: kimi) if on PATH
 va pick
 # full name also works: vaulted-agent claude
 ```
@@ -105,6 +106,10 @@ va codex resume 019fabc2-fe4f-7e00-a431-a6a44d94b559
 va codex --resume 019fabc2-fe4f-7e00-a431-a6a44d94b559
 va grok --resume 019fabde-7535-7cc2-ab09-7987edc08ff8
 va grok resume 019fabde-7535-7cc2-ab09-7987edc08ff8
+# Kimi Code (https://www.kimi.com/code/en) — sessions live under ~/.kimi-code/
+va kimi --continue
+va kimi --session abc123
+va kimi resume abc123              # normalized to --resume (kimi alias for --session)
 ```
 
 Harnesses use `workdir = caller` by default so the agent runs in the directory
@@ -132,7 +137,7 @@ The remote installer pins a **tagged release** (default `v0.3.0`, not floating
 The installer:
 
 1. Installs `vaulted-agent` and the `va` alias  
-2. Detects `claude` / `codex` / `grok` on your PATH and writes live harnesses (`workdir = caller`)  
+2. Detects `claude` / `codex` / `grok` / `kimi` (Kimi Code) on your PATH and writes live harnesses (`workdir = caller`)  
 3. Optionally asks for a vault backend (1Password, **Bitwarden Secrets Manager**, pass, sops, …) when a TTY is present  
 4. Asks for a default **auth mode**: `file` (token on disk) or `prompt` (paste each launch; nothing stored)  
 5. Rewrites the launcher’s `DEFAULT_BACKEND` from `--backend` and prints the matching token path (`bws.env` vs `op.env`)  
@@ -144,6 +149,7 @@ Then, if detection found your agents:
 va claude
 va codex
 va grok
+va kimi
 ```
 
 Or from a release tag / local clone:
@@ -284,7 +290,7 @@ config file you have edited. Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
-| `--no-auto-harness` | do not detect claude/codex/grok or write live harnesses |
+| `--no-auto-harness` | do not detect claude/codex/grok/kimi or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Also patches the installed launcher’s `DEFAULT_BACKEND` and the summary’s token path (`bws.env` vs `op.env`) |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
@@ -473,9 +479,10 @@ command  = claude --permission-mode auto
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 
-See [Resume sessions](#resume-sessions) above for `va claude|codex|grok` resume
-examples. Native CLIs still differ without `va`: Claude/Grok use `--resume`;
-Codex uses the `resume` subcommand (`codex --resume` errors).
+See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi`
+resume examples. Native CLIs still differ without `va`: Claude/Grok use
+`--resume`; Codex uses the `resume` subcommand; Kimi Code uses `--continue` /
+`--session` (and accepts `--resume` as an alias).
 
 Whitespace around the key, the `=`, and the value is ignored, so align them
 however you like. Your own arguments are appended after the configured ones.
