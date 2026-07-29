@@ -45,16 +45,17 @@ cd vaulted-agent-launcher && sudo ./install.sh
 ```
 
 Either path ends the same way: put the one vault credential on disk, then copy
-a harness into place:
+a harness into place. `install.sh` prints the config directory and the backend
+token path it expects; write the service-account token into that `op.env`
+(mode `0640`, readable by the service account):
 
 ```bash
 # the one credential that stays on disk (1Password; see Backends for the rest)
-printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee /etc/vaulted-agent/op.env >/dev/null
-sudo chown root:"$USER" /etc/vaulted-agent/op.env
-sudo chmod 0640 /etc/vaulted-agent/op.env
+printf 'OP_SERVICE_ACCOUNT_TOKEN=ops_...\n' | sudo tee op.env >/dev/null
+sudo chmod 0640 op.env
 
-sudo cp /etc/vaulted-agent/harnesses.d/claude.conf.example \
-        /etc/vaulted-agent/harnesses.d/claude.conf
+# activate a harness sample (drop the .example suffix)
+sudo cp harnesses.d/claude.conf.example harnesses.d/claude.conf
 ```
 
 | | |
@@ -70,9 +71,8 @@ Details, shared-host setup, flags, and uninstall are under
 ## The honest claim
 
 This is **not** "no secrets on disk." One credential stays on disk: the vault
-service-account token, at `/etc/vaulted-agent/op.env`, mode `0640
-root:agent`. Everything else is derived from it at launch and never written
-down.
+service-account token in `op.env` (mode `0640`, readable by the service
+account). Everything else is derived from it at launch and never written down.
 
 What you get for that trade:
 
@@ -532,7 +532,7 @@ shell so the exports survive.
 with `set -a` exports it, and `exec`ing the agent hands it over:
 
 ```bash
-set -a; . /etc/vaulted-agent/op.env; set +a      # exports OP_SERVICE_ACCOUNT_TOKEN
+set -a; . op.env; set +a                         # exports OP_SERVICE_ACCOUNT_TOKEN
 ...
 exec claude                                        # which now inherits it
 ```

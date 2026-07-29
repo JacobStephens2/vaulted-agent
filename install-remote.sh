@@ -25,8 +25,8 @@
 #   less /tmp/vaulted-agent-install.sh
 #   bash /tmp/vaulted-agent-install.sh
 #
-# The vault token is never written by this script. After install you still set
-# /etc/vaulted-agent/op.env (or your chosen backend) yourself.
+# The vault token is never written by this script. After install you still put
+# the service-account token in op.env (or your chosen backend) yourself.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
