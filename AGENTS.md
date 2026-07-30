@@ -8,4 +8,7 @@ GitHub Issues via `gh` (repo: JacobStephens2/vaulted-agent-launcher). See `docs/
 
 ### Domain docs
 
-Agent-facing notes live under `docs/agents/`. There is no root `CONTEXT.md` or `docs/adr/` in this tree yet; prefer issue #1 (user stories) and `MIGRATION.md` for runtime contract.
+- Root `CONTEXT.md` — ubiquitous language (harness, manifest, backend, launch path, …)
+- `docs/adr/` — architecture decisions
+- `docs/agents/` — how agents should use those docs
+- Issue #1 and `MIGRATION.md` for user stories and Bash→Rust contract
