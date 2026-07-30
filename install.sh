@@ -60,6 +60,7 @@ DRY=0
 UNINSTALL=0
 PURGE=0
 ASSUME_YES=0
+ALLOW_DEBUG_BINARY=0
 
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ORIG_ARGS=( ${1+"$@"} )          # kept for the re-run hint; the parse loop below consumes $@
@@ -139,6 +140,7 @@ while (( $# )); do
     --auth-mode)       AUTH_MODE_CHOICE="${2:?}"; shift 2 ;;
     --op-token-file)   OP_TOKEN_FILE="${2:?}"; shift 2 ;;
     --bws-token-file)  BWS_TOKEN_FILE="${2:?}"; shift 2 ;;
+    --allow-debug-binary) ALLOW_DEBUG_BINARY=1; shift ;;
     -h|--help)         sed -n "2,25p" "$0"; exit 0 ;;
     *)                 die "unknown option '$1'" ;;
   esac
@@ -359,18 +361,50 @@ printf '  backend token   : %s\n' "$BACKEND_TOKEN_PATH"
 (( DRY )) && printf '  (dry run)\n'
 printf '\n'
 
-# --- the launcher, with its constants rewritten to this host ---------------
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-sed -e "s|^SERVICE_USER=.*|SERVICE_USER=\"$SERVICE_USER\"|" \
-    -e "s|^WORKDIR=.*|WORKDIR=\"$WORKDIR\"|" \
-    -e "s|^CONFIG_DIR=.*|CONFIG_DIR=\"$CONFIG\"|" \
-    -e "s|^LAUNCHER_BIN_DIR=.*|LAUNCHER_BIN_DIR=\"$PREFIX\"|" \
-    -e "s|^OP_ENV_FILE=.*|OP_ENV_FILE=\"$OP_ENV\"|" \
-    -e "s|^DEFAULT_BACKEND=.*|DEFAULT_BACKEND=\"$DEFAULT_BACKEND_VALUE\"|" \
-    "$REPO/bin/vaulted-agent" > "$tmp"
-bash -n "$tmp" || die "patched launcher failed to parse; not installing"
-run install -m 0755 "$tmp" "$PREFIX/vaulted-agent"
-printf 'installed %s/vaulted-agent\n' "$PREFIX"
+# --- the launcher (Rust binary; machine defaults go in defaults.conf) ------
+# Prefer: VAULTED_AGENT_BIN → release binary in tree → cargo build --release.
+# Debug binaries are never installed unless --allow-debug-binary (stale debug
+# builds from another branch must not land in /usr/local/bin).
+resolve_rust_binary() {
+  local cand
+  for cand in \
+    "${VAULTED_AGENT_BIN:-}" \
+    "$REPO/target/release/vaulted-agent"
+  do
+    [[ -n "$cand" && -x "$cand" ]] || continue
+    printf '%s\n' "$cand"
+    return 0
+  done
+  if (( ALLOW_DEBUG_BINARY )) && [[ -x "$REPO/target/debug/vaulted-agent" ]]; then
+    printf 'warning: installing target/debug/vaulted-agent (--allow-debug-binary)\n' >&2
+    printf '%s\n' "$REPO/target/debug/vaulted-agent"
+    return 0
+  fi
+  if command -v cargo >/dev/null 2>&1; then
+    printf 'building vaulted-agent (cargo --release --locked)…\n' >&2
+    # Drop privileges for the build when we are root (Cargo build scripts are
+    # arbitrary code; the Bash runtime never needed root for this step).
+    local build_user="${SUDO_USER:-}"
+    if [[ "$(id -u)" -eq 0 && -n "$build_user" && "$build_user" != "root" ]]; then
+      (cd "$REPO" && sudo -u "$build_user" cargo build --release --locked) >&2 \
+        || die "cargo build --release --locked failed"
+    else
+      (cd "$REPO" && cargo build --release --locked) >&2 \
+        || die "cargo build --release --locked failed"
+    fi
+    [[ -x "$REPO/target/release/vaulted-agent" ]] \
+      || die "cargo build succeeded but binary missing"
+    printf '%s\n' "$REPO/target/release/vaulted-agent"
+    return 0
+  fi
+  die "no vaulted-agent binary found and cargo not on PATH.
+  Build on a machine with Rust: cargo build --release --locked
+  Or set VAULTED_AGENT_BIN=/path/to/vaulted-agent
+  Or use install-remote.sh which downloads a release asset."
+}
+RUST_BIN="$(resolve_rust_binary)"
+run install -m 0755 "$RUST_BIN" "$PREFIX/vaulted-agent"
+printf 'installed %s/vaulted-agent (Rust runtime from %s)\n' "$PREFIX" "$RUST_BIN"
 
 # Short alias `va` -> vaulted-agent (collision-safe unless --force).
 link_alias() {
@@ -531,19 +565,28 @@ write_token_file() {
 
 write_defaults_conf() {
   # $1 = auth_mode (file|prompt)
-  local mode="$1" path="$CONFIG/defaults.conf"
+  local mode="$1" path="$CONFIG/defaults.conf" svc_line="" be_line=""
   case "$mode" in file|prompt) ;; *) die "internal: bad auth_mode '$mode'" ;; esac
+  be_line="default_backend = $DEFAULT_BACKEND_VALUE"
+  # Only set service_user when operator asked for a dedicated account; otherwise
+  # the Rust binary runs as the invoker (no sudo hop).
+  if (( USER_EXPLICIT )); then
+    svc_line="service_user = $SERVICE_USER"
+  fi
   if (( DRY )); then
-    printf '  would write %s (auth_mode=%s)\n' "$path" "$mode"
+    printf '  would write %s (auth_mode=%s, %s)\n' "$path" "$mode" "$be_line"
     return 0
   fi
-  cat > "$path" <<EOF
-# Machine-wide launcher defaults.
-# Change later: vaulted-agent auth-mode  |  va auth-mode prompt|file
-auth_mode = $mode
-EOF
+  {
+    printf '%s\n' \
+      '# Machine-wide launcher defaults (Rust runtime).' \
+      '# Change later: vaulted-agent auth-mode  |  va auth-mode prompt|file' \
+      "auth_mode = $mode" \
+      "$be_line"
+    [[ -n "$svc_line" ]] && printf '%s\n' "$svc_line"
+  } > "$path"
   chmod 0644 "$path"
-  printf '  wrote %s (auth_mode=%s)\n' "$path" "$mode"
+  printf '  wrote %s (auth_mode=%s, backend=%s)\n' "$path" "$mode" "$DEFAULT_BACKEND_VALUE"
 }
 
 # Create a live reference manifest (no secret values) if missing.

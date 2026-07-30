@@ -9,7 +9,8 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent) ·
-Latest: [v0.3.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.3.0)
+Latest: [v0.4.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.0)
+(Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
 
@@ -41,7 +42,7 @@ vaulted-agent setup                 # backend / token; Bitwarden can build a ref
 vaulted-agent refresh               # rebuild refs after adding secrets in Bitwarden SM
 vaulted-agent auth-mode             # file (token on disk) vs prompt (paste each launch)
 vaulted-agent doctor                # harnesses, backends, manifest syntax (no secret values)
-vaulted-agent version               # e.g. vaulted-agent 0.3.0
+vaulted-agent version               # e.g. vaulted-agent 0.4.0
 va claude                           # with auth_mode=prompt: asks for vault token
 va claude -p                        # force prompt this launch only
 ```
@@ -66,7 +67,7 @@ va run -m readonly.env --backend plainfile -- env | sort
 | flag | |
 |---|---|
 | `-m` / `--manifest` | refs file; relative paths are under `/etc/vaulted-agent/manifests/` |
-| `--backend NAME` | `onepassword` · `bitwarden` · `sops` · `pass` · `plainfile` (default: install-time `DEFAULT_BACKEND`) |
+| `--backend NAME` | `onepassword` · `bitwarden` · `sops` · `pass` · `plainfile` (default: `defaults.conf` `default_backend`) |
 | `--workdir DIR` | `caller` (default) · absolute path · `$HOME/…` |
 | `-p` | prompt for vault token this launch only (never written) |
 | `--` | end of launcher flags; rest is the command |
@@ -150,7 +151,7 @@ va claude -c                          # continue latest (claude native)
 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 ```
 
-The remote installer pins a **tagged release** (default `v0.3.0`, not floating
+The remote installer pins a **tagged release** (default `v0.4.0`, not floating
 `main`). Override with `VAULTED_AGENT_VERSION=…` or `latest`.
 
 The installer:
@@ -159,8 +160,9 @@ The installer:
 2. Detects `claude` / `codex` / `grok` / `kimi` (Kimi Code) on your PATH and writes live harnesses (`workdir = caller`)  
 3. Optionally asks for a vault backend (1Password, **Bitwarden Secrets Manager**, pass, sops, …) when a TTY is present  
 4. Asks for a default **auth mode**: `file` (token on disk) or `prompt` (paste each launch; nothing stored)  
-5. Rewrites the launcher’s `DEFAULT_BACKEND` from `--backend` and prints the matching token path (`bws.env` vs `op.env`)  
-6. For 1Password / Bitwarden / pass, prints the **refs manifest path** where you put `VAR=…` references  
+5. Writes `/etc/vaulted-agent/defaults.conf` with `auth_mode` and `default_backend` (from `--backend`); prints the matching token path (`bws.env` vs `op.env`)  
+6. Installs a **Rust** `vaulted-agent` binary (release asset or `cargo build --release` / `VAULTED_AGENT_BIN`)  
+7. For 1Password / Bitwarden / pass, prints the **refs manifest path** where you put `VAR=…` references  
 
 Then, if detection found your agents:
 
@@ -174,7 +176,7 @@ va kimi
 Or from a release tag / local clone:
 
 ```bash
-git clone --branch v0.3.0 --depth 1 \
+git clone --branch v0.4.0 --depth 1 \
   https://github.com/JacobStephens2/vaulted-agent-launcher
 cd vaulted-agent-launcher && sudo ./install.sh
 # local tree with Bitwarden + prompt auth (no token file):
@@ -183,7 +185,7 @@ sudo ./install.sh --backend bitwarden --auth-mode prompt
 
 | | |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.3.0 curl -fsSL …/install.sh \| bash` |
+| Pin a version | `VAULTED_AGENT_VERSION=v0.4.0 curl -fsSL …/install.sh \| bash` |
 | Skip short alias `va` | `… \| bash -s -- --no-va` |
 | Skip agent auto-detect | `… \| bash -s -- --no-auto-harness` |
 | Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
@@ -221,7 +223,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.3.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.3.0)
+Latest: [v0.4.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.0)
 
 ## The honest claim
 
@@ -300,18 +302,18 @@ running. A dedicated account with nothing else in it makes "the same user" as
 small a set as possible, and makes the audit trail say "the agent did this"
 rather than naming a person. Running as root is refused outright.
 
-`install.sh` rewrites the constants at the top of the launcher for this host,
-refuses to install a launcher that no longer parses, and never overwrites a
+`install.sh` installs the Rust binary and writes machine defaults to
+`defaults.conf` (never sed-patches a shell script). It never overwrites a
 config file you have edited. Useful flags:
 
 | flag | |
 |---|---|
-| `--user NAME` | the service account to run agents as; defaults to you |
+| `--user NAME` | the service account to run agents as; defaults to you (writes `service_user` in defaults.conf when explicit) |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
 | `--no-auto-harness` | do not detect claude/codex/grok/kimi or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
-| `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Also patches the installed launcher’s `DEFAULT_BACKEND` and the summary’s token path (`bws.env` vs `op.env`) |
+| `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Sets `default_backend` in `defaults.conf` and the summary’s token path (`bws.env` vs `op.env`) |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
 | `--op-token-file PATH` | write OP_SERVICE_ACCOUNT_TOKEN from this file (not argv); ignored when `--auth-mode prompt` |
 | `--bws-token-file PATH` | write BWS_ACCESS_TOKEN from this file; ignored when `--auth-mode prompt` |
@@ -533,7 +535,8 @@ free-form-ness was never what made it safe.
 
 ## Backends
 
-Set per harness with `backend =`, or change `DEFAULT_BACKEND` in the launcher.
+Set per harness with `backend =`, or set machine default `default_backend` in
+`/etc/vaulted-agent/defaults.conf` (install `--backend`, or edit the file).
 
 | backend | manifest is | on-disk credential | resolves |
 |---|---|---|---|
@@ -714,29 +717,20 @@ one-shot harness that prints env) after a scrub.
 
 ## Dependencies
 
-The launcher is bash and coreutils, and staying there is a deliberate choice
-rather than an accident of how it started. It runs as the account holding
-vault access, in the moment before the agent starts, so a surface small enough
-to audit in one sitting is worth more than expressiveness. There is no build
-step, no interpreter version to drift, and nothing to install on a minimal
-box. The work it does - read a config file, fetch some secrets, scrub the
-environment, `exec` - genuinely does not need a language.
+**Runtime** is a single Rust binary (`vaulted-agent` / `va`). Normal install
+uses a GitHub release asset (or `VAULTED_AGENT_BIN`); source install needs
+`cargo` once to build. Host tools by backend:
 
-Two optional features reach outside that, and both are avoidable:
+| feature | needs on PATH |
+|---|---|
+| `backend = bitwarden` | `bws` (JSON parsed in-process; no python3) |
+| `backend = onepassword` | `op` |
+| `backend = pass` | `pass` |
+| `backend = sops` | `sops` |
+| `labels = yes` | nothing extra (UUIDv5 in-process) |
 
-| feature | needs | avoid it with |
-|---|---|---|
-| `labels = yes` | `python3`, for UUIDv5 | `labels = no`, and pass real UUIDs |
-| `backend = bitwarden` | `python3`, to parse JSON | any other backend |
-
-Everything else - config parsing, the environment scrub, injection, and the
-interactive picker - is bash builtins plus `sed`.
-
-`pick` is intentionally not `fzf`: a dependency that may be absent is a poor
-trade for arrow keys, and the whole picker is about thirty lines of `printf`
-and `read`. The bar for adding a language here should be a feature that
-genuinely cannot be done this way - a real TUI with filtering and preview
-panes would qualify; a numbered menu does not.
+`pick` is a numbered menu on `/dev/tty`, not `fzf`. See [MIGRATION.md](MIGRATION.md)
+for Bash → Rust notes.
 
 ## Six things that are easy to get wrong
 
