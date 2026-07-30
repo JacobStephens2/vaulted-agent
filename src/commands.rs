@@ -35,7 +35,11 @@ fn service_user_for_token(paths: &Paths) -> Option<String> {
 }
 
 fn load_bws(paths: &Paths) -> Result<ManagerToken> {
-    auth::load_manager_token(paths, auth_mode(paths), TokenKind::Bws, force_prompt())
+    load_bws_with(paths, auth_mode(paths))
+}
+
+fn load_bws_with(paths: &Paths, mode: AuthMode) -> Result<ManagerToken> {
+    auth::load_manager_token(paths, mode, TokenKind::Bws, force_prompt())
 }
 
 pub fn cmd_version() {
@@ -43,23 +47,100 @@ pub fn cmd_version() {
 }
 
 pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("show");
+    // Bare `auth-mode` on a TTY is interactive (install/README parity).
+    // Explicit `show` always prints without prompting.
+    let sub = args.first().map(|s| s.as_str());
     match sub {
-        "show" | "" => {
+        None => {
+            if can_prompt_user() {
+                let mode = prompt_auth_mode_choice(load_auth_mode(paths))?;
+                write_auth_mode(paths, mode)?;
+                println!("auth_mode={}", mode.as_str());
+            } else {
+                println!("auth_mode={}", load_auth_mode(paths).as_str());
+            }
+            Ok(())
+        }
+        Some("show") | Some("") => {
             let mode = load_auth_mode(paths);
             println!("auth_mode={}", mode.as_str());
             Ok(())
         }
-        "file" | "prompt" => {
-            let mode = AuthMode::parse(sub).unwrap();
+        Some("file") | Some("prompt") => {
+            let mode = AuthMode::parse(sub.unwrap()).unwrap();
             write_auth_mode(paths, mode)?;
             println!("auth_mode={}", mode.as_str());
             Ok(())
         }
-        other => Err(Error::Message(format!(
+        Some(other) => Err(Error::Message(format!(
             "unknown auth-mode '{other}' (want file, prompt, or show)"
         ))),
     }
+}
+
+/// True when a human can answer interactive menus (setup / auth-mode).
+/// Match install.sh: require a usable controlling terminal, not merely /dev/tty present.
+fn can_prompt_user() -> bool {
+    io::IsTerminal::is_terminal(&io::stdin())
+        && fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+}
+
+fn read_tty_line() -> Result<String> {
+    let mut line = String::new();
+    let mut tty = io::BufReader::new(
+        fs::File::open("/dev/tty").map_err(|e| Error::Message(format!("tty: {e}")))?,
+    );
+    tty.read_line(&mut line)
+        .map_err(|e| Error::Message(format!("tty read: {e}")))?;
+    Ok(line)
+}
+
+/// Parse an auth-mode menu reply. Empty keeps `current`. Unknown keeps `current`.
+fn parse_auth_mode_choice(choice: &str, current: AuthMode) -> AuthMode {
+    match choice.trim() {
+        "1" | "file" | "disk" => AuthMode::File,
+        "2" | "prompt" | "p" => AuthMode::Prompt,
+        "" => current,
+        _ => current,
+    }
+}
+
+/// Interactive auth-mode menu (install.sh parity). Writes nothing; caller persists.
+fn prompt_auth_mode_choice(current: AuthMode) -> Result<AuthMode> {
+    let default = current.as_str();
+    eprintln!("\nHow should vault tokens be supplied at launch?");
+    eprintln!("  1) file    — store once in op.env / bws.env (no prompt each run)");
+    eprintln!("  2) prompt  — paste token each launch; nothing stored on disk");
+    eprintln!("     (same as always running with -p / --prompt-auth)");
+    eprint!("choice [1-2, default {default}]: ");
+    let _ = io::stderr().flush();
+    let line = read_tty_line()?;
+    let trimmed = line.trim();
+    if !trimmed.is_empty()
+        && !matches!(
+            trimmed,
+            "1" | "file" | "disk" | "2" | "prompt" | "p"
+        )
+    {
+        eprintln!("  unknown choice '{trimmed}'; keeping {default}");
+    }
+    Ok(parse_auth_mode_choice(trimmed, current))
+}
+
+/// When interactive, ask how manager tokens are obtained and persist the choice.
+/// Non-interactive runs leave the existing defaults.conf value alone.
+fn ensure_auth_mode_for_setup(paths: &Paths) -> Result<AuthMode> {
+    if !can_prompt_user() {
+        return Ok(auth_mode(paths));
+    }
+    let current = load_auth_mode(paths);
+    let mode = prompt_auth_mode_choice(current)?;
+    write_auth_mode(paths, mode)?;
+    Ok(mode)
 }
 
 fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
@@ -463,8 +544,8 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn load_op(paths: &Paths) -> Result<ManagerToken> {
-    auth::load_manager_token(paths, auth_mode(paths), TokenKind::Op, force_prompt())
+fn load_op_with(paths: &Paths, mode: AuthMode) -> Result<ManagerToken> {
+    auth::load_manager_token(paths, mode, TokenKind::Op, force_prompt())
 }
 
 /// Resolve the refs file for bare `refresh` / setup from harness config (story #13).
@@ -505,12 +586,12 @@ fn default_bitwarden_manifest(paths: &Paths) -> Result<PathBuf> {
     }
 }
 
-fn setup_bitwarden(paths: &Paths) -> Result<()> {
+fn setup_bitwarden(paths: &Paths, mode: AuthMode) -> Result<()> {
     println!("\nBitwarden Secrets Manager");
     println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
     println!("  not your personal vault master password or login API key.\n");
-    let token = load_bws(paths)?;
-    if auth_mode(paths) == AuthMode::File {
+    let token = load_bws_with(paths, mode)?;
+    if mode == AuthMode::File {
         // Always write so token rotation works (parity with setup onepassword).
         let svc = service_user_for_token(paths);
         auth::write_token_file(
@@ -547,11 +628,11 @@ fn setup_bitwarden(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn setup_onepassword(paths: &Paths) -> Result<()> {
+fn setup_onepassword(paths: &Paths, mode: AuthMode) -> Result<()> {
     println!("\n1Password service account");
     println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
-    let token = load_op(paths)?;
-    if auth_mode(paths) == AuthMode::File {
+    let token = load_op_with(paths, mode)?;
+    if mode == AuthMode::File {
         let svc = service_user_for_token(paths);
         auth::write_token_file(
             &paths.op_env_file,
@@ -573,7 +654,11 @@ fn setup_onepassword(paths: &Paths) -> Result<()> {
 pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
     println!("vaulted-agent setup");
     println!("config: {}", paths.config_dir.display());
-    println!("auth_mode: {}", auth_mode(paths).as_str());
+
+    // Ask how manager tokens are obtained (file on disk vs paste each launch)
+    // before any backend work that may write op.env / bws.env.
+    let mode = ensure_auth_mode_for_setup(paths)?;
+    println!("auth_mode: {}", mode.as_str());
 
     // Explicit backend: setup [bitwarden|onepassword|bws|op]
     let want = args
@@ -583,8 +668,8 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
 
     let choose = |name: &str| -> Result<()> {
         match name {
-            "bitwarden" | "bws" => setup_bitwarden(paths),
-            "onepassword" | "op" | "1password" => setup_onepassword(paths),
+            "bitwarden" | "bws" => setup_bitwarden(paths, mode),
+            "onepassword" | "op" | "1password" => setup_onepassword(paths, mode),
             "pass" => {
                 println!("\npass backend uses the passwordstore.org store (GPG).");
                 println!("No token file. Ensure `pass` is on PATH for the service account.");
@@ -610,27 +695,22 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
 
     // Auto: prefer whichever token is already available (env or file).
     if env::var_os("BWS_ACCESS_TOKEN").is_some() || paths.bws_env_file.is_file() {
-        return setup_bitwarden(paths);
+        return setup_bitwarden(paths, mode);
     }
     if env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || paths.op_env_file.is_file() {
-        return setup_onepassword(paths);
+        return setup_onepassword(paths, mode);
     }
 
     // Interactive menu when TTY; else print usage.
-    if io::IsTerminal::is_terminal(&io::stdin()) && Path::new("/dev/tty").exists() {
-        eprintln!("Choose vault backend:");
+    if can_prompt_user() {
+        eprintln!("\nChoose vault backend:");
         eprintln!("  1) bitwarden   (Bitwarden Secrets Manager)");
         eprintln!("  2) onepassword (1Password service account)");
         eprintln!("  3) pass");
         eprintln!("  4) sops");
         eprint!("backend [1-4]: ");
         let _ = io::stderr().flush();
-        let mut line = String::new();
-        let mut tty = io::BufReader::new(
-            fs::File::open("/dev/tty").map_err(|e| Error::Message(format!("tty: {e}")))?,
-        );
-        tty.read_line(&mut line)
-            .map_err(|e| Error::Message(format!("tty read: {e}")))?;
+        let line = read_tty_line()?;
         let choice = line.trim();
         let name = match choice {
             "1" | "bitwarden" | "bws" => "bitwarden",
@@ -1042,4 +1122,51 @@ pub fn is_reserved(name: &str, paths: &Paths) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_auth_mode_choice_accepts_aliases() {
+        assert_eq!(
+            parse_auth_mode_choice("1", AuthMode::Prompt),
+            AuthMode::File
+        );
+        assert_eq!(
+            parse_auth_mode_choice("file", AuthMode::Prompt),
+            AuthMode::File
+        );
+        assert_eq!(
+            parse_auth_mode_choice("disk", AuthMode::Prompt),
+            AuthMode::File
+        );
+        assert_eq!(
+            parse_auth_mode_choice("2", AuthMode::File),
+            AuthMode::Prompt
+        );
+        assert_eq!(
+            parse_auth_mode_choice("prompt", AuthMode::File),
+            AuthMode::Prompt
+        );
+        assert_eq!(parse_auth_mode_choice("p", AuthMode::File), AuthMode::Prompt);
+    }
+
+    #[test]
+    fn parse_auth_mode_choice_empty_or_unknown_keeps_current() {
+        assert_eq!(parse_auth_mode_choice("", AuthMode::File), AuthMode::File);
+        assert_eq!(
+            parse_auth_mode_choice("", AuthMode::Prompt),
+            AuthMode::Prompt
+        );
+        assert_eq!(
+            parse_auth_mode_choice("nope", AuthMode::Prompt),
+            AuthMode::Prompt
+        );
+        assert_eq!(
+            parse_auth_mode_choice("  file  ", AuthMode::Prompt),
+            AuthMode::File
+        );
+    }
 }

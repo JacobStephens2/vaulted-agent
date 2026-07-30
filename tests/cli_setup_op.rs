@@ -1,9 +1,39 @@
 //! #30: setup onepassword writes op.env when auth_mode=file.
+//! Non-interactive setup must not rewrite auth_mode (TTY prompts only).
 
 mod common;
 
 use common::CliSeam;
 use std::fs;
+
+#[test]
+fn setup_noninteractive_preserves_existing_auth_mode() {
+    let seam = CliSeam::new();
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "auth_mode = prompt\n",
+    )
+    .unwrap();
+    let out = seam
+        .vaulted_agent()
+        .env("OP_SERVICE_ACCOUNT_TOKEN", "ops-preserve-mode")
+        .env("VAULTED_AGENT_AUTH_MODE", "prompt")
+        .args(["setup", "onepassword"])
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(seam.config_dir.join("defaults.conf")).unwrap();
+    assert!(
+        text.contains("auth_mode = prompt") || text.contains("auth_mode=prompt"),
+        "non-interactive setup must not flip auth_mode: {text}"
+    );
+    // prompt mode: still must not write token file
+    assert!(!seam.config_dir.join("op.env").is_file());
+}
 
 #[test]
 fn setup_onepassword_writes_op_env_file_mode() {

@@ -468,11 +468,22 @@ Within a launch, if the token is already in the environment, that wins over
 file and prompt. If `auth_mode=file` but the file is missing and a TTY exists,
 the launcher offers a one-shot “this launch only” paste.
 
-**`va setup` and the token file.** Choice 1 (1Password) writes `op.env`. Choice
-2 (Bitwarden) writes `bws.env` **only when** `auth_mode=file`. Under
-`auth_mode=prompt`, Bitwarden setup exports the token in the setup process for
-`bws secret list` and the optional refs-file builder, then exits - nothing
-persisted. It prints:
+**`va setup` and the token file.** On a TTY, setup first asks how vault manager
+tokens should be supplied (same menu as install / `auth-mode`):
+
+```text
+How should vault tokens be supplied at launch?
+  1) file    — store once in op.env / bws.env (no prompt each run)
+  2) prompt  — paste token each launch; nothing stored on disk
+```
+
+That choice is written to `defaults.conf` before backend work. Non-interactive
+setup leaves the existing `auth_mode` alone.
+
+Then, for the vault backend: 1Password setup writes `op.env` and Bitwarden
+writes `bws.env` **only when** `auth_mode=file`. Under `auth_mode=prompt`,
+setup uses the token only in-process for `bws secret list` / refs building,
+then exits — nothing persisted. It prints:
 
 ```text
 auth_mode=prompt — token not written to disk (good).
