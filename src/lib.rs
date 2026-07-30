@@ -7,6 +7,7 @@ pub mod config;
 pub mod env_scrub;
 pub mod error;
 pub mod launch;
+pub mod privilege;
 pub mod refs;
 pub mod resume;
 pub mod secret;

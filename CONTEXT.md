@@ -17,7 +17,9 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Service user** | Optional dedicated OS account; launcher re-execs via `sudo -u` so the agent runs as that user. |
 | **Conductor link** | Symlink `*-conductor` → fixed harness name; `-H` must not override (narrow entitlement). |
 | **Launch path** | scrub → resolve → drop manager token → exec (story #44: keep small and auditable). |
+| **Launch plan** | Pure result of the launch path before handoff: program, agent argv, workdir, child env. Tests assert the plan without process exec. |
 | **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets only. |
+| **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |
 | **Caller cwd** | Invocation directory preserved across sudo re-exec (`VAULTED_AGENT_CALLER_CWD`) for `workdir = caller`. |
 
 ## Operator surface (acceptance seam)

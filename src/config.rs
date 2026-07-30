@@ -352,11 +352,11 @@ fn double_quoted_closed(s: &str) -> bool {
     bs.is_multiple_of(2)
 }
 
-/// Parse KEY=value dotenv-style lines into a map.
+/// Ordered KEY=value pairs (shared policy for validate + resolve).
 /// Fails closed on invalid variable names (story #37). Strips surrounding quotes
 /// and supports double-quoted multi-line values (bash `source` parity for common cases).
-pub fn parse_dotenv_keys(text: &str) -> Result<HashMap<String, String>> {
-    let mut m = HashMap::new();
+pub fn parse_dotenv_pairs(text: &str) -> Result<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
     let mut lines = text.lines().peekable();
     let mut lineno = 0usize;
     while let Some(raw) = lines.next() {
@@ -392,9 +392,28 @@ pub fn parse_dotenv_keys(text: &str) -> Result<HashMap<String, String>> {
                 }
             }
         }
-        m.insert(key.to_string(), unquote_dotenv_value(&val));
+        pairs.push((key.to_string(), unquote_dotenv_value(&val)));
+    }
+    Ok(pairs)
+}
+
+/// Parse KEY=value dotenv-style lines into a map (last key wins).
+pub fn parse_dotenv_keys(text: &str) -> Result<HashMap<String, String>> {
+    let mut m = HashMap::new();
+    for (k, v) in parse_dotenv_pairs(text)? {
+        m.insert(k, v);
     }
     Ok(m)
+}
+
+/// First value for `key` in dotenv text, using the shared parse policy.
+pub fn parse_dotenv_var(text: &str, key: &str) -> Result<Option<String>> {
+    for (k, v) in parse_dotenv_pairs(text)? {
+        if k == key {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -453,6 +472,22 @@ mod tests {
     #[test]
     fn parse_dotenv_rejects_bad_var_name() {
         assert!(parse_dotenv_keys("MY-VAR=secret\n").is_err());
+    }
+
+    #[test]
+    fn parse_dotenv_pairs_preserves_order() {
+        let p = parse_dotenv_pairs("A=1\nB=2\n").unwrap();
+        assert_eq!(p, vec![("A".into(), "1".into()), ("B".into(), "2".into())]);
+    }
+
+    #[test]
+    fn parse_dotenv_var_uses_shared_policy() {
+        assert_eq!(
+            parse_dotenv_var("X=\"hi there\"\n", "X")
+                .unwrap()
+                .as_deref(),
+            Some("hi there")
+        );
     }
 
     #[test]

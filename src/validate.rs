@@ -119,52 +119,33 @@ pub fn validate_bitwarden_ref(var: &str, r: &str) -> Result<()> {
 }
 
 pub fn validate_manifest_text(text: &str, backend: Backend) -> Result<Vec<(String, String)>> {
-    let mut pairs = Vec::new();
-    for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim().trim_end_matches('\r');
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            return Err(Error::Message(format!(
-                "line {}: expected VAR=reference",
-                lineno + 1
-            )));
-        };
-        let var = k.trim();
-        let r = v.trim();
-        if !validate_var_name(var) {
-            return Err(Error::Message(format!(
-                "line {}: bad variable name {var}",
-                lineno + 1
-            )));
-        }
+    // Shared KEY=value policy with resolve (quotes, multiline, var names).
+    let pairs = crate::config::parse_dotenv_pairs(text)?;
+    let mut out = Vec::with_capacity(pairs.len());
+    for (var, r) in pairs {
         if r.is_empty() {
-            return Err(Error::Message(format!(
-                "line {}: empty reference for {var}",
-                lineno + 1
-            )));
+            return Err(Error::Message(format!("empty reference for {var}")));
         }
         match backend {
-            Backend::Bitwarden => validate_bitwarden_ref(var, r)?,
+            Backend::Bitwarden => validate_bitwarden_ref(&var, &r)?,
             Backend::OnePassword | Backend::Pass => {
-                if is_placeholder_ref(r) {
+                if is_placeholder_ref(&r) {
                     return Err(Error::Message(format!(
                         "{var} still has placeholder ref {r}"
                     )));
                 }
             }
             Backend::Plainfile | Backend::Sops => {
-                if is_placeholder_secret_value(r) {
+                if is_placeholder_secret_value(&r) {
                     return Err(Error::Message(format!(
                         "{var} looks like a placeholder value"
                     )));
                 }
             }
         }
-        pairs.push((var.to_string(), r.to_string()));
+        out.push((var, r));
     }
-    Ok(pairs)
+    Ok(out)
 }
 
 pub fn validate_manifest_file(path: &Path, backend: Backend) -> Result<Vec<(String, String)>> {
@@ -211,5 +192,18 @@ mod tests {
     fn secret_value_with_replace_substring_is_ok() {
         assert!(!is_placeholder_secret_value("please-REPLACE-this-password"));
         assert!(is_placeholder_secret_value("REPLACE_WITH_SECRET"));
+    }
+
+    #[test]
+    fn validate_shares_quote_stripping_with_resolve() {
+        let pairs = validate_manifest_text("QUOTED=\"hello world\"\n", Backend::Plainfile).unwrap();
+        assert_eq!(pairs, vec![("QUOTED".into(), "hello world".into())]);
+    }
+
+    #[test]
+    fn validate_multiline_does_not_split_continuation() {
+        let pairs = validate_manifest_text("PEM=\"line1\nline2\"\n", Backend::Plainfile).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].1, "line1\nline2");
     }
 }

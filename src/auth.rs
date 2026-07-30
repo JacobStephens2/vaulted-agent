@@ -39,22 +39,6 @@ impl TokenKind {
     }
 }
 
-fn parse_dotenv_var(text: &str, key: &str) -> Option<String> {
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == key {
-            return Some(v.trim().to_string());
-        }
-    }
-    None
-}
-
 fn read_token_file(path: &Path, key: &str) -> Result<Option<ManagerToken>> {
     if !path.is_file() {
         return Ok(None);
@@ -63,7 +47,8 @@ fn read_token_file(path: &Path, key: &str) -> Result<Option<ManagerToken>> {
         path: path.to_path_buf(),
         source: e,
     })?;
-    Ok(parse_dotenv_var(&text, key).map(ManagerToken::new))
+    // Shared dotenv policy with validate/resolve (quotes stripped).
+    Ok(crate::config::parse_dotenv_var(&text, key)?.map(ManagerToken::new))
 }
 
 /// True when /dev/tty can actually be opened (not merely present on the filesystem).

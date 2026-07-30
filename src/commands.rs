@@ -966,72 +966,15 @@ pub fn cmd_launch_harness(
         &LaunchOpts {
             force_prompt,
             extra_args: extra_args.to_vec(),
+            handoff: None,
         },
     )
 }
 
-/// When service_user is configured (env or defaults.conf) and current uid differs, re-exec via sudo.
+/// When service_user is configured and current uid differs, re-exec via sudo.
+/// Policy lives in `privilege`; this is a thin adapter for CLI/main.
 pub fn maybe_reexec_service_user(paths: &Paths, argv0: &str, orig_args: &[String]) -> Result<()> {
-    let Some(service) = crate::config::load_service_user(paths) else {
-        return Ok(());
-    };
-    if service.is_empty() {
-        return Ok(());
-    }
-    // Who am I?
-    let me = Command::new("id")
-        .arg("-un")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-    if me == service {
-        return Ok(());
-    }
-    // Skip re-exec in test handoff / when disabled
-    if env::var_os("VAULTED_AGENT_NO_REEXEC").is_some() {
-        return Ok(());
-    }
-    let caller_cwd = env::var("VAULTED_AGENT_CALLER_CWD").unwrap_or_else(|_| {
-        env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".into())
-    });
-    let bin_dir = env::var("VAULTED_AGENT_BIN_DIR").unwrap_or_else(|_| "/usr/local/bin".into());
-    let invoked = Path::new(argv0)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("vaulted-agent");
-    let launcher = PathBuf::from(&bin_dir).join(invoked);
-    let launcher = if launcher.is_file() {
-        launcher
-    } else {
-        PathBuf::from(argv0)
-    };
-
-    let mut cmd = Command::new("sudo");
-    cmd.arg("-u")
-        .arg(&service)
-        .arg("env")
-        .arg(format!("VAULTED_AGENT_CALLER_CWD={caller_cwd}"));
-    if let Ok(c) = env::var("VAULTED_AGENT_CONFIG_DIR") {
-        cmd.arg(format!("VAULTED_AGENT_CONFIG_DIR={c}"));
-    }
-    cmd.arg(&launcher);
-    for a in orig_args {
-        cmd.arg(a);
-    }
-    let err = {
-        use std::os::unix::process::CommandExt;
-        cmd.exec()
-    };
-    Err(Error::Message(format!("sudo re-exec failed: {err}")))
+    crate::privilege::maybe_reexec_service_user(paths, argv0, orig_args)
 }
 
 pub fn usage(paths: &Paths) {
@@ -1053,7 +996,7 @@ pub fn usage(paths: &Paths) {
          default auth_mode: {}  (file = token on disk; prompt = paste each launch)\n\
          default backend:   {}\n\
          config: VAULTED_AGENT_CONFIG_DIR (default /etc/vaulted-agent)\n\
-         tests:  VAULTED_AGENT_HANDOFF=spawn to spawn instead of exec",
+         (tests only: VAULTED_AGENT_HANDOFF=spawn spawns instead of exec)",
         mode.as_str(),
         be
     );

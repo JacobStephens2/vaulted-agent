@@ -1,15 +1,15 @@
-//! Launch path: resolve → scrub env → drop tokens → exec (or spawn for tests).
+//! Launch path: resolve → scrub env → drop tokens → plan → exec (or spawn for tests).
 
 use std::collections::HashMap;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::auth::{self, TokenKind};
 use crate::backend;
-use crate::config::{load_auth_mode, load_default_backend, AuthMode, Backend, Harness, Paths};
+use crate::config::{load_default_backend, AuthMode, Backend, Harness, Paths};
 use crate::env_scrub::{build_child_env, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
 use crate::resume;
@@ -40,22 +40,35 @@ fn resolve_workdir(harness: &Harness, caller_cwd: &Path) -> Result<PathBuf> {
     }
 }
 
-fn handoff_mode_spawn() -> bool {
-    matches!(
-        env::var("VAULTED_AGENT_HANDOFF").as_deref(),
-        Ok("spawn") | Ok("test")
-    )
+/// How to hand off to the agent process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HandoffMode {
+    /// Replace the launcher process (production).
+    #[default]
+    Exec,
+    /// Spawn and wait (CLI acceptance tests).
+    Spawn,
+}
+
+impl HandoffMode {
+    /// Prefer explicit opts; fall back to tests-only env for compatibility.
+    pub fn from_env() -> Self {
+        match env::var("VAULTED_AGENT_HANDOFF").as_deref() {
+            Ok("spawn") | Ok("test") => Self::Spawn,
+            _ => Self::Exec,
+        }
+    }
 }
 
 pub fn force_prompt_from_env() -> bool {
-    env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(std::ffi::OsStr::new("1"))
+    env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(OsStr::new("1"))
 }
 
 pub fn auth_mode_from_env_or_config(paths: &Paths) -> AuthMode {
     match env::var("VAULTED_AGENT_AUTH_MODE").as_deref() {
         Ok("prompt") => AuthMode::Prompt,
         Ok("file") => AuthMode::File,
-        _ => load_auth_mode(paths),
+        _ => crate::config::load_auth_mode(paths),
     }
 }
 
@@ -63,9 +76,25 @@ pub fn auth_mode_from_env_or_config(paths: &Paths) -> AuthMode {
 pub struct LaunchOpts {
     pub force_prompt: bool,
     pub extra_args: Vec<String>,
+    /// When set, overrides env-based handoff.
+    pub handoff: Option<HandoffMode>,
 }
 
-pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Result<()> {
+/// Pure launch plan: everything needed to start the agent without executing yet.
+#[derive(Debug, Clone)]
+pub struct LaunchPlan {
+    pub program: String,
+    pub args: Vec<String>,
+    pub workdir: PathBuf,
+    pub env: HashMap<OsString, OsString>,
+}
+
+/// Build scrub → resolve → drop token → child env + argv (composition seam).
+pub fn build_launch_plan(
+    paths: &Paths,
+    harness: &Harness,
+    opts: &LaunchOpts,
+) -> Result<LaunchPlan> {
     let manifest = harness.resolve_manifest_path(paths);
     if !manifest.is_file() {
         return Err(Error::Io {
@@ -106,14 +135,13 @@ pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Re
     let caller_cwd = env::current_dir().map_err(|e| Error::Message(format!("cwd: {e}")))?;
     let workdir = resolve_workdir(harness, &caller_cwd)?;
 
-    // build_child_env already strips manager tokens; no second sweep needed.
     let mut child_env = build_child_env(&harness.keep, &secrets);
 
     let mut cmdline = harness.command.clone();
     if let Some(bin) = &harness.bin_dir {
         let bin = expand_home(bin);
         let path = child_env
-            .get(std::ffi::OsStr::new("PATH"))
+            .get(OsStr::new("PATH"))
             .map(|p| format!("{bin}:{}", p.to_string_lossy()))
             .unwrap_or_else(|| bin.clone());
         child_env.insert(OsString::from("PATH"), OsString::from(path));
@@ -131,29 +159,50 @@ pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Re
     let mut extra = opts.extra_args.clone();
     extra = resume::normalize_argv(agent_base, &extra, harness.labels)?;
 
-    let mut cmd = Command::new(&program);
-    cmd.args(&cmdline)
-        .args(&extra)
-        .current_dir(&workdir)
+    let mut args = cmdline;
+    args.extend(extra);
+
+    Ok(LaunchPlan {
+        program,
+        args,
+        workdir,
+        env: child_env,
+    })
+}
+
+/// Run a plan via exec (production) or spawn (tests).
+pub fn run_plan(plan: &LaunchPlan, handoff: HandoffMode) -> Result<()> {
+    let mut cmd = Command::new(&plan.program);
+    cmd.args(&plan.args)
+        .current_dir(&plan.workdir)
         .env_clear()
-        .envs(&child_env)
+        .envs(&plan.env)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    if handoff_mode_spawn() {
-        let status = cmd
-            .status()
-            .map_err(|e| Error::Message(format!("failed to spawn {program}: {e}")))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Error::Message(format!("command exited with {status}")))
+    match handoff {
+        HandoffMode::Spawn => {
+            let status = cmd
+                .status()
+                .map_err(|e| Error::Message(format!("failed to spawn {}: {e}", plan.program)))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::Message(format!("command exited with {status}")))
+            }
         }
-    } else {
-        let err = cmd.exec();
-        Err(Error::Message(format!("exec {program}: {err}")))
+        HandoffMode::Exec => {
+            let err = cmd.exec();
+            Err(Error::Message(format!("exec {}: {err}", plan.program)))
+        }
     }
+}
+
+pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Result<()> {
+    let plan = build_launch_plan(paths, harness, opts)?;
+    let handoff = opts.handoff.unwrap_or_else(HandoffMode::from_env);
+    run_plan(&plan, handoff)
 }
 
 pub fn launch_run(
@@ -180,6 +229,58 @@ pub fn launch_run(
         &LaunchOpts {
             force_prompt,
             extra_args: vec![],
+            handoff: None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secret::SecretValue;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn build_plan_injects_secret_excludes_manager_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::create_dir_all(&paths.manifest_dir).unwrap();
+        fs::write(
+            paths.manifest_dir.join("m.env"),
+            "APP_DB_PASS=\"secret-value\"\n",
+        )
+        .unwrap();
+
+        // Absolute command path — no PATH mutation required for plan build.
+        let agent = tmp.path().join("agent");
+        fs::write(&agent, "#!/bin/sh\n").unwrap();
+        let mut perms = fs::metadata(&agent).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&agent, perms).unwrap();
+
+        env::set_var("BWS_ACCESS_TOKEN", "should-not-reach-child");
+
+        let h = Harness {
+            name: "h".into(),
+            backend: Some(Backend::Plainfile),
+            manifest: "m.env".into(),
+            bin_dir: None,
+            workdir: None,
+            labels: false,
+            keep: vec![],
+            command: vec![agent.display().to_string()],
+        };
+        let plan = build_launch_plan(&paths, &h, &LaunchOpts::default()).unwrap();
+        assert_eq!(
+            plan.env
+                .get(OsStr::new("APP_DB_PASS"))
+                .map(|s| s.to_string_lossy().into_owned()),
+            Some("secret-value".into())
+        );
+        assert!(!plan.env.contains_key(OsStr::new("BWS_ACCESS_TOKEN")));
+        assert_eq!(plan.program, agent.display().to_string());
+        assert!(env::var_os("BWS_ACCESS_TOKEN").is_none());
+        let _ = SecretValue::new("x");
+    }
 }
