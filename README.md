@@ -14,157 +14,37 @@ Latest: [v0.4.0](https://github.com/JacobStephens2/vaulted-agent-launcher/releas
 
 ## Contents
 
-- [Usage](#usage) · [va run](#one-shot-commands-va-run) · [Doctor & secrets](#doctor--secrets-helpers)
-- [Resume sessions](#resume-sessions)
-- [Install](#install) · [Auth modes](#auth-mode-file-vs-prompt) · [Bitwarden](#bitwarden-secrets-manager)
+- [Quick start](#quick-start) · [Everyday commands](#everyday-commands)
 - [How it works](#how-it-works) · [Honest claim](#the-honest-claim)
-- [Configuration](#configuration) · [Backends](#backends)
-- [Install details](#install-details) · [Uninstall](#uninstall)
+- [Install details](#install-details) · [Configuration](#configuration) · [Backends](#backends)
+- [Uninstall](#uninstall) · [MIGRATION.md](MIGRATION.md)
 
-## Usage
+## Quick start
 
-Day to day you name the harness as the first argument:
+Three steps. Rust binary on macOS and Linux.
 
-```bash
-va claude
-va codex
-va grok
-va kimi                  # Kimi Code CLI (binary: kimi) if on PATH
-va pick
-# full name also works: vaulted-agent claude
-```
-
-After a fresh install, agents found on your PATH get harnesses that start with
-**no vault secrets** (`plainfile` + `empty.env`). Wire a vault when ready:
-
-```bash
-vaulted-agent setup                 # backend / token; Bitwarden can build a refs file
-vaulted-agent refresh               # rebuild refs after adding secrets in Bitwarden SM
-vaulted-agent auth-mode             # file (token on disk) vs prompt (paste each launch)
-vaulted-agent doctor                # harnesses, backends, manifest syntax (no secret values)
-vaulted-agent version               # e.g. vaulted-agent 0.4.0
-va claude                           # with auth_mode=prompt: asks for vault token
-va claude -p                        # force prompt this launch only
-```
-
-List harnesses: `vaulted-agent` or `va` (no args).  
-Uninstall: `sudo vaulted-agent uninstall` (or `sudo va uninstall`).
-
-### One-shot commands (`va run`)
-
-Inject a manifest into **any** command without writing a harness file. Same
-scrub → resolve → drop vault token → `exec` path as `va claude`. Useful for
-scripts, deploys, and tools (e.g. [gpt-image](https://stephens.page/gpt-image)).
-
-```bash
-va run -m openai.env.refs --backend bitwarden -p -- \
-  python gpt_image.py generate "a lighthouse in a storm, gouache" \
-  --output out.png
-
-va run -m readonly.env --backend plainfile -- env | sort
-```
-
-| flag | |
-|---|---|
-| `-m` / `--manifest` | refs file; relative paths are under `/etc/vaulted-agent/manifests/` |
-| `--backend NAME` | `onepassword` · `bitwarden` · `sops` · `pass` · `plainfile` (default: `defaults.conf` `default_backend`) |
-| `--workdir DIR` | `caller` (default) · absolute path · `$HOME/…` |
-| `-p` | prompt for vault token this launch only (never written) |
-| `--` | end of launcher flags; rest is the command |
-
-### Doctor & secrets helpers
-
-```bash
-va doctor                           # install health (no secret values)
-va secrets list                     # bws secret list (same auth as launches)
-va secrets get name:openai-api-key  # print one value
-va secrets which                    # harness → variable names only
-va secrets validate                 # every harness manifest
-va secrets validate openai.env.refs bitwarden
-va refresh openai.env.refs          # rebuild refs after adding secrets in SM
-va refresh openai.env.refs --all    # non-interactive: include every secret
-va secrets refresh                  # same as va refresh
-```
-
-**`va doctor`** reports version, service user, auth mode, whether
-`bws` / `op` / `sops` / `pass` are on PATH, presence of `op.env` / `bws.env` /
-`age.key`, and each harness’s backend / manifest / workdir plus **manifest
-syntax** (placeholders fail). It does not call the vault for live values.
-
-**`va secrets`** reuses the same token rules as launches (env → file → TTY
-prompt). Prefer it over raw `bws` so auth matches.
-
-**Updating secrets (Bitwarden SM).** The refs file never stores secret *values*
-- only which env vars map to which SM secrets. Values are fetched live on every
-launch (`bws secret get`). So:
-
-| You did in Bitwarden SM | What to run |
-|---|---|
-| Rotated a secret’s **value** | Nothing - next `va claude` / `va run` gets the new value |
-| **Added** a new secret you want in a harness | `va refresh openai.env.refs` (merge: keeps existing lines, appends new) |
-| Rebuild the refs file from scratch | `va refresh openai.env.refs --replace --all` |
-| Removed a secret from a harness | Edit the refs file by hand (or `--replace` and re-pick) |
-
-`va refresh` is the same refs-file writer as `va setup`, for **after** setup.
-Default when the file already exists is **merge** (append unmapped secrets).
-Use `--replace` to rewrite the whole file like first-time setup.
-
-Bitwarden refs accept `UUID`, `uuid:UUID`, `name:KEY`, or `project:PROJECT/KEY`.
-Placeholder values (`REPLACE_…`, all-zero UUIDs, …) fail validation before
-launch - in `doctor`, `secrets validate`, and every real launch.
-
-### Resume sessions
-
-Extra args after the harness go to the agent. Resume shape is normalized so
-either form works under `va` (Claude/Grok speak `--resume`; Codex speaks the
-`resume` subcommand):
-
-```bash
-va claude --resume b03ca221-798e-457b-8f64-f71713e7066c
-va claude resume b03ca221-798e-457b-8f64-f71713e7066c
-va codex resume 019fabc2-fe4f-7e00-a431-a6a44d94b559
-va codex --resume 019fabc2-fe4f-7e00-a431-a6a44d94b559
-va grok --resume 019fabde-7535-7cc2-ab09-7987edc08ff8
-va grok resume 019fabde-7535-7cc2-ab09-7987edc08ff8
-# Kimi Code (https://www.kimi.com/code/en) — sessions live under ~/.kimi-code/
-va kimi --continue
-va kimi --session abc123
-va kimi resume abc123              # normalized to --resume (kimi alias for --session)
-```
-
-Harnesses use `workdir = caller` by default so the agent runs in the directory
-you launched from (sessions are often cwd-scoped).
-
-Other examples:
-
-```bash
-va claude "fix the flaky test in auth"
-va codex --help
-va claude -c                          # continue latest (claude native)
-```
-
-## Install
-
-**macOS · Linux** (not Windows natively - use WSL).
+### 1. Install
 
 ```bash
 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
 ```
 
-The remote installer pins a **tagged release** (default `v0.4.0`, not floating
-`main`). Override with `VAULTED_AGENT_VERSION=…` or `latest`.
+Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
+`grok`, `kimi`), and can ask for a vault backend + auth mode. Pin:
+`VAULTED_AGENT_VERSION=v0.4.0` (or `latest`).
 
-The installer:
+### 2. Wire a vault
 
-1. Installs `vaulted-agent` and the `va` alias  
-2. Detects `claude` / `codex` / `grok` / `kimi` (Kimi Code) on your PATH and writes live harnesses (`workdir = caller`)  
-3. Optionally asks for a vault backend (1Password, **Bitwarden Secrets Manager**, pass, sops, …) when a TTY is present  
-4. Asks for a default **auth mode**: `file` (token on disk) or `prompt` (paste each launch; nothing stored)  
-5. Writes `/etc/vaulted-agent/defaults.conf` with `auth_mode` and `default_backend` (from `--backend`); prints the matching token path (`bws.env` vs `op.env`)  
-6. Installs a **Rust** `vaulted-agent` binary (release asset or `cargo build --release` / `VAULTED_AGENT_BIN`)  
-7. For 1Password / Bitwarden / pass, prints the **refs manifest path** where you put `VAR=…` references  
+```bash
+va setup          # pick Bitwarden / 1Password / …; may write a refs file
+va doctor         # optional health check (no secret values printed)
+```
 
-Then, if detection found your agents:
+Day-one harnesses start with **no vault secrets** until you set them up.
+Bitwarden: `va setup bitwarden` builds a refs file (env var → secret *reference*
+only). Point harnesses at it, or use `va run -m …`.
+
+### 3. Launch
 
 ```bash
 va claude
@@ -173,31 +53,40 @@ va grok
 va kimi
 ```
 
-Or from a release tag / local clone:
+With `auth_mode=prompt`, paste the vault manager token when asked (not written
+to disk). Force a prompt once: `va grok -p`.
+
+## Everyday commands
 
 ```bash
-git clone --branch v0.4.0 --depth 1 \
-  https://github.com/JacobStephens2/vaulted-agent-launcher
-cd vaulted-agent-launcher && sudo ./install.sh
-# local tree with Bitwarden + prompt auth (no token file):
-sudo ./install.sh --backend bitwarden --auth-mode prompt
+va                        # list harnesses
+va pick                   # interactive menu
+va claude --resume <id>   # agent args pass through; resume shape is normalized
+va doctor
+va secrets list           # Bitwarden SM (same auth as launches)
+va secrets validate
+va refresh                # update Bitwarden refs after new SM secrets
+va auth-mode prompt       # or: file
+sudo va uninstall
 ```
 
-| | |
+**One-shot (any command, no harness file):**
+
+```bash
+va run -m openai.env.refs --backend bitwarden -p -- \
+  python gpt_image.py generate "a lighthouse" --output out.png
+```
+
+**When secrets change (Bitwarden SM):**
+
+| In Secrets Manager | What to run |
 |---|---|
-| Pin a version | `VAULTED_AGENT_VERSION=v0.4.0 curl -fsSL …/install.sh \| bash` |
-| Skip short alias `va` | `… \| bash -s -- --no-va` |
-| Skip agent auto-detect | `… \| bash -s -- --no-auto-harness` |
-| Non-interactive backend | `… \| bash -s -- --backend onepassword --op-token-file ./token` |
-| Prompt each launch (no token file) | `… \| bash -s -- --backend bitwarden --auth-mode prompt` |
-| Shared host | `… \| bash -s -- --user agent --allow-user alice` |
+| Rotated a value | Nothing — next launch fetches live |
+| Added a secret you want mapped | `va refresh` (merge) or `va refresh --replace --all` |
+| Removed a mapping | Edit the refs file by hand |
 
-`curl … \| bash` can still prompt on a real terminal (answers are read from
-`/dev/tty`). In CI or non-TTY environments, pass `--backend` / `--auth-mode`
-explicitly.
-
-More flags, shared-host setup, and uninstall detail:
-[Install details](#install-details) · [Uninstall](#uninstall)
+**Install options** (clone, shared host, flags): [Install details](#install-details).  
+**Auth / backends / harness format:** [Configuration](#configuration) · [Backends](#backends).
 
 ## How it works
 
