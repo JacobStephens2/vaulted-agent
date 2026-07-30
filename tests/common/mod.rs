@@ -70,11 +70,11 @@ impl CliSeam {
         path
     }
 
-    /// Stub agent: writes argv and env var *names* to work_dir/<name>.record
+    /// Stub agent: writes argv and full ENV name=value lines to work_dir/<name>.record
     pub fn install_stub_agent(&self, name: &str) -> PathBuf {
         let record = self.work_dir.join(format!("{name}.record"));
         let script = format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nrec='{}'\n{{\n  printf 'ARGV:'\n  printf ' %q' \"$@\"\n  printf '\\n'\n  env | sed -n 's/=.*//p' | sort | sed 's/^/ENV /'\n}} > \"$rec\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\nrec='{}'\n{{\n  printf 'ARGV:'\n  printf ' %q' \"$@\"\n  printf '\\n'\n  env | sort | sed 's/^/ENV /'\n}} > \"$rec\"\n",
             record.display()
         );
         self.write_executable(name, &script)
@@ -86,6 +86,7 @@ impl CliSeam {
     }
 
     /// Minimal fake `bws` reading a JSON object map of key -> value from a file.
+    /// `secret get` resolves by id suffix index (not first-key fallback).
     pub fn install_fake_bws(&self, secrets_json: &Path) -> PathBuf {
         let script = format!(
             r#"#!/usr/bin/env bash
@@ -100,18 +101,17 @@ print(json.dumps([{{'id': '00000000-0000-0000-0000-%012d' % i, 'key': k, 'projec
 "
     ;;
   "secret get")
-    key="${{3-}}"
+    id="${{3-}}"
     python3 -c "
 import json,sys
 m=json.load(open('$map'))
-k=sys.argv[1]
-v=m.get(k)
-if v is None:
-    # try match fake id suffix as index
-    keys=list(m.keys())
-    v=m[keys[0]] if keys else ''
-print(json.dumps({{'value': v}}))
-" "$key"
+keys=list(m.keys())
+idx=int(sys.argv[1].rsplit('-', 1)[-1])
+if idx < 0 or idx >= len(keys):
+    sys.exit('fake-bws: id index out of range')
+k=keys[idx]
+print(json.dumps({{'value': m[k], 'key': k}}))
+" "$id"
     ;;
   *)
     echo "fake-bws: unexpected: $*" >&2

@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::error::{Error, Result};
+use crate::validate::validate_var_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
@@ -26,6 +28,58 @@ impl AuthMode {
             Self::File => "file",
             Self::Prompt => "prompt",
         }
+    }
+}
+
+/// Vault backend. Exhaustive matching is the story #46 compile-time guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Bitwarden,
+    OnePassword,
+    Pass,
+    Sops,
+    Plainfile,
+}
+
+impl Backend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bitwarden => "bitwarden",
+            Self::OnePassword => "onepassword",
+            Self::Pass => "pass",
+            Self::Sops => "sops",
+            Self::Plainfile => "plainfile",
+        }
+    }
+
+    pub fn needs_manager_token(self) -> bool {
+        matches!(self, Self::Bitwarden | Self::OnePassword)
+    }
+
+    /// Accept install/setup aliases (`bws`, `op`, `1password`).
+    pub fn parse_loose(s: &str) -> Option<Self> {
+        match s.trim() {
+            "bitwarden" | "bws" => Some(Self::Bitwarden),
+            "onepassword" | "op" | "1password" => Some(Self::OnePassword),
+            "pass" => Some(Self::Pass),
+            "sops" => Some(Self::Sops),
+            "plainfile" => Some(Self::Plainfile),
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for Backend {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Backend::parse_loose(s).ok_or_else(|| Error::UnknownBackend(s.trim().to_string()))
+    }
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -66,7 +120,7 @@ impl Paths {
 #[derive(Debug, Clone)]
 pub struct Harness {
     pub name: String,
-    pub backend: Option<String>,
+    pub backend: Option<Backend>,
     pub manifest: String,
     pub bin_dir: Option<String>,
     pub workdir: Option<String>,
@@ -122,7 +176,13 @@ impl Harness {
             let key = k.trim();
             let val = v.trim();
             match key {
-                "backend" => backend = Some(val.to_string()),
+                "backend" => {
+                    backend = Some(val.parse().map_err(|_| Error::HarnessParse {
+                        name: name.to_string(),
+                        lineno: lineno + 1,
+                        msg: format!("unknown backend '{val}'"),
+                    })?);
+                }
                 "manifest" => manifest = Some(val.to_string()),
                 "bin" => bin_dir = Some(val.to_string()),
                 "workdir" => workdir = Some(val.to_string()),
@@ -224,13 +284,17 @@ pub fn load_service_user(paths: &Paths) -> Option<String> {
 }
 
 /// Default vault backend when harness omits backend=.
-pub fn load_default_backend(paths: &Paths) -> String {
+pub fn load_default_backend(paths: &Paths) -> Backend {
     if let Ok(v) = std::env::var("VAULTED_AGENT_DEFAULT_BACKEND") {
         if !v.is_empty() {
-            return v;
+            if let Ok(b) = v.parse() {
+                return b;
+            }
         }
     }
-    load_default(paths, "default_backend").unwrap_or_else(|| "onepassword".into())
+    load_default(paths, "default_backend")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(Backend::OnePassword)
 }
 
 pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
@@ -256,25 +320,81 @@ pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Parse KEY=value dotenv-style lines into a map (for plainfile later).
-pub fn parse_dotenv_keys(text: &str) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    for raw in text.lines() {
-        let line = raw.trim().trim_end_matches('\r');
-        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let key = k.trim();
-        if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        {
-            m.insert(key.to_string(), v.trim().to_string());
+/// Strip a single layer of surrounding single or double quotes (bash `source` parity).
+fn unquote_dotenv_value(v: &str) -> String {
+    let v = v.trim();
+    let b = v.as_bytes();
+    if b.len() >= 2 {
+        let (first, last) = (b[0], b[b.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return v[1..v.len() - 1].to_string();
         }
     }
-    m
+    v.to_string()
+}
+
+fn double_quoted_closed(s: &str) -> bool {
+    if !s.starts_with('"') || s.len() < 2 {
+        return false;
+    }
+    // Ends with an unescaped "
+    let b = s.as_bytes();
+    if b[b.len() - 1] != b'"' {
+        return false;
+    }
+    // Count trailing backslashes before the final quote
+    let mut i = b.len() - 1;
+    let mut bs = 0usize;
+    while i > 0 && b[i - 1] == b'\\' {
+        bs += 1;
+        i -= 1;
+    }
+    bs.is_multiple_of(2)
+}
+
+/// Parse KEY=value dotenv-style lines into a map.
+/// Fails closed on invalid variable names (story #37). Strips surrounding quotes
+/// and supports double-quoted multi-line values (bash `source` parity for common cases).
+pub fn parse_dotenv_keys(text: &str) -> Result<HashMap<String, String>> {
+    let mut m = HashMap::new();
+    let mut lines = text.lines().peekable();
+    let mut lineno = 0usize;
+    while let Some(raw) = lines.next() {
+        lineno += 1;
+        let line = raw.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once('=') else {
+            return Err(Error::Message(format!("line {lineno}: expected KEY=value")));
+        };
+        let key = k.trim();
+        if !validate_var_name(key) {
+            return Err(Error::Message(format!(
+                "line {lineno}: bad variable name {key}"
+            )));
+        }
+        let mut val = v.trim().to_string();
+        // Multi-line double-quoted value
+        if val.starts_with('"') && !double_quoted_closed(&val) {
+            loop {
+                let Some(cont) = lines.next() else {
+                    return Err(Error::Message(format!(
+                        "line {lineno}: unclosed double-quoted value for {key}"
+                    )));
+                };
+                lineno += 1;
+                val.push('\n');
+                val.push_str(cont.trim_end_matches('\r'));
+                if double_quoted_closed(&val) {
+                    break;
+                }
+            }
+        }
+        m.insert(key.to_string(), unquote_dotenv_value(&val));
+    }
+    Ok(m)
 }
 
 #[cfg(test)]
@@ -315,5 +435,30 @@ mod tests {
             h.resolve_manifest_path(&paths),
             PathBuf::from("/etc/vaulted-agent/manifests/openai.env.refs")
         );
+    }
+
+    #[test]
+    fn parse_dotenv_strips_quotes() {
+        let m = parse_dotenv_keys("QUOTED=\"hello world\"\nSINGLE='x y'\n").unwrap();
+        assert_eq!(m.get("QUOTED").map(String::as_str), Some("hello world"));
+        assert_eq!(m.get("SINGLE").map(String::as_str), Some("x y"));
+    }
+
+    #[test]
+    fn parse_dotenv_multiline_double_quoted() {
+        let m = parse_dotenv_keys("PEM=\"line1\nline2\"\n").unwrap();
+        assert_eq!(m.get("PEM").map(String::as_str), Some("line1\nline2"));
+    }
+
+    #[test]
+    fn parse_dotenv_rejects_bad_var_name() {
+        assert!(parse_dotenv_keys("MY-VAR=secret\n").is_err());
+    }
+
+    #[test]
+    fn harness_rejects_unknown_backend() {
+        let err =
+            Harness::parse("x", "backend = bitwarde\nmanifest = a\ncommand = true\n").unwrap_err();
+        assert!(format!("{err}").contains("unknown backend"));
     }
 }

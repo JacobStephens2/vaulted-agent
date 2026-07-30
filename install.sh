@@ -60,6 +60,7 @@ DRY=0
 UNINSTALL=0
 PURGE=0
 ASSUME_YES=0
+ALLOW_DEBUG_BINARY=0
 
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ORIG_ARGS=( ${1+"$@"} )          # kept for the re-run hint; the parse loop below consumes $@
@@ -139,6 +140,7 @@ while (( $# )); do
     --auth-mode)       AUTH_MODE_CHOICE="${2:?}"; shift 2 ;;
     --op-token-file)   OP_TOKEN_FILE="${2:?}"; shift 2 ;;
     --bws-token-file)  BWS_TOKEN_FILE="${2:?}"; shift 2 ;;
+    --allow-debug-binary) ALLOW_DEBUG_BINARY=1; shift ;;
     -h|--help)         sed -n "2,25p" "$0"; exit 0 ;;
     *)                 die "unknown option '$1'" ;;
   esac
@@ -360,29 +362,43 @@ printf '  backend token   : %s\n' "$BACKEND_TOKEN_PATH"
 printf '\n'
 
 # --- the launcher (Rust binary; machine defaults go in defaults.conf) ------
-# Prefer: prebuilt in tree → cargo build → pre-downloaded VAULTED_AGENT_BIN.
+# Prefer: VAULTED_AGENT_BIN → release binary in tree → cargo build --release.
+# Debug binaries are never installed unless --allow-debug-binary (stale debug
+# builds from another branch must not land in /usr/local/bin).
 resolve_rust_binary() {
   local cand
   for cand in \
     "${VAULTED_AGENT_BIN:-}" \
-    "$REPO/target/release/vaulted-agent" \
-    "$REPO/target/debug/vaulted-agent"
+    "$REPO/target/release/vaulted-agent"
   do
     [[ -n "$cand" && -x "$cand" ]] || continue
     printf '%s\n' "$cand"
     return 0
   done
+  if (( ALLOW_DEBUG_BINARY )) && [[ -x "$REPO/target/debug/vaulted-agent" ]]; then
+    printf 'warning: installing target/debug/vaulted-agent (--allow-debug-binary)\n' >&2
+    printf '%s\n' "$REPO/target/debug/vaulted-agent"
+    return 0
+  fi
   if command -v cargo >/dev/null 2>&1; then
-    printf 'building vaulted-agent (cargo --release)…\n' >&2
-    (cd "$REPO" && cargo build --release) >&2 \
-      || die "cargo build --release failed"
+    printf 'building vaulted-agent (cargo --release --locked)…\n' >&2
+    # Drop privileges for the build when we are root (Cargo build scripts are
+    # arbitrary code; the Bash runtime never needed root for this step).
+    local build_user="${SUDO_USER:-}"
+    if [[ "$(id -u)" -eq 0 && -n "$build_user" && "$build_user" != "root" ]]; then
+      (cd "$REPO" && sudo -u "$build_user" cargo build --release --locked) >&2 \
+        || die "cargo build --release --locked failed"
+    else
+      (cd "$REPO" && cargo build --release --locked) >&2 \
+        || die "cargo build --release --locked failed"
+    fi
     [[ -x "$REPO/target/release/vaulted-agent" ]] \
       || die "cargo build succeeded but binary missing"
     printf '%s\n' "$REPO/target/release/vaulted-agent"
     return 0
   fi
   die "no vaulted-agent binary found and cargo not on PATH.
-  Build on a machine with Rust: cargo build --release
+  Build on a machine with Rust: cargo build --release --locked
   Or set VAULTED_AGENT_BIN=/path/to/vaulted-agent
   Or use install-remote.sh which downloads a release asset."
 }

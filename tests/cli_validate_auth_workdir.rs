@@ -14,6 +14,33 @@ fn write_plain_harness(seam: &CliSeam, name: &str, body: &str) {
 }
 
 #[test]
+fn secrets_validate_fails_closed_on_unknown_backend() {
+    let seam = CliSeam::new();
+    // Harness load fails closed when backend is misspelled (typed Backend enum).
+    fs::write(
+        seam.config_dir.join("manifests/bad.refs"),
+        "OPENAI_API_KEY=REPLACE_WITH_BITWARDEN_SECRET_UUID\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("harnesses.d/typo.conf"),
+        "backend = bitwarde\nmanifest = bad.refs\ncommand = true\n",
+    )
+    .unwrap();
+    let out = seam
+        .vaulted_agent()
+        .args(["secrets", "validate"])
+        .output()
+        .expect("run");
+    assert!(
+        !out.status.success(),
+        "unknown backend must not report ok: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn secrets_validate_rejects_placeholder_refs() {
     let seam = CliSeam::new();
     fs::write(
@@ -108,7 +135,10 @@ fn auth_mode_set_file_writes_defaults() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = fs::read_to_string(seam.config_dir.join("defaults.conf")).unwrap();
-    assert!(text.contains("auth_mode = prompt") || text.contains("auth_mode=prompt"), "{text}");
+    assert!(
+        text.contains("auth_mode = prompt") || text.contains("auth_mode=prompt"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -147,9 +177,10 @@ fn workdir_caller_uses_invocation_cwd() {
     );
     let cwd = fs::read_to_string(&record).unwrap();
     let cwd = cwd.trim();
+    // macOS tempdirs are under /var → /private/var; compare canonical paths.
     assert_eq!(
-        std::path::Path::new(cwd),
-        nested.as_path(),
+        fs::canonicalize(cwd).unwrap(),
+        fs::canonicalize(&nested).unwrap(),
         "expected workdir=caller → nested, got {cwd}"
     );
 }
@@ -188,5 +219,8 @@ fn workdir_absolute_overrides_caller() {
         String::from_utf8_lossy(&out.stderr)
     );
     let cwd = fs::read_to_string(&record).unwrap();
-    assert_eq!(cwd.trim(), fixed.to_string_lossy().as_ref());
+    assert_eq!(
+        fs::canonicalize(cwd.trim()).unwrap(),
+        fs::canonicalize(&fixed).unwrap()
+    );
 }

@@ -24,7 +24,10 @@ fn setup_onepassword_writes_op_env_file_mode() {
     let path = seam.config_dir.join("op.env");
     assert!(path.is_file(), "op.env missing");
     let text = fs::read_to_string(&path).unwrap();
-    assert!(text.contains("OP_SERVICE_ACCOUNT_TOKEN=ops-sa-test-token"), "{text}");
+    assert!(
+        text.contains("OP_SERVICE_ACCOUNT_TOKEN=ops-sa-test-token"),
+        "{text}"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

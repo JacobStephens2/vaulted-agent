@@ -5,10 +5,10 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::parse_dotenv_keys;
+use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
 use crate::secret::{ManagerToken, SecretValue};
-use crate::validate::{is_placeholder_ref, is_uuid, validate_manifest_file};
+use crate::validate::{is_placeholder_secret_value, is_uuid, validate_manifest_file};
 
 fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
     let mut cmd = Command::new(program);
@@ -30,12 +30,12 @@ fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Str
 }
 
 pub fn resolve_plainfile(manifest: &Path) -> Result<HashMap<String, SecretValue>> {
-    let _ = validate_manifest_file(manifest, "plainfile")?;
+    let _ = validate_manifest_file(manifest, Backend::Plainfile)?;
     let text = fs::read_to_string(manifest).map_err(|e| Error::Io {
         path: manifest.to_path_buf(),
         source: e,
     })?;
-    let raw = parse_dotenv_keys(&text);
+    let raw = parse_dotenv_keys(&text)?;
     Ok(raw
         .into_iter()
         .map(|(k, v)| (k, SecretValue::new(v)))
@@ -149,12 +149,12 @@ fn bws_get_value(token: &ManagerToken, id: &str) -> Result<String> {
     parse_bws_get_value_json(&stdout)
 }
 
-/// Resolve a bitwarden ref to secret id (public for secrets get).
+/// Resolve a bitwarden ref to secret id (for secrets get).
 pub fn bws_resolve_ref(token: &ManagerToken, r: &str) -> Result<String> {
     bws_resolve_ref_to_id(token, r)
 }
 
-/// Fetch secret value by id (public for secrets get).
+/// Fetch secret value by id (for secrets get).
 pub fn bws_secret_value(token: &ManagerToken, id: &str) -> Result<String> {
     bws_get_value(token, id)
 }
@@ -163,7 +163,7 @@ pub fn resolve_bitwarden(
     manifest: &Path,
     token: &ManagerToken,
 ) -> Result<HashMap<String, SecretValue>> {
-    let pairs: Vec<(String, String)> = validate_manifest_file(manifest, "bitwarden")?;
+    let pairs: Vec<(String, String)> = validate_manifest_file(manifest, Backend::Bitwarden)?;
     let mut out = HashMap::new();
     for (var, r) in pairs {
         let id = bws_resolve_ref_to_id(token, &r)?;
@@ -177,13 +177,13 @@ pub fn resolve_onepassword(
     manifest: &Path,
     token: &ManagerToken,
 ) -> Result<HashMap<String, SecretValue>> {
-    let _ = validate_manifest_file(manifest, "onepassword")?;
+    let _ = validate_manifest_file(manifest, Backend::OnePassword)?;
     let stdout = run_capture(
         "op",
         &["inject", "-i", &manifest.to_string_lossy()],
         &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())],
     )?;
-    let raw = parse_dotenv_keys(&stdout);
+    let raw = parse_dotenv_keys(&stdout)?;
     Ok(raw
         .into_iter()
         .map(|(k, v)| (k, SecretValue::new(v)))
@@ -191,24 +191,23 @@ pub fn resolve_onepassword(
 }
 
 pub fn resolve_pass(manifest: &Path) -> Result<HashMap<String, SecretValue>> {
-    let pairs: Vec<(String, String)> = validate_manifest_file(manifest, "pass")?;
+    let pairs: Vec<(String, String)> = validate_manifest_file(manifest, Backend::Pass)?;
     let mut out = HashMap::new();
     for (var, r) in pairs {
         let stdout = run_capture("pass", &["show", &r], &[])?;
-        let value = stdout.lines().next().unwrap_or("").to_string();
+        // Full multi-line password store entry (first line is conventionally the secret).
+        // Keep the whole body so multi-line notes are not truncated into false env vars.
+        let value = stdout.trim_end_matches('\n').to_string();
         out.insert(var, SecretValue::new(value));
     }
     Ok(out)
 }
 
-fn validate_decrypted_dotenv(text: &str, backend: &str) -> Result<()> {
-    // Fail closed: placeholder-like values must not inject.
-    for (var, val) in parse_dotenv_keys(text) {
-        if is_placeholder_ref(&val)
-            || val.contains("REPLACE")
-            || val.contains("CHANGE_ME")
-            || val.contains("00000000-0000-0000-0000-000000000000")
-        {
+fn validate_decrypted_dotenv(text: &str, backend: Backend) -> Result<()> {
+    // Fail closed on clear misconfiguration only — not on legitimate secret values
+    // that happen to contain substrings like "REPLACE".
+    for (var, val) in parse_dotenv_keys(text)? {
+        if is_placeholder_secret_value(&val) {
             return Err(Error::Message(format!(
                 "{backend}: {var} looks like a placeholder value"
             )));
@@ -229,8 +228,8 @@ pub fn resolve_sops(manifest: &Path, age_key: &Path) -> Result<HashMap<String, S
         &["--decrypt", &manifest.to_string_lossy()],
         &[("SOPS_AGE_KEY_FILE", &age_key.to_string_lossy())],
     )?;
-    validate_decrypted_dotenv(&stdout, "sops")?;
-    let raw = parse_dotenv_keys(&stdout);
+    validate_decrypted_dotenv(&stdout, Backend::Sops)?;
+    let raw = parse_dotenv_keys(&stdout)?;
     if raw.is_empty() && !stdout.trim().is_empty() {
         // Still allow empty after comments-only; if ciphertext decrypt produced
         // unparseable lines, surface that as fail-closed when no keys.
@@ -251,25 +250,24 @@ pub fn resolve_sops(manifest: &Path, age_key: &Path) -> Result<HashMap<String, S
 }
 
 pub fn resolve(
-    backend: &str,
+    backend: Backend,
     manifest: &Path,
-    paths: &crate::config::Paths,
+    paths: &Paths,
     token: Option<&ManagerToken>,
 ) -> Result<HashMap<String, SecretValue>> {
     match backend {
-        "plainfile" => resolve_plainfile(manifest),
-        "bitwarden" => {
+        Backend::Plainfile => resolve_plainfile(manifest),
+        Backend::Bitwarden => {
             let t = token.ok_or_else(|| Error::Message("bitwarden needs manager token".into()))?;
             resolve_bitwarden(manifest, t)
         }
-        "onepassword" => {
+        Backend::OnePassword => {
             let t =
                 token.ok_or_else(|| Error::Message("onepassword needs manager token".into()))?;
             resolve_onepassword(manifest, t)
         }
-        "pass" => resolve_pass(manifest),
-        "sops" => resolve_sops(manifest, &paths.age_key_file),
-        other => Err(Error::Message(format!("unknown backend '{other}'"))),
+        Backend::Pass => resolve_pass(manifest),
+        Backend::Sops => resolve_sops(manifest, &paths.age_key_file),
     }
 }
 
@@ -293,10 +291,7 @@ mod tests {
     #[test]
     fn parse_name_ref() {
         let j = r#"[{"id":"id1","key":"openai-api-key","project":{"name":"tools"}}]"#;
-        assert_eq!(
-            parse_bws_ref(j, "name:openai-api-key").unwrap(),
-            "id1"
-        );
+        assert_eq!(parse_bws_ref(j, "name:openai-api-key").unwrap(), "id1");
     }
 
     #[test]
@@ -309,6 +304,11 @@ mod tests {
 
     #[test]
     fn sops_placeholder_fails() {
-        assert!(validate_decrypted_dotenv("X=REPLACE_WITH_SECRET\n", "sops").is_err());
+        assert!(validate_decrypted_dotenv("X=REPLACE_WITH_SECRET\n", Backend::Sops).is_err());
+    }
+
+    #[test]
+    fn sops_value_with_replace_substring_ok() {
+        assert!(validate_decrypted_dotenv("X=please-REPLACE-now\n", Backend::Sops).is_ok());
     }
 }

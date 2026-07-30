@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use crate::auth::{self, TokenKind};
 use crate::backend;
-use crate::config::{AuthMode, Harness, Paths, load_auth_mode};
+use crate::config::{load_auth_mode, load_default_backend, AuthMode, Backend, Harness, Paths};
 use crate::env_scrub::{build_child_env, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
 use crate::resume;
@@ -40,10 +40,6 @@ fn resolve_workdir(harness: &Harness, caller_cwd: &Path) -> Result<PathBuf> {
     }
 }
 
-fn default_backend(paths: &Paths) -> String {
-    crate::config::load_default_backend(paths)
-}
-
 fn handoff_mode_spawn() -> bool {
     matches!(
         env::var("VAULTED_AGENT_HANDOFF").as_deref(),
@@ -51,22 +47,22 @@ fn handoff_mode_spawn() -> bool {
     )
 }
 
-fn force_prompt_from_env() -> bool {
+pub fn force_prompt_from_env() -> bool {
     env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
+pub fn auth_mode_from_env_or_config(paths: &Paths) -> AuthMode {
+    match env::var("VAULTED_AGENT_AUTH_MODE").as_deref() {
+        Ok("prompt") => AuthMode::Prompt,
+        Ok("file") => AuthMode::File,
+        _ => load_auth_mode(paths),
+    }
+}
+
+#[derive(Default)]
 pub struct LaunchOpts {
     pub force_prompt: bool,
     pub extra_args: Vec<String>,
-}
-
-impl Default for LaunchOpts {
-    fn default() -> Self {
-        Self {
-            force_prompt: false,
-            extra_args: Vec::new(),
-        }
-    }
 }
 
 pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Result<()> {
@@ -80,36 +76,28 @@ pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Re
 
     let backend_name = harness
         .backend
-        .clone()
-        .unwrap_or_else(|| default_backend(paths));
+        .unwrap_or_else(|| load_default_backend(paths));
 
-    let mode = match env::var("VAULTED_AGENT_AUTH_MODE").as_deref() {
-        Ok("prompt") => AuthMode::Prompt,
-        Ok("file") => AuthMode::File,
-        _ => load_auth_mode(paths),
-    };
+    let mode = auth_mode_from_env_or_config(paths);
     let force = opts.force_prompt || force_prompt_from_env();
 
-    let token = match backend_name.as_str() {
-        "bitwarden" => Some(auth::load_manager_token(
+    let token = match backend_name {
+        Backend::Bitwarden => Some(auth::load_manager_token(
             paths,
             mode,
             TokenKind::Bws,
             force,
         )?),
-        "onepassword" => Some(auth::load_manager_token(
-            paths,
-            mode,
-            TokenKind::Op,
-            force,
-        )?),
-        _ => None,
+        Backend::OnePassword => Some(auth::load_manager_token(paths, mode, TokenKind::Op, force)?),
+        Backend::Pass | Backend::Sops | Backend::Plainfile => None,
     };
 
     let secrets: HashMap<String, SecretValue> =
-        backend::resolve(&backend_name, &manifest, paths, token.as_ref())?;
+        backend::resolve(backend_name, &manifest, paths, token.as_ref())?;
 
-    // Drop token from process env after resolve (best-effort)
+    // Token is dropped from the launcher process env so it is not ambient.
+    // Residual plaintext in this process's heap is out of scope for the threat
+    // model (explicit child env is the boundary that matters).
     drop(token);
     for &name in MANAGER_TOKEN_VARS {
         env::remove_var(name);
@@ -118,10 +106,8 @@ pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Re
     let caller_cwd = env::current_dir().map_err(|e| Error::Message(format!("cwd: {e}")))?;
     let workdir = resolve_workdir(harness, &caller_cwd)?;
 
+    // build_child_env already strips manager tokens; no second sweep needed.
     let mut child_env = build_child_env(&harness.keep, &secrets);
-    for &name in MANAGER_TOKEN_VARS {
-        child_env.remove(std::ffi::OsStr::new(name));
-    }
 
     let mut cmdline = harness.command.clone();
     if let Some(bin) = &harness.bin_dir {
@@ -173,14 +159,14 @@ pub fn launch_harness(paths: &Paths, harness: &Harness, opts: &LaunchOpts) -> Re
 pub fn launch_run(
     paths: &Paths,
     manifest: &Path,
-    backend: &str,
+    backend: Backend,
     workdir: Option<&str>,
     command: &[String],
     force_prompt: bool,
 ) -> Result<()> {
     let h = Harness {
         name: "run".into(),
-        backend: Some(backend.into()),
+        backend: Some(backend),
         manifest: manifest.display().to_string(),
         bin_dir: None,
         workdir: workdir.map(|s| s.to_string()),
@@ -188,11 +174,6 @@ pub fn launch_run(
         keep: vec![],
         command: command.to_vec(),
     };
-    // For run, manifest may be absolute already
-    let mut h = h;
-    if manifest.is_absolute() {
-        h.manifest = manifest.display().to_string();
-    }
     launch_harness(
         paths,
         &h,

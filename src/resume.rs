@@ -144,12 +144,7 @@ mod tests {
 
     #[test]
     fn codex_flag_to_subcommand() {
-        let a = normalize_argv(
-            "codex",
-            &["--resume".into(), "abc".into()],
-            false,
-        )
-        .unwrap();
+        let a = normalize_argv("codex", &["--resume".into(), "abc".into()], false).unwrap();
         assert_eq!(a, vec!["resume", "abc"]);
     }
 
@@ -169,12 +164,7 @@ mod tests {
 
     #[test]
     fn labels_maps_session_arg() {
-        let a = normalize_argv(
-            "claude",
-            &["--resume".into(), "my-label".into()],
-            true,
-        )
-        .unwrap();
+        let a = normalize_argv("claude", &["--resume".into(), "my-label".into()], true).unwrap();
         assert_eq!(a[0], "--resume");
         assert!(is_uuid(&a[1]), "{a:?}");
         assert_ne!(a[1], "my-label");

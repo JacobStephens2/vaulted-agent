@@ -12,7 +12,8 @@ impl ManagerToken {
     }
 
     /// Access raw material only at the vault-CLI / inject boundary.
-    pub fn expose(&self) -> &str {
+    /// `pub(crate)`: CLI is the sole public acceptance seam (story #50).
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 }
@@ -38,7 +39,7 @@ impl SecretValue {
         Self(raw.into())
     }
 
-    pub fn expose(&self) -> &str {
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 }

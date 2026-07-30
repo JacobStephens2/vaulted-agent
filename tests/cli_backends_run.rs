@@ -8,10 +8,7 @@ use std::fs;
 #[test]
 fn bitwarden_launch_resolves_name_ref_via_fake_bws() {
     let seam = CliSeam::new();
-    let map = seam.write_secrets_json(
-        "secrets.json",
-        r#"{"openai-api-key":"sk-live-from-bws"}"#,
-    );
+    let map = seam.write_secrets_json("secrets.json", r#"{"openai-api-key":"sk-live-from-bws"}"#);
     // Improved fake bws: list by key, get by id or key
     let script = format!(
         r#"#!/usr/bin/env bash
@@ -57,7 +54,11 @@ esac
         "backend = bitwarden\nmanifest = openai.env.refs\ncommand = agent\n",
     )
     .unwrap();
-    fs::write(seam.config_dir.join("bws.env"), "BWS_ACCESS_TOKEN=test-token\n").unwrap();
+    fs::write(
+        seam.config_dir.join("bws.env"),
+        "BWS_ACCESS_TOKEN=test-token\n",
+    )
+    .unwrap();
 
     let out = seam
         .vaulted_agent()
@@ -73,8 +74,17 @@ esac
         String::from_utf8_lossy(&out.stdout)
     );
     let rec = seam.read_stub_record("agent");
-    assert!(rec.contains("ENV OPENAI_API_KEY"), "{rec}");
+    assert!(
+        rec.contains("ENV OPENAI_API_KEY=sk-live-from-bws"),
+        "secret value not injected: {rec}"
+    );
     assert!(!rec.contains("BWS_ACCESS_TOKEN"), "token leaked: {rec}");
+    // Story #36: nothing secret on argv
+    assert!(
+        !rec.lines()
+            .any(|l| l.starts_with("ARGV:") && l.contains("sk-live")),
+        "secret on argv: {rec}"
+    );
 }
 
 #[test]
@@ -106,7 +116,7 @@ fn va_run_injects_plainfile_into_command() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rec = seam.read_stub_record("agent");
-    assert!(rec.contains("ENV APP_DB_PASS"), "{rec}");
+    assert!(rec.contains("ENV APP_DB_PASS=from-run"), "{rec}");
 }
 
 #[test]
@@ -139,7 +149,7 @@ fn pass_backend_resolves_via_fake_pass() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rec = seam.read_stub_record("agent");
-    assert!(rec.contains("ENV APP_DB_PASS"), "{rec}");
+    assert!(rec.contains("ENV APP_DB_PASS=pass-secret-value"), "{rec}");
 }
 
 #[test]
@@ -173,7 +183,7 @@ fn sops_backend_resolves_via_fake_sops() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rec = seam.read_stub_record("agent");
-    assert!(rec.contains("ENV APP_DB_PASS"), "{rec}");
+    assert!(rec.contains("ENV APP_DB_PASS=sops-value"), "{rec}");
 }
 
 #[test]
@@ -212,5 +222,5 @@ fn op_backend_resolves_via_fake_op_inject() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rec = seam.read_stub_record("agent");
-    assert!(rec.contains("ENV APP_DB_PASS"), "{rec}");
+    assert!(rec.contains("ENV APP_DB_PASS=from-op"), "{rec}");
 }

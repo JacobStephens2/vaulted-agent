@@ -7,7 +7,10 @@ fn bin() -> Command {
 
 #[test]
 fn version_subcommand_prints_package_version_and_exits_zero() {
-    let out = bin().arg("version").output().expect("run vaulted-agent version");
+    let out = bin()
+        .arg("version")
+        .output()
+        .expect("run vaulted-agent version");
     assert!(
         out.status.success(),
         "stderr={}",

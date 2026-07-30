@@ -4,7 +4,6 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::validate::is_uuid;
 
 pub fn key_to_var(key: &str) -> String {
     let mut s: String = key
@@ -17,11 +16,8 @@ pub fn key_to_var(key: &str) -> String {
             }
         })
         .collect();
-    if s.is_empty() || !s.chars().next().unwrap().is_ascii_alphabetic() && s.chars().next() != Some('_')
-    {
-        s = format!("SECRET_{s}");
-    }
-    if !s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+    let needs_prefix = !matches!(s.chars().next(), Some(c) if c.is_ascii_alphabetic() || c == '_');
+    if needs_prefix {
         s = format!("SECRET_{s}");
     }
     s
@@ -39,7 +35,11 @@ pub fn line_for_secret(id: &str, key: &str) -> String {
     }
 }
 
-/// True if the refs file already maps this secret (id or name:KEY on a VAR= line).
+fn var_from_line(line: &str) -> Option<&str> {
+    line.split_once('=').map(|(k, _)| k.trim())
+}
+
+/// True if the refs file already maps this secret by reference (id / name:KEY / project:…/KEY).
 fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
     for raw in text.lines() {
         let line = raw.trim();
@@ -50,10 +50,8 @@ fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
             continue;
         };
         let r = v.trim();
-        if !id.is_empty() {
-            if r == id || r == format!("uuid:{id}") {
-                return true;
-            }
+        if !id.is_empty() && (r == id || r == format!("uuid:{id}")) {
+            return true;
         }
         if !key.is_empty() {
             if r == format!("name:{key}") {
@@ -70,35 +68,18 @@ fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn substring_uuid_in_comment_is_not_a_hit() {
-        let text = "# note about 00000000-0000-0000-0000-000000000001\nOPENAI=name:other\n";
-        assert!(!text_has_secret(
-            text,
-            "00000000-0000-0000-0000-000000000001",
-            "openai-api-key"
-        ));
+/// True if a VAR= line already exists (protects hand-edited custom mappings; story #14).
+fn text_has_var(text: &str, var: &str) -> bool {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
+            continue;
+        }
+        if var_from_line(line) == Some(var) {
+            return true;
+        }
     }
-
-    #[test]
-    fn name_ref_line_is_a_hit() {
-        let text = "OPENAI_API_KEY=name:openai-api-key\n";
-        assert!(text_has_secret(text, "id-x", "openai-api-key"));
-    }
-
-    #[test]
-    fn bare_uuid_value_is_a_hit() {
-        let text = "X=00000000-0000-0000-0000-000000000099\n";
-        assert!(text_has_secret(
-            text,
-            "00000000-0000-0000-0000-000000000099",
-            "anything"
-        ));
-    }
+    false
 }
 
 pub fn write_refs_replace(
@@ -113,13 +94,19 @@ pub fn write_refs_replace(
          # Update: vaulted-agent refresh\n\
          # Values fetched live at launch.\n\n"
     );
+    let mut seen_vars = std::collections::HashSet::new();
     for (i, (id, key, _)) in secrets.iter().enumerate() {
         if let Some(sel) = indices {
             if !sel.contains(&i) {
                 continue;
             }
         }
-        body.push_str(&line_for_secret(id, key));
+        let line = line_for_secret(id, key);
+        let var = var_from_line(line.trim()).unwrap_or("SECRET");
+        if !seen_vars.insert(var.to_string()) {
+            continue;
+        }
+        body.push_str(&line);
     }
     fs::write(path, body).map_err(|e| Error::Io {
         path: path.to_path_buf(),
@@ -156,6 +143,9 @@ pub fn write_refs_merge(
     };
     let mut new_lines = String::new();
     let mut added = 0usize;
+    // Track VARs newly claimed this pass (existing checked via text_has_var).
+    let mut claimed = std::collections::HashSet::new();
+
     for (i, (id, key, _)) in secrets.iter().enumerate() {
         if let Some(sel) = indices {
             if !sel.contains(&i) {
@@ -165,7 +155,13 @@ pub fn write_refs_merge(
         if text_has_secret(&existing, id, key) {
             continue;
         }
-        new_lines.push_str(&line_for_secret(id, key));
+        let line = line_for_secret(id, key);
+        let var = var_from_line(line.trim()).unwrap_or("SECRET").to_string();
+        // Story #14: never append a second mapping under a VAR the operator already pinned.
+        if text_has_var(&existing, &var) || !claimed.insert(var) {
+            continue;
+        }
+        new_lines.push_str(&line);
         added += 1;
     }
     if added == 0 {
@@ -206,7 +202,43 @@ pub fn parse_index_list(s: &str, n: usize) -> Result<Vec<usize>> {
     Ok(out)
 }
 
-#[allow(dead_code)]
-pub fn is_uuid_pub(s: &str) -> bool {
-    is_uuid(s)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substring_uuid_in_comment_is_not_a_hit() {
+        let text = "# note about 00000000-0000-0000-0000-000000000001\nOPENAI=name:other\n";
+        assert!(!text_has_secret(
+            text,
+            "00000000-0000-0000-0000-000000000001",
+            "openai-api-key"
+        ));
+    }
+
+    #[test]
+    fn name_ref_line_is_a_hit() {
+        let text = "OPENAI_API_KEY=name:openai-api-key\n";
+        assert!(text_has_secret(text, "id-x", "openai-api-key"));
+    }
+
+    #[test]
+    fn bare_uuid_value_is_a_hit() {
+        let text = "X=00000000-0000-0000-0000-000000000099\n";
+        assert!(text_has_secret(
+            text,
+            "00000000-0000-0000-0000-000000000099",
+            "anything"
+        ));
+    }
+
+    #[test]
+    fn merge_skips_when_var_already_mapped_to_different_ref() {
+        let existing = "OPENAI_API_KEY=uuid:00000000-0000-0000-0000-000000000009\n";
+        // Would produce OPENAI_API_KEY=name:openai.api.key — must not append.
+        let line = line_for_secret("other-id", "openai.api.key");
+        let var = var_from_line(line.trim()).unwrap();
+        assert!(text_has_var(existing, var));
+        assert!(!text_has_secret(existing, "other-id", "openai.api.key"));
+    }
 }

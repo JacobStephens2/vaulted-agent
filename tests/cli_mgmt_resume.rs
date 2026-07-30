@@ -22,7 +22,10 @@ fn doctor_reports_ready_for_plainfile_harness() {
         String::from_utf8_lossy(&out.stdout)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Ready") || stdout.contains("0 error"), "{stdout}");
+    assert!(
+        stdout.contains("Ready") || stdout.contains("0 error"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -77,9 +80,16 @@ esac
         String::from_utf8_lossy(&out.stderr)
     );
     let refs = fs::read_to_string(seam.config_dir.join("manifests/openai.env.refs")).unwrap();
-    assert!(refs.contains("name:openai-api-key") || refs.contains("OPENAI"), "{refs}");
-    assert!(refs.contains("name:gh-token") || refs.contains("GH"), "{refs}");
-    assert!(!refs.contains("v\n") && !refs.contains("=g\n"), "values leaked: {refs}");
+    assert!(refs.contains("name:openai-api-key"), "{refs}");
+    assert!(refs.contains("name:gh-token"), "{refs}");
+    // Literal secret values from the fake vault must never land in the refs file.
+    assert!(
+        !refs.contains("=v")
+            && !refs.contains("=g")
+            && !refs.contains("\"v\"")
+            && !refs.contains("\"g\""),
+        "values leaked: {refs}"
+    );
 }
 
 #[test]
@@ -162,13 +172,34 @@ fn labels_maps_non_uuid_session_to_uuidv5() {
     );
     let rec = seam.read_stub_record("claude");
     // Expect a UUID shape in argv, not the raw label
-    assert!(!rec.contains(" my-label") && !rec.contains("'my-label'"), "label not mapped: {rec}");
-    // UUID pattern roughly
     assert!(
-        rec.contains("--resume")
-            && rec.chars().filter(|c| *c == '-').count() >= 4,
-        "{rec}"
+        !rec.contains(" my-label") && !rec.contains("'my-label'"),
+        "label not mapped: {rec}"
     );
+    assert!(rec.contains("--resume"), "{rec}");
+    // Extract argv tokens after ARGV: and require a canonical UUID after --resume.
+    let argv = rec.lines().find(|l| l.starts_with("ARGV:")).unwrap_or("");
+    let uuid_re = regex_lite_uuid(argv);
+    assert!(uuid_re, "expected UUIDv5 session id in argv, got: {argv}");
+}
+
+/// True if `s` contains a standard 8-4-4-4-12 hex UUID token.
+fn regex_lite_uuid(s: &str) -> bool {
+    // Walk for a token matching the UUID shape without pulling in the regex crate.
+    for part in s.split(|c: char| c.is_whitespace() || c == '\'' || c == '"') {
+        let b = part.as_bytes();
+        if b.len() != 36 {
+            continue;
+        }
+        let ok = (0..36).all(|i| match i {
+            8 | 13 | 18 | 23 => b[i] == b'-',
+            _ => b[i].is_ascii_hexdigit(),
+        });
+        if ok {
+            return true;
+        }
+    }
+    false
 }
 
 #[test]
@@ -186,25 +217,16 @@ fn uninstall_dry_run_exits_zero() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("dry-run") || stdout.contains("uninstall"), "{stdout}");
+    assert!(
+        stdout.contains("dry-run") || stdout.contains("uninstall"),
+        "{stdout}"
+    );
 }
 
 #[test]
 fn secrets_list_uses_fake_bws() {
     let seam = CliSeam::new();
     let map = seam.write_secrets_json("secrets.json", r#"{"k1":"v1"}"#);
-    let script = format!(
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-map='{map}'
-python3 -c "
-import json
-m=json.load(open('$map'))
-print(json.dumps([{{'id': '00000000-0000-0000-0000-000000000001', 'key': k, 'project': {{'name': 'p'}}}} for k in m]))
-"
-"#,
-        map = map.display()
-    );
     // bws secret list
     seam.write_executable(
         "bws",
@@ -226,7 +248,6 @@ esac
             map = map.display()
         ),
     );
-    let _ = script;
     fs::write(seam.config_dir.join("bws.env"), "BWS_ACCESS_TOKEN=t\n").unwrap();
     let out = seam
         .vaulted_agent()

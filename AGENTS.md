@@ -8,4 +8,4 @@ GitHub Issues via `gh` (repo: JacobStephens2/vaulted-agent-launcher). See `docs/
 
 ### Domain docs
 
-Single-context layout: root `CONTEXT.md` (when present) + `docs/adr/`. See `docs/agents/domain.md`.
+Agent-facing notes live under `docs/agents/`. There is no root `CONTEXT.md` or `docs/adr/` in this tree yet; prefer issue #1 (user stories) and `MIGRATION.md` for runtime contract.

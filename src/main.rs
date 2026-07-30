@@ -8,6 +8,7 @@ use std::process;
 
 use vaulted_agent::commands;
 use vaulted_agent::config::Paths;
+use vaulted_agent::Error;
 
 fn main() {
     // Preserve caller cwd for workdir=caller across sudo re-exec.
@@ -32,20 +33,44 @@ fn main() {
     let is_primary = matches!(invoked, "vaulted-agent" | "va");
     if !is_primary {
         if let Some(harness) = invoked.strip_suffix(link_suffix) {
-            // Conductor path: re-exec as service user if configured, then launch
-            let mut orig: Vec<String> = vec![harness.to_string()];
-            orig.extend(argv.iter().skip(1).cloned());
+            // Honouring -H under a conductor symlink would let a caller entitled
+            // to a narrow harness borrow a wider harness's manifest (bash guard).
+            for a in argv.iter().skip(1) {
+                if a == "-H" || a == "--harness" || a.starts_with("--harness=") {
+                    eprintln!(
+                        "vaulted-agent: -H/--harness is not allowed when invoked as '{invoked}' (harness is fixed by the symlink)"
+                    );
+                    process::exit(1);
+                }
+            }
+            // Replay original argv exactly for sudoers (story #41).
+            let orig: Vec<String> = argv.iter().skip(1).cloned().collect();
             if let Err(e) = commands::maybe_reexec_service_user(&paths, argv0, &orig) {
                 eprintln!("vaulted-agent: {e}");
                 process::exit(1);
             }
             let mut force = false;
             let mut extra = Vec::new();
-            for a in argv.iter().skip(1) {
-                if a == "-p" || a == "--prompt-auth" {
-                    force = true;
-                } else {
-                    extra.push(a.clone());
+            // Launcher flags only before the first non-flag token.
+            let mut args = argv.iter().skip(1).peekable();
+            while let Some(a) = args.next() {
+                match a.as_str() {
+                    "-p" | "--prompt-auth" => force = true,
+                    "--" => {
+                        extra.extend(args.cloned());
+                        break;
+                    }
+                    s if s.starts_with('-') => {
+                        // Unknown launcher flag under conductor: forward to agent.
+                        extra.push(a.clone());
+                        extra.extend(args.cloned());
+                        break;
+                    }
+                    _ => {
+                        extra.push(a.clone());
+                        extra.extend(args.cloned());
+                        break;
+                    }
                 }
             }
             if let Err(e) = commands::cmd_launch_harness(&paths, harness, &extra, force) {
@@ -60,7 +85,7 @@ fn main() {
         process::exit(1);
     }
 
-    // Global version / help before flag parse (flags start with -)
+    // Global version / help only in the command position (argv[1]).
     if matches!(
         argv.get(1).map(|s| s.as_str()),
         Some("version") | Some("--version") | Some("-V")
@@ -77,7 +102,9 @@ fn main() {
         process::exit(0);
     }
 
-    // Pull launcher flags; rest are command/harness args
+    // Pull launcher flags only until the first non-flag token (harness or
+    // management command). Flags after that belong to the agent (e.g.
+    // `va claude --version`, `va claude -p "explain this"`).
     let mut force_prompt = false;
     if env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(std::ffi::OsStr::new("1")) {
         force_prompt = true;
@@ -88,19 +115,11 @@ fn main() {
     while let Some(a) = args.next() {
         match a.as_str() {
             "-p" | "--prompt-auth" => force_prompt = true,
-            "-V" | "--version" => {
-                commands::cmd_version();
-                return;
-            }
             "-H" | "--harness" => {
-                harness_flag = Some(
-                    args.next()
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            eprintln!("vaulted-agent: -H requires a value");
-                            process::exit(1);
-                        }),
-                );
+                harness_flag = Some(args.next().cloned().unwrap_or_else(|| {
+                    eprintln!("vaulted-agent: -H requires a value");
+                    process::exit(1);
+                }));
             }
             s if s.starts_with("--harness=") => {
                 harness_flag = Some(s["--harness=".len()..].to_string());
@@ -109,7 +128,23 @@ fn main() {
                 rest.extend(args.cloned());
                 break;
             }
-            _ => rest.push(a.clone()),
+            s if s.starts_with('-') => {
+                // Unknown leading flag: treat as start of positional/rest stream
+                // only if we already have a harness via -H; otherwise error.
+                if harness_flag.is_some() {
+                    rest.push(a.clone());
+                    rest.extend(args.cloned());
+                    break;
+                }
+                eprintln!("vaulted-agent: unknown option '{s}'");
+                process::exit(1);
+            }
+            _ => {
+                // First non-flag: harness/command name; everything after is agent argv.
+                rest.push(a.clone());
+                rest.extend(args.cloned());
+                break;
+            }
         }
     }
 
@@ -119,16 +154,13 @@ fn main() {
         None
     };
 
-    if positional.is_some() && harness_flag.is_some() {
-        eprintln!(
-            "vaulted-agent: harness given twice: '{}' and -H '{}'",
-            positional.as_ref().unwrap(),
-            harness_flag.as_ref().unwrap()
-        );
-        process::exit(1);
-    }
-
-    let mut harness = positional.or(harness_flag);
+    let mut harness = match (positional, harness_flag) {
+        (Some(a), Some(b)) => {
+            eprintln!("vaulted-agent: harness given twice: '{a}' and -H '{b}'");
+            process::exit(1);
+        }
+        (a, b) => a.or(b),
+    };
 
     // No harness → usage
     let Some(name) = harness.take() else {
@@ -142,13 +174,9 @@ fn main() {
         process::exit(code);
     }
 
-    // pick may have been a real harness; if reserved pick was handled above.
-    // Launch harness (with service-user re-exec)
-    let mut orig = vec![name.clone()];
-    orig.extend(rest.iter().cloned());
-    if force_prompt {
-        orig.insert(1, "-p".into());
-    }
+    // Replay original argv exactly so a sudoers rule matches the command line
+    // as typed (story #41). Do not rewrite into -H form or re-insert -p.
+    let orig: Vec<String> = argv.iter().skip(1).cloned().collect();
     if let Err(e) = commands::maybe_reexec_service_user(&paths, argv0, &orig) {
         eprintln!("vaulted-agent: {e}");
         process::exit(1);
@@ -156,8 +184,7 @@ fn main() {
 
     if let Err(e) = commands::cmd_launch_harness(&paths, &name, &rest, force_prompt) {
         eprintln!("vaulted-agent: {e}");
-        // Suggest harness list on unknown
-        if format!("{e}").contains("unknown harness") {
+        if matches!(e, Error::UnknownHarness { .. }) {
             commands::usage(&paths);
         }
         process::exit(1);
@@ -185,9 +212,7 @@ fn dispatch_mgmt(paths: &Paths, name: &str, rest: &[String], force_prompt: bool)
             Ok(chosen) => commands::cmd_launch_harness(paths, &chosen, rest, force_prompt),
             Err(e) => Err(e),
         },
-        other => Err(vaulted_agent::Error::Message(format!(
-            "unknown command '{other}'"
-        ))),
+        other => Err(Error::Message(format!("unknown command '{other}'"))),
     };
     match result {
         Ok(()) => 0,

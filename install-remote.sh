@@ -100,21 +100,47 @@ cleanup() { rm -rf "$workdir"; }
 trap cleanup EXIT
 
 # Optional prebuilt binary (Rust runtime). Falls back to source-only install
-# which builds with cargo if needed.
+# which builds with cargo if needed. Verify .tar.gz.sha256 when present.
 ASSET_NAME="$(detect_asset || true)"
 if [[ -n "$ASSET_NAME" ]]; then
   asset_url="$GITHUB/$REPO/releases/download/${VERSION}/${ASSET_NAME}.tar.gz"
+  sum_url="${asset_url}.sha256"
   printf 'trying release binary: %s\n' "$asset_url"
-  if curl -fsSL -o "$workdir/bin.tgz" "$asset_url" 2>/dev/null; then
-    tar -xzf "$workdir/bin.tgz" -C "$workdir"
-    if [[ -f "$workdir/$ASSET_NAME" ]]; then
-      chmod +x "$workdir/$ASSET_NAME"
-      export VAULTED_AGENT_BIN="$workdir/$ASSET_NAME"
-      printf '  using prebuilt binary %s\n' "$VAULTED_AGENT_BIN"
-    fi
-  else
-    printf '  (no binary asset; will build from source if cargo is available)\n'
-  fi
+  # Distinguish "no asset for this platform" (404) from rate-limit/403/network.
+  http_code="$(curl -sS -o "$workdir/bin.tgz" -w '%{http_code}' -L "$asset_url" || true)"
+  case "$http_code" in
+    200)
+      # Prefer verifying the published checksum when available.
+      if curl -fsSL -o "$workdir/bin.tgz.sha256" "$sum_url"; then
+        (
+          cd "$workdir"
+          if command -v shasum >/dev/null 2>&1; then
+            echo "$(awk '{print $1}' bin.tgz.sha256)  bin.tgz" | shasum -a 256 -c -
+          elif command -v sha256sum >/dev/null 2>&1; then
+            echo "$(awk '{print $1}' bin.tgz.sha256)  bin.tgz" | sha256sum -c -
+          else
+            die "need shasum or sha256sum to verify release checksum"
+          fi
+        ) || die "checksum verification failed for $ASSET_NAME"
+        printf '  checksum ok\n'
+      else
+        printf '  warning: no .sha256 asset; installing without checksum verification\n' >&2
+      fi
+      tar -xzf "$workdir/bin.tgz" -C "$workdir"
+      if [[ -f "$workdir/$ASSET_NAME" ]]; then
+        chmod +x "$workdir/$ASSET_NAME"
+        export VAULTED_AGENT_BIN="$workdir/$ASSET_NAME"
+        printf '  using prebuilt binary %s\n' "$VAULTED_AGENT_BIN"
+      fi
+      ;;
+    404)
+      printf '  (no binary asset for this platform; will build from source if cargo is available)\n'
+      ;;
+    *)
+      die "failed to download release binary (HTTP ${http_code:-?}): $asset_url
+  Check network/rate limits, or set VAULTED_AGENT_BIN to a local binary."
+      ;;
+  esac
 fi
 
 tarball="$workdir/src.tar.gz"

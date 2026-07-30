@@ -12,6 +12,6 @@ pub mod resume;
 pub mod secret;
 pub mod validate;
 
-pub use config::{AuthMode, Harness, Paths, load_auth_mode, list_harness_names};
+pub use config::{list_harness_names, load_auth_mode, AuthMode, Backend, Harness, Paths};
 pub use error::{Error, Result};
 pub use secret::{ManagerToken, SecretValue};

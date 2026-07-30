@@ -9,28 +9,29 @@ use std::process::Command;
 use crate::auth::{self, TokenKind};
 use crate::backend;
 use crate::config::{
-    AuthMode, Harness, Paths, load_auth_mode, list_harness_names, parse_dotenv_keys,
+    list_harness_names, load_auth_mode, load_default_backend, load_service_user, parse_dotenv_keys,
+    AuthMode, Backend, Harness, Paths,
 };
 use crate::error::{Error, Result};
-use crate::launch::{self, LaunchOpts};
+use crate::launch::{self, auth_mode_from_env_or_config, force_prompt_from_env, LaunchOpts};
 use crate::refs;
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
 
-pub fn default_backend(paths: &Paths) -> String {
-    crate::config::load_default_backend(paths)
+pub fn default_backend(paths: &Paths) -> Backend {
+    load_default_backend(paths)
 }
 
 fn force_prompt() -> bool {
-    env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(std::ffi::OsStr::new("1"))
+    force_prompt_from_env()
 }
 
 fn auth_mode(paths: &Paths) -> AuthMode {
-    match env::var("VAULTED_AGENT_AUTH_MODE").as_deref() {
-        Ok("prompt") => AuthMode::Prompt,
-        Ok("file") => AuthMode::File,
-        _ => load_auth_mode(paths),
-    }
+    auth_mode_from_env_or_config(paths)
+}
+
+fn service_user_for_token(paths: &Paths) -> Option<String> {
+    load_service_user(paths)
 }
 
 fn load_bws(paths: &Paths) -> Result<ManagerToken> {
@@ -135,13 +136,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                 if proj.is_empty() {
                     println!("  {:2}) {:36}  {}", i + 1, id, key);
                 } else {
-                    println!(
-                        "  {:2}) {:36}  {}  (project: {})",
-                        i + 1,
-                        id,
-                        key,
-                        proj
-                    );
+                    println!("  {:2}) {:36}  {}  (project: {})", i + 1, id, key, proj);
                 }
             }
             Ok(())
@@ -163,14 +158,16 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
             let be_default = default_backend(paths);
             for name in names {
                 let h = Harness::load(paths, &name)?;
-                let be = h.backend.as_deref().unwrap_or(&be_default);
+                let be = h.backend.unwrap_or(be_default);
                 let man = &h.manifest;
                 println!("{name}  (backend={be} manifest={man})");
                 let man_path = h.resolve_manifest_path(paths);
                 if man_path.is_file() {
                     if let Ok(text) = fs::read_to_string(&man_path) {
-                        for k in parse_dotenv_keys(&text).keys() {
-                            println!("  {k}");
+                        if let Ok(map) = parse_dotenv_keys(&text) {
+                            for k in map.keys() {
+                                println!("  {k}");
+                            }
                         }
                     }
                 } else {
@@ -188,10 +185,10 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                     let be_default = default_backend(paths);
                     for name in names {
                         let h = Harness::load(paths, &name)?;
-                        let be = h.backend.clone().unwrap_or_else(|| be_default.clone());
+                        let be = h.backend.unwrap_or(be_default);
                         let man_path = h.resolve_manifest_path(paths);
                         print!("{name}: ");
-                        match validate_manifest_file(&man_path, &be) {
+                        match validate_manifest_file(&man_path, be) {
                             Ok(_) => println!("ok"),
                             Err(e) => {
                                 println!("FAIL ({e})");
@@ -209,10 +206,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                     let conf = paths.harness_dir.join(format!("{man}.conf"));
                     let (man_path, be) = if conf.is_file() {
                         let h = Harness::load(paths, man)?;
-                        let be = h
-                            .backend
-                            .clone()
-                            .unwrap_or_else(|| default_backend(paths));
+                        let be = h.backend.unwrap_or_else(|| default_backend(paths));
                         (h.resolve_manifest_path(paths), be)
                     } else {
                         let p = Path::new(man);
@@ -221,13 +215,13 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         } else {
                             paths.manifest_dir.join(p)
                         };
-                        let be = args
-                            .get(2)
-                            .cloned()
-                            .unwrap_or_else(|| default_backend(paths));
+                        let be = match args.get(2) {
+                            Some(s) => s.parse()?,
+                            None => default_backend(paths),
+                        };
                         (man_path, be)
                     };
-                    validate_manifest_file(&man_path, &be)?;
+                    validate_manifest_file(&man_path, be)?;
                     println!("ok: {}", man_path.display());
                     Ok(())
                 }
@@ -247,7 +241,14 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     println!("auth_mode: {}", load_auth_mode(paths).as_str());
     println!("default_backend: {}", default_backend(paths));
 
-    let have = |bin: &str| Command::new("sh").args(["-c", &format!("command -v {bin}")]).status().map(|s| s.success()).unwrap_or(false);
+    // Redirect stdout so `command -v` path noise never pollutes the report.
+    let have = |bin: &str| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
     let have_bws = have("bws");
     let have_op = have("op");
     let have_sops = have("sops");
@@ -287,8 +288,9 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                 continue;
             }
         };
-        let be = h.backend.as_deref().unwrap_or(&be_default);
-        println!("  backend={be} manifest={} workdir={:?}", h.manifest, h.workdir);
+        let be = h.backend.unwrap_or(be_default);
+        let wd = h.workdir.as_deref().unwrap_or("(default)");
+        println!("  backend={be} manifest={} workdir={wd}", h.manifest);
         let man_path = h.resolve_manifest_path(paths);
         if !man_path.is_file() {
             println!("  ERROR: cannot read {}", man_path.display());
@@ -300,27 +302,27 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             println!("  manifest syntax ok ({})", man_path.display());
         }
         match be {
-            "bitwarden" if !have_bws => {
+            Backend::Bitwarden if !have_bws => {
                 println!("  ERROR: bws not on PATH");
                 issues += 1;
             }
-            "onepassword" if !have_op => {
+            Backend::OnePassword if !have_op => {
                 println!("  ERROR: op not on PATH");
                 issues += 1;
             }
-            "sops" if !have_sops => {
+            Backend::Sops if !have_sops => {
                 println!("  ERROR: sops not on PATH");
                 issues += 1;
             }
-            "pass" if !have_pass => {
+            Backend::Pass if !have_pass => {
                 println!("  ERROR: pass not on PATH");
                 issues += 1;
             }
-            "plainfile" | "bitwarden" | "onepassword" | "sops" | "pass" => {}
-            other => {
-                println!("  ERROR: unknown backend {other}");
-                issues += 1;
-            }
+            Backend::Plainfile
+            | Backend::Bitwarden
+            | Backend::OnePassword
+            | Backend::Sops
+            | Backend::Pass => {}
         }
         if matches!(name.as_str(), "claude" | "codex" | "grok" | "kimi")
             && h.workdir.as_deref() != Some("caller")
@@ -393,14 +395,20 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     let secrets = backend::bws_list_secrets(&token)?;
     drop(token);
     if secrets.is_empty() {
-        return Err(Error::Message("No secrets visible to this token yet.".into()));
+        return Err(Error::Message(
+            "No secrets visible to this token yet.".into(),
+        ));
     }
 
-    let man = man_path.unwrap_or_else(|| "openai.env.refs".into());
-    let path = if Path::new(&man).is_absolute() {
-        PathBuf::from(&man)
-    } else {
-        paths.manifest_dir.join(&man)
+    let path = match man_path {
+        Some(man) => {
+            if Path::new(&man).is_absolute() {
+                PathBuf::from(&man)
+            } else {
+                paths.manifest_dir.join(&man)
+            }
+        }
+        None => default_bitwarden_manifest(paths)?,
     };
 
     let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
@@ -436,12 +444,19 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
             println!("Wrote refs file (replace): {}", path.display());
         }
         _ => {
-            let added =
-                refs::write_refs_merge(&path, &secrets, indices.as_deref(), "vaulted-agent refresh")?;
+            let added = refs::write_refs_merge(
+                &path,
+                &secrets,
+                indices.as_deref(),
+                "vaulted-agent refresh",
+            )?;
             if added == 0 {
                 println!("No new mappings to add: {}", path.display());
             } else {
-                println!("Updated refs file (+{added} mapping(s)): {}", path.display());
+                println!(
+                    "Updated refs file (+{added} mapping(s)): {}",
+                    path.display()
+                );
             }
         }
     }
@@ -452,16 +467,59 @@ fn load_op(paths: &Paths) -> Result<ManagerToken> {
     auth::load_manager_token(paths, auth_mode(paths), TokenKind::Op, force_prompt())
 }
 
+/// Resolve the refs file for bare `refresh` / setup from harness config (story #13).
+fn default_bitwarden_manifest(paths: &Paths) -> Result<PathBuf> {
+    let be_default = default_backend(paths);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for name in list_harness_names(paths)? {
+        let h = Harness::load(paths, &name)?;
+        let be = h.backend.unwrap_or(be_default);
+        if be == Backend::Bitwarden {
+            candidates.push(h.resolve_manifest_path(paths));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => {
+            let fallback = paths.manifest_dir.join("openai.env.refs");
+            if fallback.is_file() {
+                Ok(fallback)
+            } else {
+                // No harness yet — create the conventional default.
+                Ok(fallback)
+            }
+        }
+        many => Err(Error::Message(format!(
+            "multiple bitwarden manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
+            many.iter()
+                .map(|p| p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
 fn setup_bitwarden(paths: &Paths) -> Result<()> {
     println!("\nBitwarden Secrets Manager");
     println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
     println!("  not your personal vault master password or login API key.\n");
     let token = load_bws(paths)?;
     if auth_mode(paths) == AuthMode::File {
-        if !paths.bws_env_file.is_file() {
-            auth::write_token_file(&paths.bws_env_file, "BWS_ACCESS_TOKEN", &token)?;
-            println!("wrote {}", paths.bws_env_file.display());
-        }
+        // Always write so token rotation works (parity with setup onepassword).
+        let svc = service_user_for_token(paths);
+        auth::write_token_file(
+            &paths.bws_env_file,
+            "BWS_ACCESS_TOKEN",
+            &token,
+            svc.as_deref(),
+        )?;
+        println!("wrote {}", paths.bws_env_file.display());
     } else {
         println!("auth_mode=prompt — token not written to disk.");
     }
@@ -474,7 +532,7 @@ fn setup_bitwarden(paths: &Paths) -> Result<()> {
         return Ok(());
     }
     println!("{} secret(s) visible.", secrets.len());
-    let man_path = paths.manifest_dir.join("openai.env.refs");
+    let man_path = default_bitwarden_manifest(paths)?;
     fs::create_dir_all(&paths.manifest_dir).ok();
     if man_path.is_file() {
         let added = refs::write_refs_merge(&man_path, &secrets, None, "vaulted-agent setup")?;
@@ -483,7 +541,9 @@ fn setup_bitwarden(paths: &Paths) -> Result<()> {
         refs::write_refs_replace(&man_path, &secrets, None, "vaulted-agent setup")?;
         println!("Wrote {}", man_path.display());
     }
-    println!("Point a harness at it with: manifest = openai.env.refs");
+    if let Some(name) = man_path.file_name().and_then(|s| s.to_str()) {
+        println!("Point a harness at it with: manifest = {name}");
+    }
     Ok(())
 }
 
@@ -492,10 +552,12 @@ fn setup_onepassword(paths: &Paths) -> Result<()> {
     println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
     let token = load_op(paths)?;
     if auth_mode(paths) == AuthMode::File {
+        let svc = service_user_for_token(paths);
         auth::write_token_file(
             &paths.op_env_file,
             "OP_SERVICE_ACCOUNT_TOKEN",
             &token,
+            svc.as_deref(),
         )?;
         println!("wrote {} (0640)", paths.op_env_file.display());
     } else {
@@ -529,7 +591,10 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
                 Ok(())
             }
             "sops" => {
-                println!("\nsops backend uses age identity at {}", paths.age_key_file.display());
+                println!(
+                    "\nsops backend uses age identity at {}",
+                    paths.age_key_file.display()
+                );
                 println!("Place the age key there (0640) and encrypt manifests with sops.");
                 Ok(())
             }
@@ -561,9 +626,9 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
         eprint!("backend [1-4]: ");
         let _ = io::stderr().flush();
         let mut line = String::new();
-        let mut tty = io::BufReader::new(fs::File::open("/dev/tty").map_err(|e| {
-            Error::Message(format!("tty: {e}"))
-        })?);
+        let mut tty = io::BufReader::new(
+            fs::File::open("/dev/tty").map_err(|e| Error::Message(format!("tty: {e}")))?,
+        );
         tty.read_line(&mut line)
             .map_err(|e| Error::Message(format!("tty read: {e}")))?;
         let choice = line.trim();
@@ -594,10 +659,33 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn user_home(user: &str) -> Option<PathBuf> {
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            &format!(
+                "getent passwd {user} 2>/dev/null | cut -d: -f6 || \
+                 dscl . -read /Users/{user} NFSHomeDirectory 2>/dev/null | awk '{{print $2}}'"
+            ),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if home.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(home))
+    }
+}
+
 pub fn cmd_uninstall(args: &[String]) -> Result<()> {
     let mut purge = false;
     let mut dry = false;
     let mut yes = false;
+    let mut link_users: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -606,24 +694,44 @@ pub fn cmd_uninstall(args: &[String]) -> Result<()> {
             "-y" | "--yes" => yes = true,
             "-h" | "--help" => {
                 println!(
-                    "usage: vaulted-agent uninstall [--purge] [--dry-run] [-y|--yes]\n\
-                     Removes the launcher and conductor symlinks.\n\
+                    "usage: vaulted-agent uninstall [--purge] [--dry-run] [-y|--yes] [--link-user USER]\n\
+                     Removes the launcher, conductor symlinks, sudoers rule, and optional user-local links.\n\
                      Keeps config unless --purge. Never removes op.env / bws.env credentials."
                 );
                 return Ok(());
             }
             "--link-user" => {
-                i += 1; // accepted for parity; ignored in pure binary uninstall
+                i += 1;
+                let u = args
+                    .get(i)
+                    .ok_or_else(|| {
+                        Error::Message("uninstall: --link-user needs a username".into())
+                    })?
+                    .clone();
+                link_users.push(u);
+            }
+            s if s.starts_with("--link-user=") => {
+                link_users.push(s["--link-user=".len()..].to_string());
             }
             other => {
-                return Err(Error::Message(format!("uninstall: unknown option '{other}'")));
+                return Err(Error::Message(format!(
+                    "uninstall: unknown option '{other}'"
+                )));
             }
         }
         i += 1;
     }
 
+    // Also consider SUDO_USER when present (install.sh parity).
+    if let Ok(u) = env::var("SUDO_USER") {
+        if !u.is_empty() && !link_users.iter().any(|x| x == &u) {
+            link_users.push(u);
+        }
+    }
+
     let prefix = env::var("VAULTED_AGENT_BIN_DIR").unwrap_or_else(|_| "/usr/local/bin".into());
-    let config = env::var("VAULTED_AGENT_CONFIG_DIR").unwrap_or_else(|_| "/etc/vaulted-agent".into());
+    let config =
+        env::var("VAULTED_AGENT_CONFIG_DIR").unwrap_or_else(|_| "/etc/vaulted-agent".into());
     let launcher = PathBuf::from(&prefix).join("vaulted-agent");
     let va = PathBuf::from(&prefix).join("va");
 
@@ -639,12 +747,28 @@ pub fn cmd_uninstall(args: &[String]) -> Result<()> {
         for ent in rd.flatten() {
             let p = ent.path();
             let name = ent.file_name().to_string_lossy().into_owned();
-            if name.ends_with("-conductor") {
-                if p.is_symlink() {
+            if name.ends_with("-conductor") && p.is_symlink() {
+                targets.push(p);
+            }
+        }
+    }
+
+    // User-local symlinks (~/.local/bin/vaulted-agent and va)
+    for u in &link_users {
+        if let Some(home) = user_home(u) {
+            for name in ["vaulted-agent", "va"] {
+                let p = home.join(".local/bin").join(name);
+                if p.exists() || p.is_symlink() {
                     targets.push(p);
                 }
             }
         }
+    }
+
+    // Sudoers rule left by install.sh (story #26) — dangling NOPASSWD is worse than gone.
+    let sudoers = PathBuf::from("/etc/sudoers.d/vaulted-agent");
+    if sudoers.exists() {
+        targets.push(sudoers);
     }
 
     println!("vaulted-agent uninstall");
@@ -726,13 +850,13 @@ pub fn cmd_run(paths: &Paths, args: &[String], force_prompt: bool) -> Result<()>
             }
             "--backend" => {
                 i += 1;
-                backend = args
+                let name = args
                     .get(i)
-                    .ok_or_else(|| Error::Message("run: --backend needs a name".into()))?
-                    .clone();
+                    .ok_or_else(|| Error::Message("run: --backend needs a name".into()))?;
+                backend = name.parse()?;
             }
             s if s.starts_with("--backend=") => {
-                backend = s["--backend=".len()..].to_string();
+                backend = s["--backend=".len()..].parse()?;
             }
             "--workdir" => {
                 i += 1;
@@ -771,7 +895,7 @@ pub fn cmd_run(paths: &Paths, args: &[String], force_prompt: bool) -> Result<()>
     launch::launch_run(
         paths,
         &man_path,
-        &backend,
+        backend,
         workdir.as_deref(),
         &cmd,
         force_prompt,
@@ -794,10 +918,7 @@ pub fn cmd_pick(paths: &Paths) -> Result<String> {
     eprintln!();
     for (i, n) in names.iter().enumerate() {
         let h = Harness::load(paths, n).ok();
-        let cmd = h
-            .as_ref()
-            .map(|h| h.command.join(" "))
-            .unwrap_or_default();
+        let cmd = h.as_ref().map(|h| h.command.join(" ")).unwrap_or_default();
         let man = h.map(|h| h.manifest).unwrap_or_default();
         eprintln!("  {:2}) {:16} {:38} {}", i + 1, n, cmd, man);
     }
@@ -895,9 +1016,10 @@ pub fn maybe_reexec_service_user(paths: &Paths, argv0: &str, orig_args: &[String
     };
 
     let mut cmd = Command::new("sudo");
-    cmd.arg("-u").arg(&service).arg("env").arg(format!(
-        "VAULTED_AGENT_CALLER_CWD={caller_cwd}"
-    ));
+    cmd.arg("-u")
+        .arg(&service)
+        .arg("env")
+        .arg(format!("VAULTED_AGENT_CALLER_CWD={caller_cwd}"));
     if let Ok(c) = env::var("VAULTED_AGENT_CONFIG_DIR") {
         cmd.arg(format!("VAULTED_AGENT_CONFIG_DIR={c}"));
     }

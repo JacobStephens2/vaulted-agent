@@ -66,7 +66,11 @@ fn narrow_manifest_omits_secrets_not_named() {
         .arg("grok")
         .output()
         .expect("launch");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let rec = seam.read_stub_record("agent");
     assert!(rec.contains("ENV APP_DB_PASS"), "{rec}");
     assert!(!rec.contains("GH_TOKEN"), "{rec}");
@@ -84,5 +88,8 @@ fn missing_manifest_fails_closed() {
         .expect("launch");
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("manifest") || err.contains("not found") || err.contains("No such"), "{err}");
+    assert!(
+        err.contains("manifest") || err.contains("not found") || err.contains("No such"),
+        "{err}"
+    );
 }

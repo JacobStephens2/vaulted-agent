@@ -46,7 +46,10 @@ fn stub_agent_records_env_and_argv_when_invoked() {
     let rec = seam.read_stub_record("stub-agent");
     assert!(rec.contains("ARGV:"), "{rec}");
     assert!(rec.contains("--hello"), "{rec}");
-    assert!(rec.contains("ENV PARENT_ONLY_SECRET") || rec.contains("PARENT_ONLY_SECRET"), "{rec}");
+    assert!(
+        rec.contains("ENV PARENT_ONLY_SECRET") || rec.contains("PARENT_ONLY_SECRET"),
+        "{rec}"
+    );
 }
 
 #[test]
@@ -58,7 +61,11 @@ fn fake_bws_secret_list_returns_json_array() {
         .args(["secret", "list"])
         .output()
         .expect("fake bws list");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("openai-api-key"), "{stdout}");
 }
