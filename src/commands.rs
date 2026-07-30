@@ -171,15 +171,10 @@ fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
     }
     let body = lines.join("\n") + "\n";
     if let Some(parent) = paths.defaults_file.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
+        fs::create_dir_all(parent).map_err(|e| Error::config_write(parent, e))?;
     }
-    fs::write(&paths.defaults_file, body).map_err(|e| Error::Io {
-        path: paths.defaults_file.clone(),
-        source: e,
-    })?;
+    fs::write(&paths.defaults_file, body)
+        .map_err(|e| Error::config_write(&paths.defaults_file, e))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -150,10 +150,7 @@ pub fn write_token_file(
     service_user: Option<&str>,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
+        fs::create_dir_all(parent).map_err(|e| Error::config_write(parent, e))?;
     }
     let body = format!("{}={}\n", key, token.expose());
 
@@ -167,27 +164,16 @@ pub fn write_token_file(
             .truncate(true)
             .mode(0o600)
             .open(path)
-            .map_err(|e| Error::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
-        f.write_all(body.as_bytes()).map_err(|e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+            .map_err(|e| Error::config_write(path, e))?;
+        f.write_all(body.as_bytes())
+            .map_err(|e| Error::config_write(path, e))?;
         f.sync_all().ok();
         drop(f);
         let mut perms = fs::metadata(path)
-            .map_err(|e| Error::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })?
+            .map_err(|e| Error::config_write(path, e))?
             .permissions();
         perms.set_mode(0o640);
-        fs::set_permissions(path, perms).map_err(|e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+        fs::set_permissions(path, perms).map_err(|e| Error::config_write(path, e))?;
 
         // root:SERVICE_USER so mode 0640 is useful under a service-account install.
         if is_euid_root() {
@@ -206,10 +192,7 @@ pub fn write_token_file(
 
     #[cfg(not(unix))]
     {
-        fs::write(path, body).map_err(|e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+        fs::write(path, body).map_err(|e| Error::config_write(path, e))?;
         let _ = service_user;
     }
 

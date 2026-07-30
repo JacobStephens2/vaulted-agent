@@ -1,3 +1,4 @@
+use std::io;
 use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -20,6 +21,25 @@ pub enum Error {
         source: std::io::Error,
     },
     Message(String),
+}
+
+impl Error {
+    /// Map a write failure on machine config (defaults.conf, token files, …).
+    /// Permission denied gets a sudo hint (system install under /etc is root-owned).
+    pub fn config_write(path: impl Into<PathBuf>, source: io::Error) -> Self {
+        let path = path.into();
+        if source.kind() == io::ErrorKind::PermissionDenied {
+            Self::Message(format!(
+                "{}: Permission denied\n  \
+                 Machine config is root-owned. Re-run with sudo, e.g.:\n  \
+                   sudo vaulted-agent setup\n  \
+                   sudo vaulted-agent auth-mode file|prompt",
+                path.display()
+            ))
+        } else {
+            Self::Io { path, source }
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
