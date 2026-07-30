@@ -3,8 +3,8 @@
 ## What changed
 
 - **Runtime** is the Rust binary `vaulted-agent` (and `va` symlink). The Bash
-  script is no longer installed; `bin/vaulted-agent.bash.retired` remains in the
-  repo for history only.
+  script is no longer installed; its last tree copy was removed after the Rust
+  rewrite — use git history on `main` before v0.4.0 if you need the old script.
 - **Machine defaults** (`auth_mode`, `default_backend`, optional `service_user`)
   live in `/etc/vaulted-agent/defaults.conf`. Install no longer sed-patches a
   shell script.
