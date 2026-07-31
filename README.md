@@ -65,10 +65,36 @@ va claude --resume <id>   # agent args pass through; resume shape is normalized
 va doctor
 va secrets list           # Bitwarden SM (same auth as launches)
 va secrets validate
-va refresh                # update Bitwarden refs after new SM secrets
+va refresh                # build/update a refs file (Bitwarden or 1Password)
 va auth-mode prompt       # or: file
 sudo va uninstall
 ```
+
+**Building a refs file from 1Password.** `va refresh` lists the items the token
+can see and asks which to include; each chosen item's fields become
+`VAR=op://VAULT/ITEM/FIELD` lines. Only the items you pick are read, so the
+prompt appears immediately rather than after a call per item.
+
+```bash
+va refresh                       # backend comes from your harnesses
+va refresh --backend onepassword # or say it explicitly
+```
+
+```
+Items visible to this token:
+   1) anthropic  (Orchestrator)
+   2) mysql8.etadventures.com  (Orchestrator)
+   3) github token  (Orchestrator)
+
+Items to include (e.g. 1,4,7 - blank for all):
+```
+
+Fields in a section are referenced as `op://VAULT/ITEM/SECTION/FIELD`. That
+matters: one item can hold several fields with the same label in different
+sections - a host item with a top-level `password` plus one per section - and
+they are different secrets. Pick the items an agent actually needs; a manifest
+naming the whole vault hands every secret to every agent it launches, which is
+the opposite of what manifests are for.
 
 **One-shot (any command, no harness file):**
 

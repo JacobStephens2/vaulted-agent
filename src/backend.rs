@@ -277,6 +277,253 @@ pub fn bws_list_secrets(token: &ManagerToken) -> Result<Vec<(String, String, Str
     parse_bws_list_json(&list)
 }
 
+/// List 1Password items the token can see, as (id, title, vault name).
+///
+/// Items only - fields are fetched per item in `op_item_field_labels`, because
+/// `op item list` does not include them and expanding every item up front costs
+/// one `op` call per item (~50s for a 60-item vault).
+pub fn op_list_items(
+    token: &ManagerToken,
+    vault: Option<&str>,
+) -> Result<Vec<(String, String, String)>> {
+    let mut args: Vec<&str> = vec!["item", "list", "--format", "json"];
+    if let Some(v) = vault {
+        args.push("--vault");
+        args.push(v);
+    }
+    let json = run_capture("op", &args, &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())])?;
+    parse_op_item_list_json(&json)
+}
+
+/// Parse `op item list --format json` into (id, title, vault name) rows.
+pub fn parse_op_item_list_json(list_json: &str) -> Result<Vec<(String, String, String)>> {
+    let v: serde_json::Value = serde_json::from_str(list_json)
+        .map_err(|e| Error::Message(format!("op item list JSON: {e}")))?;
+    let arr = match &v {
+        serde_json::Value::Array(a) => a.clone(),
+        _ => return Err(Error::Message("op item list: expected a JSON array".into())),
+    };
+    let mut out = Vec::new();
+    for it in arr {
+        let id = it.get("id").and_then(|x| x.as_str()).unwrap_or_default();
+        let title = it.get("title").and_then(|x| x.as_str()).unwrap_or_default();
+        let vault = it
+            .get("vault")
+            .and_then(|x| x.get("name"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
+        if id.is_empty() || title.is_empty() {
+            continue;
+        }
+        out.push((id.to_string(), title.to_string(), vault.to_string()));
+    }
+    Ok(out)
+}
+
+/// Field labels on one item that are worth a reference.
+///
+/// `vault` is required in practice: a service-account token cannot run
+/// `op item get` without one ("a vault query must be provided when this command
+/// is called by a service account"), and service accounts are how this tool
+/// authenticates. It stays optional so a user-authenticated `op` still works.
+///
+/// Metadata only: a field is kept based on whether a value is PRESENT, and the
+/// value itself is never returned, stored, or logged. Refs files hold
+/// references, never secret material (CONTEXT.md invariant).
+pub fn op_item_field_labels(
+    token: &ManagerToken,
+    item_id: &str,
+    vault: Option<&str>,
+) -> Result<Vec<OpField>> {
+    let mut args: Vec<&str> = vec!["item", "get", item_id, "--format", "json"];
+    if let Some(v) = vault.filter(|v| !v.is_empty()) {
+        args.push("--vault");
+        args.push(v);
+    }
+    let json = run_capture("op", &args, &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())])?;
+    parse_op_item_fields_json(&json)
+}
+
+/// Parse `op item get --format json` into referenceable field labels.
+pub fn parse_op_item_fields_json(item_json: &str) -> Result<Vec<OpField>> {
+    let v: serde_json::Value = serde_json::from_str(item_json)
+        .map_err(|e| Error::Message(format!("op item get JSON: {e}")))?;
+    let mut out: Vec<OpField> = Vec::new();
+    let Some(fields) = v.get("fields").and_then(|f| f.as_array()) else {
+        return Ok(out);
+    };
+    for f in fields {
+        // OTP fields are time-based; a static reference to one is not useful.
+        let ty = f.get("type").and_then(|x| x.as_str()).unwrap_or_default();
+        if ty.eq_ignore_ascii_case("OTP") {
+            continue;
+        }
+        // Presence check only. Never bind the value to a name.
+        let has_value = f
+            .get("value")
+            .map(|x| match x {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(s) => !s.is_empty(),
+                _ => true,
+            })
+            .unwrap_or(false);
+        if !has_value {
+            continue;
+        }
+        let label = f
+            .get("label")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| f.get("id").and_then(|x| x.as_str()))
+            .unwrap_or_default();
+        if label.is_empty() {
+            continue;
+        }
+        let section = op_section_name(&v, f);
+        // One item can hold several fields with the SAME label in different
+        // sections - a real vault has three distinct `password` fields on one
+        // host item. They are different secrets, so the pair identifies a field,
+        // not the label alone.
+        if out.iter().any(|e| e.section == section && e.label == label) {
+            continue;
+        }
+        out.push(OpField {
+            section,
+            label: label.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// A referenceable field: its section (when it is in one) and its label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpField {
+    pub section: Option<String>,
+    pub label: String,
+}
+
+/// Section name for a field: the label when set, else the section id, resolved
+/// against the item's top-level `sections` when the field only carries an id.
+fn op_section_name(item: &serde_json::Value, field: &serde_json::Value) -> Option<String> {
+    let sec = field.get("section")?;
+    if let Some(l) = sec.get("label").and_then(|x| x.as_str()) {
+        if !l.is_empty() {
+            return Some(l.to_string());
+        }
+    }
+    let id = sec
+        .get("id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())?;
+    let looked_up = item
+        .get("sections")
+        .and_then(|s| s.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|s| s.get("id").and_then(|x| x.as_str()) == Some(id))
+                .and_then(|s| s.get("label").and_then(|x| x.as_str()))
+                .filter(|l| !l.is_empty())
+        });
+    Some(looked_up.unwrap_or(id).to_string())
+}
+
+#[cfg(test)]
+mod op_tests {
+    use super::*;
+
+    #[test]
+    fn item_list_yields_id_title_and_vault() {
+        let json = r#"[
+          {"id":"a1","title":"anthropic","vault":{"id":"v","name":"Orchestrator"}},
+          {"id":"a2","title":"github token","vault":{"id":"v","name":"Orchestrator"}}
+        ]"#;
+        let rows = parse_op_item_list_json(json).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            ("a1".into(), "anthropic".into(), "Orchestrator".into())
+        );
+        // Titles with spaces survive; op inject reads to end of line.
+        assert_eq!(rows[1].1, "github token");
+    }
+
+    #[test]
+    fn item_list_skips_rows_missing_id_or_title() {
+        let json = r#"[{"id":"","title":"x"},{"id":"y","title":""},{"id":"ok","title":"t"}]"#;
+        let rows = parse_op_item_list_json(json).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "ok");
+    }
+
+    #[test]
+    fn item_list_rejects_non_array() {
+        assert!(parse_op_item_list_json(r#"{"error":"nope"}"#).is_err());
+    }
+
+    fn labels(json: &str) -> Vec<String> {
+        parse_op_item_fields_json(json)
+            .unwrap()
+            .into_iter()
+            .map(|f| match f.section {
+                Some(s) => format!("{s}/{}", f.label),
+                None => f.label,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fields_keep_only_referenceable_labels() {
+        let json = r#"{"fields":[
+          {"id":"f1","label":"api-key","type":"CONCEALED","value":"SECRET"},
+          {"id":"f2","label":"blank","type":"STRING","value":""},
+          {"id":"f3","label":"totp","type":"OTP","value":"otpauth://x"},
+          {"id":"f4","label":"","type":"STRING","value":"v"},
+          {"id":"f5","type":"STRING","value":"v"}
+        ]}"#;
+        // api-key kept; blank is empty; totp is OTP; f4 and f5 have no usable
+        // label so they fall back to their ids.
+        assert_eq!(labels(json), vec!["api-key", "f4", "f5"]);
+    }
+
+    #[test]
+    fn same_label_in_different_sections_is_kept_as_distinct_fields() {
+        // Shape taken from a real vault: one host item with a top-level password
+        // plus one per section. These are three different secrets.
+        let json = r#"{"sections":[{"id":"s1","label":"mysql"},{"id":"s2","label":"replica"}],
+          "fields":[
+          {"id":"f1","label":"password","type":"CONCEALED","value":"a"},
+          {"id":"f2","label":"password","type":"CONCEALED","value":"b","section":{"id":"s1","label":"mysql"}},
+          {"id":"f3","label":"password","type":"CONCEALED","value":"c","section":{"id":"s2"}}
+        ]}"#;
+        // f3 carries only a section id; the label is resolved from `sections`.
+        assert_eq!(
+            labels(json),
+            vec!["password", "mysql/password", "replica/password"]
+        );
+    }
+
+    #[test]
+    fn section_falls_back_to_its_id_when_unresolvable() {
+        let json = r#"{"fields":[
+          {"id":"f1","label":"password","type":"CONCEALED","value":"a","section":{"id":"orphan"}}
+        ]}"#;
+        assert_eq!(labels(json), vec!["orphan/password"]);
+    }
+
+    #[test]
+    fn fields_are_deduplicated_and_missing_fields_is_not_an_error() {
+        // Same label AND same section: a genuine duplicate.
+        let json = r#"{"fields":[
+          {"id":"f1","label":"dup","type":"STRING","value":"a"},
+          {"id":"f2","label":"dup","type":"STRING","value":"b"}
+        ]}"#;
+        assert_eq!(labels(json), vec!["dup"]);
+        assert!(parse_op_item_fields_json(r#"{"id":"x"}"#)
+            .unwrap()
+            .is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
