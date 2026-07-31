@@ -35,7 +35,7 @@ REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent-launcher}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # Bump this when cutting a release so unpinned one-liners stay intentional.
 # Must match a published GitHub release tag (and Cargo.toml version).
-DEFAULT_VERSION="v0.4.0"
+DEFAULT_VERSION="v0.4.1"
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"
@@ -76,15 +76,25 @@ VERSION="$(resolve_version "$VERSION")"
 ARCHIVE_URL="${VAULTED_AGENT_ARCHIVE_URL:-$GITHUB/$REPO/archive/refs/tags/${VERSION}.tar.gz}"
 
 # Prefer a release binary asset when present (no Rust toolchain on the host).
-detect_asset() {
+# One candidate per line, best first. Linux assets are static musl builds: they
+# carry no glibc version dependency, so a single artifact runs on every distro.
+# Releases through v0.4.0 published -gnu assets built against the CI runner's
+# glibc (2.39), which ld.so refuses to load on older hosts; they stay in the
+# list so pinned older versions still resolve, and try_asset drops one that
+# cannot actually start here.
+detect_assets() {
   local os arch
   os="$(uname -s)"
   arch="$(uname -m)"
   case "$os:$arch" in
-    Linux:x86_64)  printf 'vaulted-agent-x86_64-unknown-linux-gnu' ;;
-    Linux:aarch64|Linux:arm64) printf 'vaulted-agent-aarch64-unknown-linux-gnu' ;;
-    Darwin:x86_64) printf 'vaulted-agent-x86_64-apple-darwin' ;;
-    Darwin:arm64)  printf 'vaulted-agent-aarch64-apple-darwin' ;;
+    Linux:x86_64)
+      printf 'vaulted-agent-x86_64-unknown-linux-musl\n'
+      printf 'vaulted-agent-x86_64-unknown-linux-gnu\n' ;;
+    Linux:aarch64|Linux:arm64)
+      printf 'vaulted-agent-aarch64-unknown-linux-musl\n'
+      printf 'vaulted-agent-aarch64-unknown-linux-gnu\n' ;;
+    Darwin:x86_64) printf 'vaulted-agent-x86_64-apple-darwin\n' ;;
+    Darwin:arm64)  printf 'vaulted-agent-aarch64-apple-darwin\n' ;;
     *) return 1 ;;
   esac
 }
@@ -101,46 +111,82 @@ trap cleanup EXIT
 
 # Optional prebuilt binary (Rust runtime). Falls back to source-only install
 # which builds with cargo if needed. Verify .tar.gz.sha256 when present.
-ASSET_NAME="$(detect_asset || true)"
-if [[ -n "$ASSET_NAME" ]]; then
-  asset_url="$GITHUB/$REPO/releases/download/${VERSION}/${ASSET_NAME}.tar.gz"
+# Try one candidate asset. 0 = usable binary exported in VAULTED_AGENT_BIN,
+# 1 = not available/not usable here, caller should try the next candidate.
+try_asset() {
+  local asset_name="$1" asset_url sum_url http_code bin
+  asset_url="$GITHUB/$REPO/releases/download/${VERSION}/${asset_name}.tar.gz"
   sum_url="${asset_url}.sha256"
   printf 'trying release binary: %s\n' "$asset_url"
   # Distinguish "no asset for this platform" (404) from rate-limit/403/network.
   http_code="$(curl -sS -o "$workdir/bin.tgz" -w '%{http_code}' -L "$asset_url" || true)"
   case "$http_code" in
-    200)
-      # Prefer verifying the published checksum when available.
-      if curl -fsSL -o "$workdir/bin.tgz.sha256" "$sum_url"; then
-        (
-          cd "$workdir"
-          if command -v shasum >/dev/null 2>&1; then
-            echo "$(awk '{print $1}' bin.tgz.sha256)  bin.tgz" | shasum -a 256 -c -
-          elif command -v sha256sum >/dev/null 2>&1; then
-            echo "$(awk '{print $1}' bin.tgz.sha256)  bin.tgz" | sha256sum -c -
-          else
-            die "need shasum or sha256sum to verify release checksum"
-          fi
-        ) || die "checksum verification failed for $ASSET_NAME"
-        printf '  checksum ok\n'
-      else
-        printf '  warning: no .sha256 asset; installing without checksum verification\n' >&2
-      fi
-      tar -xzf "$workdir/bin.tgz" -C "$workdir"
-      if [[ -f "$workdir/$ASSET_NAME" ]]; then
-        chmod +x "$workdir/$ASSET_NAME"
-        export VAULTED_AGENT_BIN="$workdir/$ASSET_NAME"
-        printf '  using prebuilt binary %s\n' "$VAULTED_AGENT_BIN"
-      fi
-      ;;
+    200) ;;
     404)
-      printf '  (no binary asset for this platform; will build from source if cargo is available)\n'
+      printf '  (no %s asset in %s)\n' "$asset_name" "$VERSION"
+      return 1
       ;;
     *)
       die "failed to download release binary (HTTP ${http_code:-?}): $asset_url
   Check network/rate limits, or set VAULTED_AGENT_BIN to a local binary."
       ;;
   esac
+
+  # Prefer verifying the published checksum when available.
+  if curl -fsSL -o "$workdir/bin.tgz.sha256" "$sum_url"; then
+    (
+      cd "$workdir"
+      if command -v shasum >/dev/null 2>&1; then
+        echo "$(awk '{print $1}' bin.tgz.sha256)  bin.tgz" | shasum -a 256 -c -
+      elif command -v sha256sum >/dev/null 2>&1; then
+        echo "$(awk '{print $1}' bin.tgz.sha256)  bin.tgz" | sha256sum -c -
+      else
+        die "need shasum or sha256sum to verify release checksum"
+      fi
+    ) || die "checksum verification failed for $asset_name"
+    printf '  checksum ok\n'
+  else
+    printf '  warning: no .sha256 asset; installing without checksum verification\n' >&2
+  fi
+
+  tar -xzf "$workdir/bin.tgz" -C "$workdir"
+  [[ -f "$workdir/$asset_name" ]] || {
+    printf '  (archive did not contain %s)\n' "$asset_name" >&2
+    return 1
+  }
+  # Stage under the real program name. The launcher dispatches on argv[0]
+  # (`vaulted-agent`, `va`, or a `*-conductor` link) and refuses anything else,
+  # so running it under the per-target download name would fail on a perfectly
+  # good binary. install.sh installs it as `vaulted-agent` regardless.
+  bin="$workdir/vaulted-agent"
+  mv -f "$workdir/$asset_name" "$bin"
+  chmod +x "$bin"
+
+  # The asset has to actually start on this host. A glibc-linked asset built on
+  # a newer runner dies at load time ("version `GLIBC_2.39' not found") on an
+  # older distro, and the failure would otherwise only surface after install,
+  # on first launch. Treat it as the wrong asset and fall through to the next
+  # candidate or a source build. `version` touches no config and needs no root.
+  if ! "$bin" version >/dev/null 2>&1; then
+    printf '  warning: %s does not run on this host; skipping it\n' "$asset_name" >&2
+    "$bin" version 2>&1 | sed 's/^/    /' >&2 || true
+    rm -f "$bin"
+    return 1
+  fi
+
+  export VAULTED_AGENT_BIN="$bin"
+  printf '  using prebuilt binary %s\n' "$VAULTED_AGENT_BIN"
+  return 0
+}
+
+# Process substitution (not a pipe) so the export lands in this shell.
+while read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  try_asset "$candidate" && break
+done < <(detect_assets || true)
+
+if [[ -z "${VAULTED_AGENT_BIN:-}" ]]; then
+  printf '  (no usable binary asset; will build from source if cargo is available)\n'
 fi
 
 tarball="$workdir/src.tar.gz"

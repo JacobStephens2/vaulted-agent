@@ -621,6 +621,20 @@ one-shot harness that prints env) after a scrub.
 uses a GitHub release asset (or `VAULTED_AGENT_BIN`); source install needs
 `cargo` once to build. Host tools by backend:
 
+The Linux assets are statically linked against musl, so there is no minimum
+glibc and no shared-library requirement — the same binary runs on RHEL/Rocky 9,
+Debian, Ubuntu, and Alpine. See
+[ADR 0001](docs/adr/0001-static-musl-linux-releases.md) for why, and before
+changing it.
+
+> Installed from a release up to v0.4.0 on a distro older than Ubuntu 24.04 and
+> got `va: /lib64/libc.so.6: version 'GLIBC_2.39' not found (required by va)`?
+> Those assets were glibc-linked and built on a newer runner, so `ld.so` refuses
+> to load them. Re-run the installer at v0.4.1 or later, or build on the host
+> (`cargo build --release --locked` then `sudo ./install.sh`). Nothing needs to
+> change on the machine — installing glibc 2.39 under RHEL 9 is not a supported
+> operation, and the binary does not actually use anything from it.
+
 | feature | needs on PATH |
 |---|---|
 | `backend = bitwarden` | `bws` (JSON parsed in-process; no python3) |
