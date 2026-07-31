@@ -120,12 +120,7 @@ fn prompt_auth_mode_choice(current: AuthMode) -> Result<AuthMode> {
     let _ = io::stderr().flush();
     let line = read_tty_line()?;
     let trimmed = line.trim();
-    if !trimmed.is_empty()
-        && !matches!(
-            trimmed,
-            "1" | "file" | "disk" | "2" | "prompt" | "p"
-        )
-    {
+    if !trimmed.is_empty() && !matches!(trimmed, "1" | "file" | "disk" | "2" | "prompt" | "p") {
         eprintln!("  unknown choice '{trimmed}'; keeping {default}");
     }
     Ok(parse_auth_mode_choice(trimmed, current))
@@ -1145,7 +1140,10 @@ mod tests {
             parse_auth_mode_choice("prompt", AuthMode::File),
             AuthMode::Prompt
         );
-        assert_eq!(parse_auth_mode_choice("p", AuthMode::File), AuthMode::Prompt);
+        assert_eq!(
+            parse_auth_mode_choice("p", AuthMode::File),
+            AuthMode::Prompt
+        );
     }
 
     #[test]
