@@ -313,6 +313,10 @@ Finally, resist giving the service account broad sudo. It is the account your
 agent runs as, and `agent ALL=(ALL) NOPASSWD: ALL` makes every manifest
 boundary above it decorative.
 
+Maintainers: the `curl … | bash` one-liner serves `install-remote.sh` from this
+repo, and refreshing it has an ordering constraint worth knowing before you cut
+a release - see [docs/hosting-the-installer.md](docs/hosting-the-installer.md).
+
 ## Uninstall
 
 Remove it the same way you run agents - uninstall lives **in the installed
