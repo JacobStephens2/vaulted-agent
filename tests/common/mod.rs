@@ -129,4 +129,98 @@ esac
         fs::write(&p, json).unwrap();
         p
     }
+
+    /// Minimal fake `op` covering the two calls `refresh` makes:
+    /// `item list --format json` and `item get <id> --format json`.
+    ///
+    /// Fixture deliberately includes an item title with a space, an empty
+    /// field, an OTP field, and an item with no fields at all - each of which
+    /// the real vault contains and the refs builder has to handle.
+    /// Requires OP_SERVICE_ACCOUNT_TOKEN so tests prove the token reaches `op`.
+    pub fn install_fake_op(&self) -> PathBuf {
+        let script = r#"#!/usr/bin/env bash
+set -euo pipefail
+: "${OP_SERVICE_ACCOUNT_TOKEN:?fake-op: no token in env}"
+case "${1-} ${2-}" in
+  "item list")
+    cat <<'JSON'
+[
+  {"id":"id-anthropic","title":"anthropic","vault":{"id":"v1","name":"Orchestrator"}},
+  {"id":"id-github","title":"github token","vault":{"id":"v1","name":"Orchestrator"}},
+  {"id":"id-bare","title":"bare item","vault":{"id":"v1","name":"Orchestrator"}},
+  {"id":"id-host","title":"db.example.com","vault":{"id":"v1","name":"Orchestrator"}},
+  {"id":"id-flaky","title":"flaky item","vault":{"id":"v1","name":"Orchestrator"}}
+]
+JSON
+    ;;
+  "item get")
+    # Real `op` refuses `item get` without a vault query when the caller is a
+    # service account, which is how this tool authenticates. Enforce it here so
+    # dropping the flag fails in tests instead of only against a live vault.
+    case " $* " in
+      *" --vault "*) : ;;
+      *) echo "fake-op: item get without --vault (service accounts require one)" >&2; exit 1 ;;
+    esac
+    case "${3-}" in
+      id-anthropic)
+        cat <<'JSON'
+{"id":"id-anthropic","title":"anthropic","fields":[
+  {"id":"f1","label":"conductor-api-key","type":"CONCEALED","value":"sk-SECRET-VALUE-1"},
+  {"id":"f2","label":"blank-field","type":"STRING","value":""},
+  {"id":"f3","label":"one-time","type":"OTP","value":"otpauth://SECRET-VALUE-2"}
+]}
+JSON
+        ;;
+      id-github)
+        cat <<'JSON'
+{"id":"id-github","title":"github token","fields":[
+  {"id":"f1","label":"fine-grained-token","type":"CONCEALED","value":"github_pat_SECRET_VALUE_3"}
+]}
+JSON
+        ;;
+      id-host)
+        # Shape from a real vault: one label repeated across sections, holding
+        # different secrets. The second section carries only an id.
+        cat <<'JSON'
+{"id":"id-host","title":"db.example.com",
+ "sections":[{"id":"s1","label":"mysql"},{"id":"s2","label":"replica"}],
+ "fields":[
+  {"id":"f1","label":"password","type":"CONCEALED","value":"SECRET-TOP"},
+  {"id":"f2","label":"password","type":"CONCEALED","value":"SECRET-MYSQL","section":{"id":"s1","label":"mysql"}},
+  {"id":"f3","label":"password","type":"CONCEALED","value":"SECRET-REPLICA","section":{"id":"s2"}}
+]}
+JSON
+        ;;
+      id-bare)
+        printf '{"id":"id-bare","title":"bare item","fields":[]}\n'
+        ;;
+      id-flaky)
+        # Stands in for a transient vault API failure (a real 502 aborted a
+        # 50-second run mid-way) or an item the token cannot read.
+        echo "[ERROR] error initializing client: Unknown: (502)" >&2
+        exit 1
+        ;;
+      *)
+        echo "fake-op: unknown item ${3-}" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake-op: unexpected: $*" >&2
+    exit 1
+    ;;
+esac
+"#;
+        self.write_executable("op", script)
+    }
+
+    pub fn write_harness(&self, name: &str, body: &str) -> PathBuf {
+        let p = self
+            .config_dir
+            .join("harnesses.d")
+            .join(format!("{name}.conf"));
+        fs::write(&p, body).unwrap();
+        p
+    }
 }

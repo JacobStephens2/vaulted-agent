@@ -423,18 +423,33 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     let mut man_path: Option<String> = None;
     let mut take_all = false;
     let mut mode: Option<&str> = None;
+    let mut backend_arg: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!(
-                    "usage: vaulted-agent refresh [manifest] [--all] [--merge|--replace]\n\
-                     Update a Bitwarden refs file after adding secrets in SM.\n\
+                    "usage: vaulted-agent refresh [manifest] [--all] [--merge|--replace] [--backend NAME]\n\
+                     Update a refs file after adding secrets in the vault.\n\
+                     Backend defaults to the one your harnesses use (bitwarden or onepassword).\n\
+                     bitwarden   : pick from the secrets the token can see\n\
+                     onepassword : pick items from the vault; each item's fields become refs\n\
                      Secret values are never stored — only references."
                 );
                 return Ok(());
             }
             "--all" | "-a" => take_all = true,
+            "-b" | "--backend" => {
+                i += 1;
+                backend_arg = Some(
+                    args.get(i)
+                        .ok_or_else(|| Error::Message("refresh: --backend needs a name".into()))?
+                        .clone(),
+                );
+            }
+            s if s.starts_with("--backend=") => {
+                backend_arg = Some(s["--backend=".len()..].to_string());
+            }
             "--merge" => mode = Some("merge"),
             "--replace" | "--rewrite" => mode = Some("replace"),
             "-m" | "--manifest" => {
@@ -462,6 +477,62 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     }
 
     println!("vaulted-agent refresh\n");
+
+    // Which vault are we refreshing against? Explicit flag wins; otherwise use
+    // the backend the harnesses actually use. Before this, refresh always went
+    // to Bitwarden and a 1Password install failed with a confusing "needs
+    // bws.env" even when default_backend was onepassword.
+    let be = match &backend_arg {
+        Some(name) => Backend::parse_loose(name)
+            .ok_or_else(|| Error::Message(format!("refresh: unknown backend '{name}'")))?,
+        None => refresh_backend(paths),
+    };
+
+    match be {
+        Backend::Bitwarden => refresh_bitwarden(paths, man_path, take_all, mode),
+        Backend::OnePassword => refresh_onepassword(paths, man_path, take_all, mode),
+        other => Err(Error::Message(format!(
+            "refresh does not apply to backend '{}'. It builds refs files, which only \
+             bitwarden and onepassword use; {} manifests are edited directly.",
+            other.as_str(),
+            other.as_str()
+        ))),
+    }
+}
+
+/// Backend for a bare `refresh`: whichever refs-using backend the harnesses
+/// resolve to.
+///
+/// Falls back to Bitwarden, NOT to `default_backend`, when there is no positive
+/// signal. `refresh` meant Bitwarden for its whole history, while
+/// `load_default_backend` returns OnePassword when nothing is configured - so
+/// deferring to it here would silently retarget `refresh` on installs that have
+/// no harnesses and no defaults.conf. Ties break the same way.
+fn refresh_backend(paths: &Paths) -> Backend {
+    let be_default = default_backend(paths);
+    let mut seen: Vec<Backend> = Vec::new();
+    if let Ok(names) = list_harness_names(paths) {
+        for name in names {
+            if let Ok(h) = Harness::load(paths, &name) {
+                let be = h.backend.unwrap_or(be_default);
+                if matches!(be, Backend::Bitwarden | Backend::OnePassword) && !seen.contains(&be) {
+                    seen.push(be);
+                }
+            }
+        }
+    }
+    match seen.as_slice() {
+        [one] => *one,
+        _ => Backend::Bitwarden,
+    }
+}
+
+fn refresh_bitwarden(
+    paths: &Paths,
+    man_path: Option<String>,
+    take_all: bool,
+    mode: Option<&str>,
+) -> Result<()> {
     let token = load_bws(paths)?;
     let secrets = backend::bws_list_secrets(&token)?;
     drop(token);
@@ -536,6 +607,167 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
 
 fn load_op_with(paths: &Paths, mode: AuthMode) -> Result<ManagerToken> {
     auth::load_manager_token(paths, mode, TokenKind::Op, force_prompt())
+}
+
+fn load_op(paths: &Paths) -> Result<ManagerToken> {
+    load_op_with(paths, auth_mode(paths))
+}
+
+/// 1Password: pick items from the vault, then turn each picked item's fields
+/// into `VAR=op://VAULT/ITEM/FIELD` lines.
+///
+/// Selection is at ITEM level, not field level, for two reasons: an item is the
+/// unit a person recognises, and `op item list` returns every item in one call
+/// while fields cost one `op item get` per item. Expanding all items up front
+/// would mean a per-item round trip before the menu could even be printed
+/// (~50s on a 60-item vault). Only the chosen items are expanded.
+fn refresh_onepassword(
+    paths: &Paths,
+    man_path: Option<String>,
+    take_all: bool,
+    mode: Option<&str>,
+) -> Result<()> {
+    let token = load_op(paths)?;
+    let items = backend::op_list_items(&token, None)?;
+    if items.is_empty() {
+        return Err(Error::Message(
+            "No 1Password items visible to this token yet.".into(),
+        ));
+    }
+
+    let path = match man_path {
+        Some(man) => {
+            if Path::new(&man).is_absolute() {
+                PathBuf::from(&man)
+            } else {
+                paths.manifest_dir.join(&man)
+            }
+        }
+        None => default_onepassword_manifest(paths)?,
+    };
+    let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
+
+    let indices: Vec<usize> = if take_all || !std::io::IsTerminal::is_terminal(&io::stdin()) {
+        (0..items.len()).collect()
+    } else {
+        println!("Items visible to this token:");
+        for (i, (_, title, vault)) in items.iter().enumerate() {
+            println!("  {:2}) {}  ({})", i + 1, title, vault);
+        }
+        println!();
+        eprint!("Items to include (e.g. 1,4,7 - blank for all): ");
+        let _ = io::stderr().flush();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
+            (0..items.len()).collect()
+        } else {
+            refs::parse_index_list(line.trim(), items.len())?
+        }
+    };
+
+    // Fields are fetched only for the items actually chosen.
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for i in indices {
+        let (id, title, vault) = &items[i];
+        // A per-item failure (transient 502 from the vault API, an item the
+        // token cannot read) must not discard the whole run - reading 60 items
+        // takes ~a minute, and refresh defaults to merge, so the next run picks
+        // up whatever was missed. Skips are reported, never silent.
+        let fields = match backend::op_item_field_labels(&token, id, Some(vault.as_str())) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("  warn: {title}: {e}");
+                unreadable.push(title.clone());
+                continue;
+            }
+        };
+        if fields.is_empty() {
+            println!("  {title}: no referenceable fields, skipped");
+            continue;
+        }
+        for f in fields {
+            let section = f.section.as_deref();
+            entries.push((
+                refs::op_ref_var(title, section, &f.label),
+                refs::op_reference(vault, title, section, &f.label),
+            ));
+        }
+    }
+    drop(token);
+
+    if !unreadable.is_empty() {
+        println!(
+            "\n{} item(s) could not be read and were left out: {}\n\
+             Re-run refresh to pick them up (merge only adds what is missing).",
+            unreadable.len(),
+            unreadable.join(", ")
+        );
+    }
+
+    if entries.is_empty() {
+        return Err(Error::Message(
+            "Nothing selected has a referenceable field.".into(),
+        ));
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+
+    match mode {
+        "replace" => {
+            refs::write_op_refs_replace(&path, &entries, "vaulted-agent refresh")?;
+            println!(
+                "\nWrote refs file (replace, {} mapping(s)): {}",
+                entries.len(),
+                path.display()
+            );
+        }
+        _ => {
+            let added = refs::write_op_refs_merge(&path, &entries, "vaulted-agent refresh")?;
+            if added == 0 {
+                println!("\nNo new mappings to add: {}", path.display());
+            } else {
+                println!(
+                    "\nUpdated refs file (+{added} mapping(s)): {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the refs file for a bare 1Password `refresh` from harness config,
+/// mirroring `default_bitwarden_manifest`.
+fn default_onepassword_manifest(paths: &Paths) -> Result<PathBuf> {
+    let be_default = default_backend(paths);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for name in list_harness_names(paths)? {
+        let h = Harness::load(paths, &name)?;
+        let be = h.backend.unwrap_or(be_default);
+        if be == Backend::OnePassword {
+            candidates.push(h.resolve_manifest_path(paths));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Ok(paths.manifest_dir.join("onepassword.refs")),
+        many => Err(Error::Message(format!(
+            "multiple onepassword manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
+            many.iter()
+                .map(|p| p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 /// Resolve the refs file for bare `refresh` / setup from harness config (story #13).
