@@ -304,6 +304,31 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
     }
 }
 
+/// What, if anything, to say about a harness's `workdir`.
+///
+/// `workdir=caller` keeps sessions keyed to the directory the operator was
+/// standing in, which is what an agent wants -- but only while the launch stays
+/// in that operator's account. Under `service_user` the agent runs as someone
+/// else, and a home directory is conventionally mode 0700, so the service
+/// account cannot traverse the cwd and the launch dies at exec with a bare
+/// EACCES that names nothing. Recommending `caller` there points at the failure
+/// rather than away from it, so the advice inverts once a service user is set.
+fn workdir_warning(
+    service_user: Option<&str>,
+    workdir: Option<&str>,
+    harness: &str,
+) -> Option<String> {
+    let is_agent = matches!(harness, "claude" | "codex" | "grok" | "kimi");
+    let wd_is_caller = workdir == Some("caller");
+    match (service_user, wd_is_caller) {
+        (Some(svc), true) => Some(format!(
+            "workdir=caller with service_user={svc}: launching from a directory {svc} cannot traverse (a 0700 home) fails at exec; prefer an absolute workdir"
+        )),
+        (None, false) if is_agent => Some("agent harness without workdir=caller".to_string()),
+        _ => None,
+    }
+}
+
 pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     let mut issues = 0usize;
     let mut warn = 0usize;
@@ -311,6 +336,29 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     println!("config: {}", paths.config_dir.display());
     println!("auth_mode: {}", load_auth_mode(paths).as_str());
     println!("default_backend: {}", default_backend(paths));
+
+    // Nearly every check below is a filesystem question -- is op.env readable,
+    // is the manifest readable, is the harness bin executable -- and the answer
+    // depends on who is asking. Launches run as service_user, so a report
+    // produced as the calling user can describe an account that never runs an
+    // agent: on the host this was found, doctor called op.env "missing" while
+    // the launcher read it without trouble. main re-execs doctor through the
+    // same hop a launch uses; name the account that answered so the report is
+    // never read against the wrong one.
+    let running_as = crate::privilege::current_user();
+    let service_user = load_service_user(paths);
+    match service_user.as_deref() {
+        Some(svc) if svc != running_as => {
+            // Only reached when the hop was declined (VAULTED_AGENT_NO_REEXEC)
+            // or could not run, so say plainly that the findings do not apply.
+            println!("checked as: {running_as}");
+            println!("service_user: {svc}");
+            println!("  WARN: launches run as {svc}; these checks describe {running_as} instead");
+            warn += 1;
+        }
+        Some(svc) => println!("checked as: {svc} (service_user, same as a launch)"),
+        None => println!("checked as: {running_as} (no service_user set, same as a launch)"),
+    }
 
     // Redirect stdout so `command -v` path noise never pollutes the report.
     let have = |bin: &str| {
@@ -395,10 +443,8 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             | Backend::Sops
             | Backend::Pass => {}
         }
-        if matches!(name.as_str(), "claude" | "codex" | "grok" | "kimi")
-            && h.workdir.as_deref() != Some("caller")
-        {
-            println!("  WARN: agent harness without workdir=caller");
+        if let Some(msg) = workdir_warning(service_user.as_deref(), h.workdir.as_deref(), name) {
+            println!("  WARN: {msg}");
             warn += 1;
         }
     }
@@ -1393,5 +1439,36 @@ mod tests {
             parse_auth_mode_choice("  file  ", AuthMode::Prompt),
             AuthMode::File
         );
+    }
+
+    #[test]
+    fn workdir_caller_is_warned_about_under_a_service_user() {
+        let w = workdir_warning(Some("conductor"), Some("caller"), "claude")
+            .expect("caller + service_user should warn");
+        assert!(w.contains("workdir=caller"));
+        assert!(w.contains("conductor"));
+    }
+
+    #[test]
+    fn absolute_workdir_is_fine_under_a_service_user() {
+        // The old rule warned here, steering people toward the broken setting.
+        assert_eq!(
+            workdir_warning(Some("conductor"), Some("/srv/orchestration"), "claude"),
+            None
+        );
+    }
+
+    #[test]
+    fn agent_without_caller_still_warns_when_no_service_user() {
+        assert_eq!(
+            workdir_warning(None, Some("/srv/x"), "claude").as_deref(),
+            Some("agent harness without workdir=caller")
+        );
+        assert_eq!(workdir_warning(None, Some("caller"), "claude"), None);
+    }
+
+    #[test]
+    fn non_agent_harness_is_not_nagged_about_workdir() {
+        assert_eq!(workdir_warning(None, Some("/srv/x"), "backup"), None);
     }
 }

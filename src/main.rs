@@ -170,6 +170,18 @@ fn main() {
 
     // Reserved management commands
     if commands::is_reserved(&name, &paths) {
+        // doctor reports on what a launch will find, and a launch runs as
+        // service_user. Take the same hop first so its filesystem checks are
+        // answered by the account that will actually run the agent; otherwise
+        // the report describes the caller and quietly contradicts reality.
+        // A failed hop is not fatal here: doctor still has something useful to
+        // say as the caller, and it labels which account answered.
+        if name == "doctor" {
+            let orig: Vec<String> = argv.iter().skip(1).cloned().collect();
+            if let Err(e) = commands::maybe_reexec_service_user(&paths, argv0, &orig) {
+                eprintln!("vaulted-agent: could not check as the service user: {e}");
+            }
+        }
         let code = dispatch_mgmt(&paths, &name, &rest, force_prompt);
         process::exit(code);
     }
