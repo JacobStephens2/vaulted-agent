@@ -579,6 +579,25 @@ write_defaults_conf() {
     printf '  would write %s (auth_mode=%s, %s)\n' "$path" "$mode" "$be_line"
     return 0
   fi
+  # Keys this function does not manage belong to the operator, and rewriting
+  # the file with `>` used to drop them. `service_user` is the one that hurts:
+  # re-running the installer without --user silently moved agents back to
+  # running as the caller. The Rust runtime's auth-mode writer already
+  # preserves unmanaged keys; match it here.
+  local carried=""
+  if [[ -f "$path" ]]; then
+    carried="$(awk -v have_svc="${svc_line:+1}" '
+      { line = $0
+        sub(/[[:space:]]*#.*/, "", line)
+        if (line ~ /^[[:space:]]*$/) next
+        split(line, kv, "=")
+        key = kv[1]; gsub(/[[:space:]]/, "", key)
+        if (key == "auth_mode" || key == "default_backend") next
+        if (key == "service_user" && have_svc == "1") next
+        print $0 }' "$path")"
+    # Keep a copy before rewriting, so a bad guess here is recoverable.
+    cp -p "$path" "$path.bak-$(date +%Y%m%d-%H%M%S)"
+  fi
   {
     printf '%s\n' \
       '# Machine-wide launcher defaults (Rust runtime).' \
@@ -586,9 +605,15 @@ write_defaults_conf() {
       "auth_mode = $mode" \
       "$be_line"
     [[ -n "$svc_line" ]] && printf '%s\n' "$svc_line"
+    [[ -n "$carried" ]] && printf '%s\n' "$carried"
   } > "$path"
   chmod 0644 "$path"
   printf '  wrote %s (auth_mode=%s, backend=%s)\n' "$path" "$mode" "$DEFAULT_BACKEND_VALUE"
+  if [[ -n "$carried" ]]; then
+    printf '    kept %s operator-set line(s)\n' "$(printf '%s\n' "$carried" | wc -l | tr -d ' ')"
+  fi
+  # Explicit: under `set -e` a trailing false test would abort the install.
+  return 0
 }
 
 # Create a live reference manifest (no secret values) if missing.
