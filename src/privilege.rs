@@ -35,20 +35,25 @@ pub struct ReexecFacts {
     pub orig_argv: Vec<String>,
 }
 
+/// The account this process is running as, empty if `id -un` cannot say.
+pub fn current_user() -> String {
+    Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
 impl ReexecFacts {
     pub fn from_runtime(paths: &Paths, argv0: &str, orig_argv: &[String]) -> Self {
-        let current_user = Command::new("id")
-            .arg("-un")
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+        let current_user = current_user();
         let service_user = crate::config::load_service_user(paths);
         let caller_cwd = env::var("VAULTED_AGENT_CALLER_CWD").unwrap_or_else(|_| {
             env::current_dir()
