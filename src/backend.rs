@@ -358,6 +358,24 @@ pub fn parse_op_item_fields_json(item_json: &str) -> Result<Vec<OpField>> {
         if ty.eq_ignore_ascii_case("OTP") {
             continue;
         }
+        // The notes field is free-form prose, and prose routinely contains a
+        // blank line or a line starting with '#'. parse_dotenv_pairs treats
+        // both as closing an unquoted value, on purpose, so that a stray line
+        // cannot graft itself onto an earlier secret. A notes field therefore
+        // cannot survive the round trip: the line after the first blank one has
+        // nothing to continue and the whole manifest dies with
+        // "expected KEY=value", taking every other variable with it.
+        //
+        // Quoting the reference is not a way out. `op inject` substitutes the
+        // value raw, so a note containing a double quote would break the
+        // quoting it was meant to be protected by.
+        let purpose = f
+            .get("purpose")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
+        if purpose.eq_ignore_ascii_case("NOTES") {
+            continue;
+        }
         // Presence check only. Never bind the value to a name.
         let has_value = f
             .get("value")
@@ -458,6 +476,36 @@ mod op_tests {
     #[test]
     fn item_list_rejects_non_array() {
         assert!(parse_op_item_list_json(r#"{"error":"nope"}"#).is_err());
+    }
+
+    #[test]
+    fn notes_field_is_never_referenced() {
+        // A note is prose. parse_dotenv_pairs ends an unquoted value at the
+        // first blank or '#' line, so a referenced note aborts the whole
+        // manifest with "expected KEY=value" the moment the prose has either.
+        let json = r#"{"fields":[
+          {"id":"password","label":"password","type":"CONCEALED","purpose":"PASSWORD","value":"s"},
+          {"id":"notesPlain","label":"notesPlain","type":"STRING","purpose":"NOTES","value":"line\n\nmore"}
+        ]}"#;
+        assert_eq!(labels(json), vec!["password"]);
+    }
+
+    #[test]
+    fn notes_purpose_match_is_case_insensitive() {
+        let json = r#"{"fields":[
+          {"id":"notesPlain","label":"notesPlain","type":"STRING","purpose":"notes","value":"x"}
+        ]}"#;
+        assert!(labels(json).is_empty());
+    }
+
+    #[test]
+    fn a_field_merely_labelled_notes_is_still_referenced() {
+        // Only the vault's NOTES purpose is prose. A user-created field that
+        // happens to be called "notes" is an ordinary value and must survive.
+        let json = r#"{"fields":[
+          {"id":"f1","label":"notes","type":"STRING","value":"v"}
+        ]}"#;
+        assert_eq!(labels(json), vec!["notes"]);
     }
 
     fn labels(json: &str) -> Vec<String> {

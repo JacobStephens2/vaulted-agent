@@ -228,6 +228,33 @@ pub fn op_reference(vault: &str, item: &str, section: Option<&str>, field: &str)
     }
 }
 
+/// True when a reference component survives `op inject`'s reference scanner.
+///
+/// The scanner ends a reference at a character it does not accept, so an item
+/// titled `db-admin jstephens MySQL (read-write)` is read as the truncated
+/// `op://Orchestrator/db-admin jstephens MySQL` and rejected with "too few
+/// '/'": one such item aborts the injection of the entire manifest. Spaces are
+/// accepted; parentheses and non-ASCII characters (an em dash in a title, say)
+/// are not. Quoting the value is not a workaround, because the scanner runs
+/// over the reference text itself rather than the shell-quoted line.
+pub fn op_component_is_safe(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
+}
+
+/// The item component of a reference: the readable title when `op` can parse
+/// it, otherwise the item's opaque ID, which always parses. Variable names are
+/// still derived from the title, so a fallback here costs readability only in
+/// the reference itself.
+pub fn op_item_component<'a>(title: &'a str, id: &'a str) -> &'a str {
+    if op_component_is_safe(title) {
+        title
+    } else {
+        id
+    }
+}
+
 /// True if the refs file already points at this exact reference.
 fn text_has_reference(text: &str, reference: &str) -> bool {
     for raw in text.lines() {
@@ -253,9 +280,14 @@ pub fn write_op_refs_replace(
     entries: &[(String, String)],
     source: &str,
 ) -> Result<()> {
+    // The form line deliberately does not spell out a literal reference.
+    // `op inject` substitutes every reference it finds in the file, comments
+    // included, so an illustrative op://VAULT/ITEM/FIELD in this header is read
+    // as a real reference and the whole injection dies on "VAULT isn't a vault
+    // in this account" - taking every genuine entry below it down too.
     let mut body = format!(
         "# {OP_REFS_HEADER} {source}.\n\
-         # Form: VAR=op://VAULT/ITEM/FIELD\n\
+         # Form: VAR= a secret reference (vault, item and field, slash separated).\n\
          # Update: vaulted-agent refresh\n\
          # Values fetched live at launch.\n\n"
     );
@@ -428,6 +460,67 @@ mod tests {
             op_reference("V", "host", Some(""), "password"),
             "op://V/host/password"
         );
+    }
+
+    #[test]
+    fn op_component_safety_matches_what_op_can_parse() {
+        // Spaces are accepted by op's reference scanner.
+        assert!(op_component_is_safe("db-admin jstephens MySQL"));
+        assert!(op_component_is_safe("mysql8.etadventures.com"));
+        assert!(op_component_is_safe("add more"));
+        // These end the reference early, so op reports "too few '/'".
+        assert!(!op_component_is_safe(
+            "db-admin jstephens MySQL (read-write)"
+        ));
+        assert!(!op_component_is_safe("Grafana — grafana.etadventures.com"));
+        assert!(!op_component_is_safe(""));
+    }
+
+    #[test]
+    fn unparseable_item_title_falls_back_to_the_id() {
+        let id = "7vjm6j5srnx2krtk5nvduzjjoe";
+        assert_eq!(op_item_component("plain-title", id), "plain-title");
+        assert_eq!(op_item_component("db-admin (read-write)", id), id);
+        // The variable name still comes from the title, so the fallback costs
+        // readability only inside the reference.
+        assert_eq!(
+            op_ref_var("db-admin (read-write)", None, "username"),
+            "DB_ADMIN_READ_WRITE_USERNAME"
+        );
+        assert_eq!(
+            op_reference(
+                "V",
+                op_item_component("db-admin (read-write)", id),
+                None,
+                "username"
+            ),
+            format!("op://V/{id}/username")
+        );
+    }
+
+    #[test]
+    fn generated_header_carries_no_resolvable_reference() {
+        // `op inject` resolves every reference in the file, comments included.
+        // An illustrative op://VAULT/ITEM/FIELD in the header is therefore a
+        // real lookup that fails, and one failed lookup aborts the injection of
+        // the entire manifest. Only lines written by refresh may contain a
+        // reference, and every one of those is a genuine entry.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("op.refs");
+        let entries = vec![(
+            "A_KEY".to_string(),
+            "op://V/anthropic/conductor-api-key".to_string(),
+        )];
+        write_op_refs_replace(&p, &entries, "test").unwrap();
+
+        for line in fs::read_to_string(&p).unwrap().lines() {
+            if line.trim_start().starts_with('#') {
+                assert!(
+                    !line.contains("op://"),
+                    "header comment carries a reference op inject would try to resolve: {line}"
+                );
+            }
+        }
     }
 
     #[test]
