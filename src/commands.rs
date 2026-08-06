@@ -9,8 +9,8 @@ use std::process::Command;
 use crate::auth::{self, TokenKind};
 use crate::backend;
 use crate::config::{
-    list_harness_names, load_auth_mode, load_default_backend, load_service_user, parse_dotenv_keys,
-    AuthMode, Backend, Harness, Paths,
+    list_harness_names, load_allow_run, load_auth_mode, load_default_backend, load_service_user,
+    parse_dotenv_keys, AuthMode, Backend, Harness, Paths,
 };
 use crate::error::{Error, Result};
 use crate::launch::{self, auth_mode_from_env_or_config, force_prompt_from_env, LaunchOpts};
@@ -1197,7 +1197,31 @@ pub fn cmd_uninstall(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Why `run` is refused, or None when it may proceed.
+///
+/// Every other entry point can only start a `command =` line that root wrote
+/// into a harness file. `run` takes its command from the caller, which makes it
+/// the one subcommand that turns this launcher into a general executor.
+///
+/// That is harmless on a single-operator machine, and it is the whole ballgame
+/// once a service account exists: the account agents run as typically holds
+/// broad sudo, so a grant of this launcher meant for one harness would also
+/// carry `run -- /bin/sh` as that account. Configuring `service_user` is the
+/// signal that the launcher is delegated, so `run` is off by default there and
+/// takes an explicit `allow_run = yes` to restore.
+fn run_refusal(service_user: Option<&str>, allow_run: bool) -> Option<String> {
+    match service_user {
+        Some(svc) if !allow_run => Some(format!(
+            "run is disabled while service_user={svc} is configured: it takes its command from the caller, so a grant of this launcher would also carry `run -- /bin/sh` as {svc}. Set `allow_run = yes` in defaults.conf to re-enable it."
+        )),
+        _ => None,
+    }
+}
+
 pub fn cmd_run(paths: &Paths, args: &[String], force_prompt: bool) -> Result<()> {
+    if let Some(msg) = run_refusal(load_service_user(paths).as_deref(), load_allow_run(paths)) {
+        return Err(Error::Message(msg));
+    }
     let mut manifest: Option<String> = None;
     let mut backend = default_backend(paths);
     let mut workdir: Option<String> = Some("caller".into());
@@ -1448,6 +1472,25 @@ mod tests {
             parse_auth_mode_choice("p", AuthMode::File),
             AuthMode::Prompt
         );
+    }
+
+    #[test]
+    fn run_is_refused_once_a_service_user_exists() {
+        let msg = run_refusal(Some("conductor"), false).expect("should refuse");
+        assert!(msg.contains("conductor"));
+        assert!(msg.contains("allow_run"));
+    }
+
+    #[test]
+    fn run_stays_available_on_a_single_operator_machine() {
+        // No service account, so `run` grants nothing the caller lacks.
+        assert_eq!(run_refusal(None, false), None);
+        assert_eq!(run_refusal(None, true), None);
+    }
+
+    #[test]
+    fn allow_run_restores_it_explicitly() {
+        assert_eq!(run_refusal(Some("conductor"), true), None);
     }
 
     #[test]
