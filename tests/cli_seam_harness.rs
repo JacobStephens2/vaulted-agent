@@ -28,20 +28,21 @@ fn harness_runs_version_with_isolated_config_and_path() {
 fn stub_agent_records_env_and_argv_when_invoked() {
     let seam = CliSeam::new();
     seam.install_stub_agent("stub-agent");
-    let status = std::process::Command::new(seam.path_dir.join("stub-agent"))
-        .args(["--hello", "world"])
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                seam.path_dir.display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        )
-        .env("PARENT_ONLY_SECRET", "should-appear-in-record-as-name")
-        .current_dir(&seam.work_dir)
-        .status()
-        .expect("run stub");
+    let status = common::run_retrying_on_busy("run stub", || {
+        std::process::Command::new(seam.path_dir.join("stub-agent"))
+            .args(["--hello", "world"])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    seam.path_dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env("PARENT_ONLY_SECRET", "should-appear-in-record-as-name")
+            .current_dir(&seam.work_dir)
+            .status()
+    });
     assert!(status.success());
     let rec = seam.read_stub_record("stub-agent");
     assert!(rec.contains("ARGV:"), "{rec}");

@@ -3,6 +3,7 @@
 //! Rust is the shipped runtime (v0.4.0+). See MIGRATION.md.
 
 use std::env;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process;
 
@@ -49,29 +50,23 @@ fn main() {
                 eprintln!("vaulted-agent: {e}");
                 process::exit(1);
             }
-            let mut force = false;
-            let mut extra = Vec::new();
-            // Launcher flags only before the first non-flag token.
-            let mut args = argv.iter().skip(1).peekable();
-            while let Some(a) = args.next() {
-                match a.as_str() {
-                    "-p" | "--prompt-auth" => force = true,
-                    "--" => {
-                        extra.extend(args.cloned());
-                        break;
-                    }
-                    s if s.starts_with('-') => {
-                        // Unknown launcher flag under conductor: forward to agent.
-                        extra.push(a.clone());
-                        extra.extend(args.cloned());
-                        break;
-                    }
-                    _ => {
-                        extra.push(a.clone());
-                        extra.extend(args.cloned());
-                        break;
-                    }
-                }
+            // The link name fixes the harness, so there is no harness token to
+            // read flags in front of and every argument here belongs to the
+            // agent. `-p` above all: claude, codex and kimi each use it for a
+            // prompt, so eating it as --prompt-auth turned
+            //
+            //     kimi-conductor -p "explain this"
+            //
+            // into a request for a vault token, which then failed with
+            // "auth_mode=prompt needs a terminal" -- an error pointing nowhere
+            // near the cause, and the prompt silently dropped. Prompt auth stays
+            // reachable in this mode through VAULTED_AGENT_PROMPT_AUTH=1.
+            let force =
+                env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(OsStr::new("1"));
+            let mut extra: Vec<String> = argv.iter().skip(1).cloned().collect();
+            // A leading `--` stays an explicit "the rest is the agent's".
+            if extra.first().is_some_and(|s| s == "--") {
+                extra.remove(0);
             }
             if let Err(e) = commands::cmd_launch_harness(&paths, harness, &extra, force) {
                 eprintln!("vaulted-agent: {e}");

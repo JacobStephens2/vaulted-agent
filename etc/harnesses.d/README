@@ -37,3 +37,18 @@ Recognised keys, all optional except command and manifest:
 Whitespace around the key, the `=`, and the value is ignored, so align them
 however you like. Lines beginning with # are comments. The files are parsed,
 never sourced: a value cannot execute shell.
+
+Not harness keys. These are launcher-wide and live in ../defaults.conf, one
+file for the machine rather than one per harness. Putting any of them here is
+an error, because a harness must not choose them for itself:
+
+  service_user    = the account harnesses run as; the launcher re-execs under
+                    it via sudo. With this set, `workdir = caller` breaks
+                    whenever you launch from a directory that account cannot
+                    traverse -- a 0700 home being the usual case -- so prefer
+                    an explicit workdir there.
+  auth_mode       = file | prompt
+  default_backend = backend for harnesses that omit `backend =`
+  allow_run       = yes|no. `run` takes its command from the caller rather than
+                    from a `command =` line, so it is refused by default once
+                    service_user is set. Say yes to allow it deliberately.

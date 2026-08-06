@@ -12,6 +12,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// ETXTBSY, by number: unambiguous and stable everywhere.
+const ETXTBSY: i32 = 26;
+
+/// Run a command, retrying briefly while the kernel reports ETXTBSY.
+///
+/// These tests write a stub executable and immediately run it, while sibling
+/// test threads in the same binary are spawning children of their own. A child
+/// that forks in the window where the stub's write handle is still open
+/// inherits that descriptor, and the kernel refuses to exec a file another
+/// process holds open for writing. Nothing is wrong with the stub, and the
+/// condition clears the moment that child execs, so wait it out rather than
+/// fail the suite. Without this the seam fails roughly one run in five under
+/// load, always with "Text file busy".
+pub fn run_retrying_on_busy<T>(label: &str, mut attempt: impl FnMut() -> std::io::Result<T>) -> T {
+    for _ in 0..100 {
+        match attempt() {
+            Ok(v) => return v,
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => panic!("{label}: {e}"),
+        }
+    }
+    panic!("{label}: still ETXTBSY after retrying for a second")
+}
+
 /// Isolated environment for one CLI acceptance test.
 pub struct CliSeam {
     pub root: PathBuf,
