@@ -355,26 +355,57 @@ fn double_quoted_closed(s: &str) -> bool {
 /// Ordered KEY=value pairs (shared policy for validate + resolve).
 /// Fails closed on invalid variable names (story #37). Strips surrounding quotes
 /// and supports double-quoted multi-line values (bash `source` parity for common cases).
+///
+/// Bare, unquoted multi-line values are carried too. A PEM or a pretty-printed
+/// JSON service-account key comes back from `op inject` spread over many lines
+/// with no quoting to hold it together, so a line that is not itself an
+/// assignment continues the value above it, and a blank line or a comment ends
+/// that value. This is the rule the conductor shell wrappers already used.
+/// Without it a single multi-line secret anywhere in a manifest aborts the whole
+/// launch, including for harnesses that never read that variable.
 pub fn parse_dotenv_pairs(text: &str) -> Result<Vec<(String, String)>> {
-    let mut pairs = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
     let mut lines = text.lines().peekable();
     let mut lineno = 0usize;
+    // Whether the value pushed most recently may still take continuation lines.
+    // A blank line or a comment closes it, so a stray line further down the file
+    // cannot silently graft itself onto an earlier secret.
+    let mut open = false;
     while let Some(raw) = lines.next() {
         lineno += 1;
         let line = raw.trim_end_matches('\r');
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            open = false;
             continue;
         }
-        let Some((k, v)) = trimmed.split_once('=') else {
-            return Err(Error::Message(format!("line {lineno}: expected KEY=value")));
+        // A line only starts a new pair when the text before its first '=' is a
+        // legal variable name. That keeps a continuation line that happens to
+        // contain '=' -- a JSON field, base64 padding -- attached to the value it
+        // belongs to instead of being misread as an assignment.
+        let assignment = trimmed
+            .split_once('=')
+            .filter(|(k, _)| validate_var_name(k.trim()));
+        let Some((k, v)) = assignment else {
+            if open {
+                // `open` is only set just after a push, so there is always a
+                // previous pair here; fall through to the error rather than
+                // unwrap if that ever stops holding.
+                if let Some(last) = pairs.last_mut() {
+                    last.1.push('\n');
+                    last.1.push_str(line);
+                    continue;
+                }
+            }
+            // Nothing to continue, so report how this line actually fails.
+            return Err(match trimmed.split_once('=') {
+                Some((k, _)) => {
+                    Error::Message(format!("line {lineno}: bad variable name {}", k.trim()))
+                }
+                None => Error::Message(format!("line {lineno}: expected KEY=value")),
+            });
         };
         let key = k.trim();
-        if !validate_var_name(key) {
-            return Err(Error::Message(format!(
-                "line {lineno}: bad variable name {key}"
-            )));
-        }
         let mut val = v.trim().to_string();
         // Multi-line double-quoted value
         if val.starts_with('"') && !double_quoted_closed(&val) {
@@ -391,8 +422,13 @@ pub fn parse_dotenv_pairs(text: &str) -> Result<Vec<(String, String)>> {
                     break;
                 }
             }
+            // The closing quote ended the value; later lines are not part of it.
+            pairs.push((key.to_string(), unquote_dotenv_value(&val)));
+            open = false;
+            continue;
         }
         pairs.push((key.to_string(), unquote_dotenv_value(&val)));
+        open = true;
     }
     Ok(pairs)
 }
@@ -478,6 +514,58 @@ mod tests {
     fn parse_dotenv_pairs_preserves_order() {
         let p = parse_dotenv_pairs("A=1\nB=2\n").unwrap();
         assert_eq!(p, vec![("A".into(), "1".into()), ("B".into(), "2".into())]);
+    }
+
+    #[test]
+    fn parse_dotenv_carries_bare_multiline_json() {
+        // What `op inject` emits for a pretty-printed service-account key. The
+        // inner line containing '=' must stay part of the value.
+        let text = "A=1\nSA={\n  \"type\": \"service_account\",\n  \"tok\": \"ab==\"\n}\n\nB=2\n";
+        let p = parse_dotenv_pairs(text).unwrap();
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0], ("A".into(), "1".into()));
+        assert_eq!(p[2], ("B".into(), "2".into()));
+        assert_eq!(p[1].0, "SA");
+        assert_eq!(
+            p[1].1,
+            "{\n  \"type\": \"service_account\",\n  \"tok\": \"ab==\"\n}"
+        );
+    }
+
+    #[test]
+    fn parse_dotenv_carries_bare_multiline_pem() {
+        let text = "K=-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----\n";
+        let p = parse_dotenv_pairs(text).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].1.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(p[0].1.ends_with("-----END RSA PRIVATE KEY-----"));
+        assert_eq!(p[0].1.lines().count(), 3);
+    }
+
+    #[test]
+    fn parse_dotenv_blank_line_closes_a_bare_value() {
+        // A stray line after the value has ended is an error, not a silent
+        // append onto the secret above it.
+        assert!(parse_dotenv_pairs("A=1\n\noops\n").is_err());
+    }
+
+    #[test]
+    fn parse_dotenv_comment_closes_a_bare_value() {
+        assert!(parse_dotenv_pairs("A=1\n# note\noops\n").is_err());
+    }
+
+    #[test]
+    fn parse_dotenv_still_rejects_a_leading_bad_name() {
+        // Nothing is open, so this stays the fail-closed error of story #37.
+        assert!(parse_dotenv_pairs("MY-VAR=secret\n").is_err());
+    }
+
+    #[test]
+    fn parse_dotenv_double_quoted_value_does_not_absorb_later_lines() {
+        let p = parse_dotenv_pairs("A=\"one\ntwo\"\nB=2\n").unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], ("A".into(), "one\ntwo".into()));
+        assert_eq!(p[1], ("B".into(), "2".into()));
     }
 
     #[test]
