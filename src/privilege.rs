@@ -14,8 +14,6 @@ pub enum ReexecDecision {
     Reexec {
         service: String,
         launcher: PathBuf,
-        /// Env assignments passed via `sudo … env KEY=val …`.
-        forward_env: Vec<(String, String)>,
         /// Original argv as typed (after argv0), for sudoers fidelity.
         argv: Vec<String>,
     },
@@ -101,15 +99,23 @@ pub fn plan_service_user_reexec(facts: &ReexecFacts) -> ReexecDecision {
     }
 
     let launcher = resolve_launcher(&facts.argv0, &facts.bin_dir);
-    let mut forward_env = vec![("VAULTED_AGENT_CALLER_CWD".into(), facts.caller_cwd.clone())];
-    if let Some(c) = &facts.config_dir {
-        forward_env.push(("VAULTED_AGENT_CONFIG_DIR".into(), c.clone()));
-    }
 
+    // Nothing is forwarded across the hop, deliberately.
+    //
+    // VAULTED_AGENT_CONFIG_DIR must not cross it. Forwarding it let a caller
+    // point the elevated side at a config directory they control, and a harness
+    // file there names its own `command =`. That turns any grant of this
+    // launcher into arbitrary execution as the service account, no matter which
+    // harness the grant was meant to allow. sudo's env_reset drops the variable
+    // on its own; the fix is simply not to put it back. The elevated side always
+    // reads the machine config directory.
+    //
+    // VAULTED_AGENT_CALLER_CWD does not need forwarding: sudo leaves the working
+    // directory alone, so the re-executed process starts in the caller's cwd and
+    // main derives the value from it exactly as it did on the first pass.
     ReexecDecision::Reexec {
         service: service.to_string(),
         launcher,
-        forward_env,
         argv: facts.orig_argv.clone(),
     }
 }
@@ -121,14 +127,16 @@ pub fn apply_reexec(decision: ReexecDecision) -> Result<()> {
         ReexecDecision::Reexec {
             service,
             launcher,
-            forward_env,
             argv,
         } => {
+            // The command handed to sudo is the launcher itself, so a sudoers
+            // rule can name it. Prefixing `env KEY=val` made the matched command
+            // /usr/bin/env instead, so a rule naming this binary never matched:
+            // it appeared to work only for callers who already held blanket
+            // sudo, and the obvious repair -- granting `env` to the service
+            // account -- is a root shell for the asking.
             let mut cmd = Command::new("sudo");
-            cmd.arg("-u").arg(&service).arg("env");
-            for (k, v) in &forward_env {
-                cmd.arg(format!("{k}={v}"));
-            }
+            cmd.arg("-u").arg(&service);
             cmd.arg(&launcher);
             for a in &argv {
                 cmd.arg(a);
@@ -187,23 +195,34 @@ mod tests {
     }
 
     #[test]
-    fn reexec_preserves_argv_and_forwards_env() {
+    fn reexec_preserves_argv_exactly() {
         let f = base_facts();
         match plan_service_user_reexec(&f) {
             ReexecDecision::Reexec {
                 service,
                 launcher,
-                forward_env,
                 argv,
             } => {
                 assert_eq!(service, "conductor");
                 assert_eq!(launcher, PathBuf::from("/usr/local/bin/vaulted-agent"));
-                assert!(forward_env
-                    .iter()
-                    .any(|(k, v)| k == "VAULTED_AGENT_CALLER_CWD" && v == "/work"));
-                assert!(forward_env
-                    .iter()
-                    .any(|(k, v)| k == "VAULTED_AGENT_CONFIG_DIR" && v == "/etc/vaulted-agent"));
+                // argv reaches sudo unchanged and unprefixed, so a sudoers rule
+                // can name the launcher and even a single harness.
+                assert_eq!(argv, vec!["claude", "--resume", "x"]);
+            }
+            other => panic!("expected Reexec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn caller_config_dir_does_not_cross_the_hop() {
+        // A caller-supplied config dir must not reach the elevated side: a
+        // harness file there names its own `command =`, which would make any
+        // grant of this launcher arbitrary execution as the service account.
+        let mut f = base_facts();
+        f.config_dir = Some("/tmp/attacker-controlled".into());
+        match plan_service_user_reexec(&f) {
+            ReexecDecision::Reexec { argv, .. } => {
+                assert!(!argv.iter().any(|a| a.contains("attacker-controlled")));
                 assert_eq!(argv, vec!["claude", "--resume", "x"]);
             }
             other => panic!("expected Reexec, got {other:?}"),

@@ -283,6 +283,18 @@ pub fn load_service_user(paths: &Paths) -> Option<String> {
     load_default(paths, "service_user")
 }
 
+/// Whether `run` may execute an arbitrary command on a machine that has a
+/// service account configured. Defaults to false.
+///
+/// Deliberately config-file only, with no environment override: the whole point
+/// is to bound what a caller can ask for, and a caller controls their own
+/// environment.
+pub fn load_allow_run(paths: &Paths) -> bool {
+    load_default(paths, "allow_run")
+        .map(|v| matches!(v.trim(), "yes" | "true" | "1"))
+        .unwrap_or(false)
+}
+
 /// Default vault backend when harness omits backend=.
 pub fn load_default_backend(paths: &Paths) -> Backend {
     if let Ok(v) = std::env::var("VAULTED_AGENT_DEFAULT_BACKEND") {

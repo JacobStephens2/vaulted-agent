@@ -335,9 +335,41 @@ Both lines are needed, since the first matches only the bare invocation. Two
 rules with a wildcard is more to get right than one path, which is why the
 symlinks stay the recommendation for this case.
 
+Every rule above names this launcher because that is the command the re-exec
+hands to sudo. It matters that nothing is prefixed to it: an earlier version put
+`env KEY=val …` in front, so the command sudo matched was `/usr/bin/env` and a
+rule naming the launcher never matched at all. It looked like it worked, because
+the people testing it already held blanket sudo. If you are carrying such a rule
+forward from before v0.4.3, check it actually matches — `sudo -l -U alice`.
+
+### `run` and delegation
+
+`run` takes its command from the caller rather than from a `command =` line that
+root wrote, so it is the one subcommand that turns this launcher into a general
+executor. Granting someone `vaulted-agent` for one harness would otherwise also
+grant them `run -- /bin/sh` as the service account.
+
+So `run` is **disabled whenever `service_user` is set**, which is the signal that
+the launcher is delegated. On a single-operator machine with no service account
+it is unchanged, since there it grants nothing the caller did not already have.
+To restore it deliberately:
+
+```conf
+# /etc/vaulted-agent/defaults.conf
+allow_run = yes
+```
+
+For the same reason `VAULTED_AGENT_CONFIG_DIR` is **not** carried across the hop.
+A caller-chosen config directory would let anyone entitled to one harness supply
+their own harness file — and a harness file names its own `command =`. The
+elevated side always reads the machine config directory. Point
+`VAULTED_AGENT_CONFIG_DIR` at a test tree and it still works exactly as before
+when no elevation happens.
+
 Finally, resist giving the service account broad sudo. It is the account your
 agent runs as, and `agent ALL=(ALL) NOPASSWD: ALL` makes every manifest
-boundary above it decorative.
+boundary above it decorative — and turns each of the paragraphs above from a
+hardening measure into the only thing standing between a harness grant and root.
 
 Maintainers: the `curl … | bash` one-liner serves `install-remote.sh` from this
 repo, and refreshing it has an ordering constraint worth knowing before you cut
