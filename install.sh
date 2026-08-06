@@ -530,8 +530,10 @@ if (( ! NO_AUTO_HARNESS )); then
     printf '  %-8s not found (skipped)\n' grok
   fi
   # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
+  # --auto is Kimi's fully autonomous permission mode, the counterpart to
+  # claude's --permission-mode auto above.
   if p="$(find_user_bin kimi)"; then
-    write_auto_harness kimi "$p" "kimi"
+    write_auto_harness kimi "$p" "kimi --auto"
     found_any=1
   else
     printf '  %-8s not found (skipped)\n' kimi
