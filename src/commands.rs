@@ -428,6 +428,34 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             issues += 1;
         } else {
             println!("  manifest syntax ok ({})", man_path.display());
+            // Syntax is dotenv shape and nothing more. A reference that op's
+            // scanner cannot read passes it and then aborts the injection of
+            // the whole manifest at launch, so a report that stops at syntax
+            // hands out a green that the next launch immediately contradicts.
+            // Checked offline: this reads the file, never the vault.
+            if be == Backend::OnePassword {
+                let mut unparseable: Vec<String> = fs::read_to_string(&man_path)
+                    .ok()
+                    .and_then(|t| parse_dotenv_keys(&t).ok())
+                    .map(|m| {
+                        m.into_iter()
+                            .filter(|(_, v)| !refs::op_reference_is_parseable(v))
+                            .map(|(k, _)| k)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !unparseable.is_empty() {
+                    unparseable.sort();
+                    println!(
+                        "  ERROR: op cannot parse {} reference(s), which aborts the whole \
+                         manifest, not just these: {}",
+                        unparseable.len(),
+                        unparseable.join(", ")
+                    );
+                    println!("  Re-run `vaulted-agent refresh` to rewrite them.");
+                    issues += 1;
+                }
+            }
             // Syntactically fine and completely empty is the shape `setup`
             // leaves behind when it auto-detects an agent before a vault is
             // wired: a comments-only refs file. The harness then launches
