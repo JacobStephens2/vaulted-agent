@@ -43,7 +43,16 @@ fn load_bws_with(paths: &Paths, mode: AuthMode) -> Result<ManagerToken> {
 }
 
 pub fn cmd_version() {
-    println!("vaulted-agent {}", env!("CARGO_PKG_VERSION"));
+    // The git description is appended when a repository was present at build
+    // time, so a build patched in place is distinguishable from the release it
+    // started as. Release tarballs have no repository and print the bare
+    // version, exactly as before.
+    let build = env!("VA_BUILD_DESC");
+    if build.is_empty() {
+        println!("vaulted-agent {}", env!("CARGO_PKG_VERSION"));
+    } else {
+        println!("vaulted-agent {} ({build})", env!("CARGO_PKG_VERSION"));
+    }
 }
 
 pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
@@ -371,6 +380,23 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             issues += 1;
         } else {
             println!("  manifest syntax ok ({})", man_path.display());
+            // Syntactically fine and completely empty is the shape `setup`
+            // leaves behind when it auto-detects an agent before a vault is
+            // wired: a comments-only refs file. The harness then launches
+            // perfectly, with nothing in its environment, and the agent fails
+            // later for reasons that look nothing like a launcher problem.
+            // Say it here instead.
+            let defined = fs::read_to_string(&man_path)
+                .ok()
+                .and_then(|t| parse_dotenv_keys(&t).ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if defined == 0 {
+                println!(
+                    "  WARN: manifest defines no variables, so this harness launches with no secrets (finish `vaulted-agent setup`, or point it at a real manifest)"
+                );
+                warn += 1;
+            }
         }
         match be {
             Backend::Bitwarden if !have_bws => {

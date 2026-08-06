@@ -198,6 +198,18 @@ impl Harness {
                     command = val.split_whitespace().map(|s| s.to_string()).collect();
                 }
                 "arg" => extra_args.push(val.to_string()),
+                // These are real settings, just not per-harness ones. Saying
+                // only "unknown key" sends people looking for a typo in a line
+                // that is spelled correctly and merely in the wrong file.
+                "service_user" | "auth_mode" | "default_backend" | "allow_run" => {
+                    return Err(Error::HarnessParse {
+                        name: name.to_string(),
+                        lineno: lineno + 1,
+                        msg: format!(
+                            "'{key}' is a launcher-wide setting: move it to defaults.conf (it is not a per-harness key)"
+                        ),
+                    });
+                }
                 _ => {
                     return Err(Error::HarnessParse {
                         name: name.to_string(),
@@ -472,6 +484,23 @@ mod tests {
     #[test]
     fn parse_dotenv_rejects_bad_var_name() {
         assert!(parse_dotenv_keys("MY-VAR=secret\n").is_err());
+    }
+
+    #[test]
+    fn launcher_wide_key_in_a_harness_says_where_it_belongs() {
+        let err = Harness::parse("claude", "service_user = conductor\ncommand = claude\n")
+            .expect_err("service_user is not a harness key");
+        let msg = err.to_string();
+        assert!(msg.contains("defaults.conf"), "{msg}");
+        // The old text was a bare "unknown key", which reads as a typo in a
+        // line that is spelled correctly and merely in the wrong file.
+        assert!(!msg.contains("unknown key"), "{msg}");
+    }
+
+    #[test]
+    fn a_genuinely_unknown_key_still_reads_as_unknown() {
+        let err = Harness::parse("claude", "wat = 1\ncommand = claude\n").expect_err("unknown key");
+        assert!(err.to_string().contains("unknown key"), "{err}");
     }
 
     #[test]
