@@ -99,5 +99,5 @@ jobs:
 
             Install pin:
             ```bash
-            VAULTED_AGENT_VERSION=${{ github.ref_name }} curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+            VAULTED_AGENT_VERSION=${{ github.ref_name }} curl -fsSL https://vaultedagent.com/install.sh | bash
             ```
