@@ -1,15 +1,16 @@
 # Hosting the bootstrap installer
 
 Maintainer procedure for refreshing the script served at
-`https://stephens.page/vaulted-agent/install.sh`, the target of the `curl … | bash`
-one-liner in the README.
+`https://vaultedagent.com/install.sh`, the target of the `curl … | bash`
+one-liner in the README. (`https://stephens.page/vaulted-agent/install.sh`
+301-redirects there.)
 
 ## The contract
 
 | | |
 |---|---|
 | file in this repo | `install-remote.sh` |
-| served as | `https://stephens.page/vaulted-agent/install.sh` |
+| served as | `https://vaultedagent.com/install.sh` |
 | served mode | static file, no execution on the host |
 
 The repo ships **two** installers and hosting the wrong one breaks every install:
@@ -70,7 +71,7 @@ touching it:
 grep -rn 'vaulted-agent' /etc/nginx /etc/httpd /etc/apache2 2>/dev/null
 find /var/www -path '*vaulted-agent*' 2>/dev/null
 
-curl -fsSL https://stephens.page/vaulted-agent/install.sh | sha256sum
+curl -fsSL https://vaultedagent.com/install.sh | sha256sum
 sha256sum /path/you/found        # must match; if not, wrong file or a cache in front
 ```
 
@@ -92,6 +93,8 @@ grep -q 'detect_assets' "$tmp" && echo ok   # proves it is the bootstrap, not in
 sha256sum "$tmp"                            # record this; you verify it again after deploy
 
 install -m 0644 "$tmp" /path/to/install.sh  # match the previous mode if it differed
+# Live path today: /var/www/stephens.page/vaulted-agent/install.sh
+# (DocumentRoot for vaultedagent.com)
 ```
 
 ## Verify after deploy
@@ -100,8 +103,8 @@ Check the live URL, not the file on disk. A stale CDN or proxy cache is silent
 and would leave every new install broken:
 
 ```bash
-curl -fsSL https://stephens.page/vaulted-agent/install.sh | sha256sum   # matches $tmp
-curl -fsSL https://stephens.page/vaulted-agent/install.sh | wc -c
+curl -fsSL https://vaultedagent.com/install.sh | sha256sum   # matches $tmp
+curl -fsSL https://vaultedagent.com/install.sh | wc -c
 ```
 
 Then smoke-test the asset the script would actually select:

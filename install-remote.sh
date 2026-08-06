@@ -4,7 +4,7 @@
 #
 # Thin installer meant to be hosted at a short URL and piped to bash:
 #
-#   curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+#   curl -fsSL https://vaultedagent.com/install.sh | bash
 #
 # What it does:
 #   1. Resolves a version (VAULTED_AGENT_VERSION, or the latest GitHub release)
@@ -13,15 +13,15 @@
 #
 # Pin a version (recommended for shared hosts / repeatable deploys):
 #
-#   VAULTED_AGENT_VERSION=v0.3.0 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+#   VAULTED_AGENT_VERSION=v0.3.0 curl -fsSL https://vaultedagent.com/install.sh | bash
 #
 # Pass flags through to install.sh after --:
 #
-#   curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash -s -- --user agent
+#   curl -fsSL https://vaultedagent.com/install.sh | bash -s -- --user agent
 #
 # Prefer not to pipe to bash? Fetch, read, then run:
 #
-#   curl -fsSL -o /tmp/vaulted-agent-install.sh https://stephens.page/vaulted-agent/install.sh
+#   curl -fsSL -o /tmp/vaulted-agent-install.sh https://vaultedagent.com/install.sh
 #   less /tmp/vaulted-agent-install.sh
 #   bash /tmp/vaulted-agent-install.sh
 #

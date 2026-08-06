@@ -44,7 +44,7 @@
 
 ```bash
 # From a release (recommended)
-VAULTED_AGENT_VERSION=v0.4.0 curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+VAULTED_AGENT_VERSION=v0.4.0 curl -fsSL https://vaultedagent.com/install.sh | bash
 
 # From a checkout with Rust
 cargo build --release --locked && sudo ./install.sh --backend bitwarden --auth-mode file

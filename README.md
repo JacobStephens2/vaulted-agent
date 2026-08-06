@@ -8,7 +8,7 @@ pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt
 auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
-**macOS and Linux.** Product page: [stephens.page/vaulted-agent](https://stephens.page/vaulted-agent) ·
+**macOS and Linux.** Product page: [vaultedagent.com](https://vaultedagent.com/) ·
 Latest: [v0.4.2](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.2)
 (Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
@@ -26,7 +26,7 @@ Three steps. Rust binary on macOS and Linux.
 ### 1. Install
 
 ```bash
-curl -fsSL https://stephens.page/vaulted-agent/install.sh | bash
+curl -fsSL https://vaultedagent.com/install.sh | bash
 ```
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
