@@ -148,6 +148,60 @@ pub fn validate_manifest_text(text: &str, backend: Backend) -> Result<Vec<(Strin
     Ok(out)
 }
 
+/// Every problem in a manifest, each with its line number.
+///
+/// `validate_manifest_text` stops at the first error, which is right for a
+/// pre-flight gate: one problem means the launch must not proceed. An editor
+/// wants the opposite — show everything wrong so the operator fixes it in one
+/// pass rather than rediscovering the next fault on each save.
+///
+/// The `op://` check earns its place here. A reference `op inject` cannot read
+/// does not fail alone: the scanner stops at the offending character, the
+/// reference comes out truncated, and the whole injection aborts. One typo
+/// therefore costs every other variable in the file, so it is worth catching
+/// while the editor is still open.
+pub fn manifest_problems(text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+
+    // Structural faults (unbalanced quotes, a value that runs off the end) come
+    // from the same parser resolve uses, so the editor agrees with the launch.
+    if let Err(e) = crate::config::parse_dotenv_pairs(text) {
+        problems.push(format!("{e}"));
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((var, value)) = line.split_once('=') else {
+            continue; // a continuation line of a quoted value, or noise
+        };
+        let (var, value) = (var.trim(), value.trim());
+        if var.is_empty() || !validate_var_name(var) {
+            problems.push(format!(
+                "line {}: '{var}' is not a valid variable name",
+                n + 1
+            ));
+            continue;
+        }
+        if seen.iter().any(|s| s == var) {
+            problems.push(format!("line {}: {var} is set more than once", n + 1));
+        } else {
+            seen.push(var.to_string());
+        }
+        if value.starts_with("op://") && !crate::refs::op_reference_is_parseable(value) {
+            problems.push(format!(
+                "line {}: {var} has a reference op cannot parse ({value}) \u{2014} \
+                 one such reference aborts the whole manifest, not just this line",
+                n + 1
+            ));
+        }
+    }
+    problems
+}
+
 pub fn validate_manifest_file(path: &Path, backend: Backend) -> Result<Vec<(String, String)>> {
     let text = std::fs::read_to_string(path).map_err(|e| Error::Io {
         path: path.to_path_buf(),

@@ -265,6 +265,7 @@ fn dispatch_mgmt(
         "refresh" => commands::cmd_refresh(paths, rest),
         "uninstall" => commands::cmd_uninstall(rest),
         "run" => commands::cmd_run(paths, rest, force_prompt),
+        "edit-manifest" => commands::cmd_edit_manifest(paths, rest),
         "pick" => match commands::cmd_pick(paths) {
             Ok(chosen) => {
                 commands::cmd_launch_harness(paths, &chosen, rest, force_prompt, manifest_override)

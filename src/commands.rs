@@ -721,6 +721,46 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                             .collect()
                     })
                     .unwrap_or_default();
+                // `op inject` resolves every reference in the file, comments
+                // included, so an illustrative one in a comment is a real
+                // lookup — and a failed lookup aborts the injection of the
+                // whole manifest. Nothing above sees this: the dotenv parser
+                // drops comments before any of it runs, so a file that cannot
+                // inject at all was reported healthy. Observed in the wild
+                // after someone wrote `op://.../field` into a header note.
+                let mut in_comments: Vec<usize> = Vec::new();
+                if let Ok(text) = fs::read_to_string(&man_path) {
+                    for (n, raw) in text.lines().enumerate() {
+                        let line = raw.trim_start();
+                        if !line.starts_with('#') {
+                            continue;
+                        }
+                        // Same scanner op uses: it reads to the end of a
+                        // reference-shaped run, so the prose after it is part
+                        // of what fails to resolve.
+                        for tok in line.split_whitespace() {
+                            if tok.starts_with("op://") {
+                                in_comments.push(n + 1);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !in_comments.is_empty() {
+                    println!(
+                        "  ERROR: {} comment line(s) contain a secret reference ({}). \
+                         `op inject` resolves references in comments too, and one that \
+                         fails aborts the whole manifest — every variable, not just \
+                         these. Remove the reference or reword the comment.",
+                        in_comments.len(),
+                        in_comments
+                            .iter()
+                            .map(|n| format!("line {n}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    issues += 1;
+                }
                 if !unparseable.is_empty() {
                     unparseable.sort();
                     println!(
@@ -987,6 +1027,8 @@ fn refresh_bitwarden(
 
     let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
 
+    ensure_manifest_writable(&path)?;
+
     let indices = if take_all {
         None // all
     } else if !std::io::IsTerminal::is_terminal(&io::stdin()) {
@@ -1037,6 +1079,47 @@ fn refresh_bitwarden(
     Ok(())
 }
 
+/// Fail now if the refs file cannot be written later.
+///
+/// Manifests live in a root-owned directory, so `refresh` run as the operator
+/// or as the service user cannot write one. Nothing about that is visible from
+/// the menu, and the expensive part sits between the two points.
+fn ensure_manifest_writable(path: &Path) -> Result<()> {
+    let writable = if path.is_file() {
+        fs::OpenOptions::new().append(true).open(path).is_ok()
+    } else {
+        // Not there yet, so the directory is what must accept a new file.
+        // There is no portable "may I create here" short of trying.
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let probe = dir.join(".vaulted-agent-write-probe");
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(_) => {
+                let _ = fs::remove_file(&probe);
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    if writable {
+        return Ok(());
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "vaulted-agent".to_string());
+    Err(Error::Message(format!(
+        "cannot write {} as `{}`.\n  \
+         Manifests are root-owned. Re-run as root, by full path — sudo's \
+         secure_path will not have the launcher on it:\n    \
+         sudo {exe} refresh",
+        path.display(),
+        crate::privilege::current_user(),
+    )))
+}
+
 fn load_op_with(paths: &Paths, mode: AuthMode) -> Result<ManagerToken> {
     auth::load_manager_token(paths, mode, TokenKind::Op, force_prompt())
 }
@@ -1080,6 +1163,12 @@ fn refresh_onepassword(
     };
     let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
 
+    // Checked before the menu, not after the reads. Expanding every item costs
+    // a round trip apiece (~a minute on a 65-item vault); discovering the file
+    // is root-owned only at the write meant paying all of that to learn
+    // something knowable at the start.
+    ensure_manifest_writable(&path)?;
+
     // Patterns already recorded in the manifest, plus any given on this run.
     // Reading them here rather than inside the writer keeps the filtering
     // visible: what was skipped is reported below, never silently dropped.
@@ -1102,7 +1191,7 @@ fn refresh_onepassword(
             println!("  {:2}) {}  ({})", i + 1, title, vault);
         }
         println!();
-        eprint!("Items to include (e.g. 1,4,7 - blank for all): ");
+        eprint!("Items to include (e.g. 1,4,7 or 1-5,9 - blank for all): ");
         let _ = io::stderr().flush();
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
@@ -1906,6 +1995,243 @@ pub fn usage(paths: &Paths) {
 }
 
 /// Reserved management command names (unless a harness .conf of that name exists).
+/// Files under `manifests/` that are candidates to edit.
+///
+/// Backups and the launcher's own shipped samples are skipped. Offering one in
+/// a menu invites editing a file nothing reads, and the operator only finds out
+/// when the change has no effect.
+fn editable_manifests(paths: &Paths) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(entries) = fs::read_dir(&paths.manifest_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let skip = name.ends_with(".example")
+            || name.ends_with('~')
+            || name.contains(".bak-")
+            || name.contains(".bak.")
+            || name.ends_with(".orig")
+            || name.starts_with('.');
+        if !skip {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The editor to hand the file to: $VISUAL, then $EDITOR, then vi.
+fn editor_command() -> String {
+    for key in ["VISUAL", "EDITOR"] {
+        if let Ok(v) = env::var(key) {
+            if !v.trim().is_empty() {
+                return v;
+            }
+        }
+    }
+    "vi".to_string()
+}
+
+/// Open `path` in the operator's editor and wait.
+///
+/// A manifest is root-owned and the operator usually is not, so the write goes
+/// through `sudoedit` when we cannot write it ourselves: it copies the file out,
+/// runs the editor as the caller, and copies it back. Running the editor itself
+/// as root would be the wrong trade — `vi` can spawn a shell, so it would turn
+/// "may edit a manifest" into "may become root".
+fn open_in_editor(path: &Path) -> Result<()> {
+    let editor = editor_command();
+    let writable = fs::OpenOptions::new().append(true).open(path).is_ok();
+    let mut cmd = if writable {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c")
+            .arg(format!("{editor} \"$1\"",))
+            .arg("sh")
+            .arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("sudoedit");
+        c.env("SUDO_EDITOR", &editor).arg(path);
+        c
+    };
+    let status = cmd.status().map_err(|e| {
+        Error::Message(format!(
+            "could not start the editor ({e}). Set $EDITOR, or edit {} directly.",
+            path.display()
+        ))
+    })?;
+    if !status.success() {
+        return Err(Error::Message(format!(
+            "editor exited without saving ({}); {} is unchanged",
+            status,
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Print the manifests and let the operator choose one.
+fn pick_manifest(paths: &Paths) -> Result<PathBuf> {
+    let candidates = editable_manifests(paths);
+    if candidates.is_empty() {
+        return Err(Error::Message(format!(
+            "no manifests in {}",
+            paths.manifest_dir.display()
+        )));
+    }
+    // Which harness uses which file is the fact that decides whether an edit is
+    // safe, so it belongs in the menu rather than a page of documentation.
+    let harnesses: Vec<(String, String)> = list_harness_names(paths)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|n| Harness::load(paths, &n).ok().map(|h| (n, h.manifest)))
+        .collect();
+
+    println!("Manifests in {}:", paths.manifest_dir.display());
+    for (i, path) in candidates.iter().enumerate() {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let count = fs::read_to_string(path)
+            .ok()
+            .and_then(|t| crate::config::parse_dotenv_keys(&t).ok())
+            .map(|m| m.len());
+        let users: Vec<&str> = harnesses
+            .iter()
+            .filter(|(_, m)| m.as_str() == name)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        let used = if users.is_empty() {
+            "unused".to_string()
+        } else {
+            format!("used by {}", users.join(", "))
+        };
+        match count {
+            Some(n) => println!("  {:2}) {name}  ({n} variable(s), {used})", i + 1),
+            // A file that will not parse is exactly the one worth opening.
+            None => println!("  {:2}) {name}  (unreadable, {used})", i + 1),
+        }
+    }
+    println!();
+    eprint!("Edit which? [1-{}]: ", candidates.len());
+    let _ = io::stderr().flush();
+    let line = read_tty_line()?;
+    let choice: usize = line
+        .trim()
+        .parse()
+        .map_err(|_| Error::Message(format!("not a number: {}", line.trim())))?;
+    if choice == 0 || choice > candidates.len() {
+        return Err(Error::Message(format!("no manifest {choice}")));
+    }
+    Ok(candidates[choice - 1].clone())
+}
+
+/// `vaulted-agent edit-manifest [name]` — open a manifest, then check it.
+///
+/// The point is not that `$EDITOR /etc/vaulted-agent/manifests/x` is long to
+/// type. It is that the launcher knows where its manifests are, which ones a
+/// harness actually reads, and what makes one fail at launch — and none of that
+/// is available to a bare editor.
+pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
+    let mut wanted: Option<String> = None;
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!(
+                    "usage: vaulted-agent edit-manifest [manifest]\n\
+                     Open a manifest in $EDITOR (vi by default) and check it on save.\n\
+                     With no argument, lists the manifests and asks which to edit.\n\
+                     Uses sudoedit when the file is not yours to write."
+                );
+                return Ok(());
+            }
+            s if s.starts_with('-') => {
+                return Err(Error::Message(format!(
+                    "edit-manifest: unknown option '{s}'"
+                )));
+            }
+            s => {
+                if wanted.is_some() {
+                    return Err(Error::Message(format!(
+                        "edit-manifest: extra argument '{s}'"
+                    )));
+                }
+                wanted = Some(s.to_string());
+            }
+        }
+    }
+
+    let path = match wanted {
+        Some(name) => {
+            if name.contains('/') || name == ".." || name == "." {
+                return Err(Error::Message(
+                    "edit-manifest: give a manifest name, not a path".into(),
+                ));
+            }
+            let path = paths.manifest_dir.join(&name);
+            if !path.is_file() {
+                // A name that does not exist is far more often a typo than a
+                // new file, so creating one is never the silent default.
+                return Err(Error::Message(format!(
+                    "no manifest named '{name}' in {}. Run `vaulted-agent edit-manifest` \
+                     with no argument to see what is there.",
+                    paths.manifest_dir.display()
+                )));
+            }
+            path
+        }
+        None => {
+            if !can_prompt_user() {
+                return Err(Error::Message(
+                    "edit-manifest: no terminal to choose from — name the manifest".into(),
+                ));
+            }
+            pick_manifest(paths)?
+        }
+    };
+
+    loop {
+        open_in_editor(&path)?;
+        let text = fs::read_to_string(&path).map_err(|e| Error::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let problems = crate::validate::manifest_problems(&text);
+        if problems.is_empty() {
+            let n = crate::config::parse_dotenv_keys(&text)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            println!(
+                "{}: {n} variable(s), no problems found.",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+            return Ok(());
+        }
+
+        eprintln!("\n{} problem(s) in {}:", problems.len(), path.display());
+        for p in &problems {
+            eprintln!("  {p}");
+        }
+        // Saved already — sudoedit wrote it back before we could look. Offer the
+        // editor again rather than pretending the file is still clean.
+        if !can_prompt_user() {
+            return Err(Error::Message(
+                "manifest saved with problems; re-run edit-manifest to fix".into(),
+            ));
+        }
+        eprint!("\nEdit again? [Y/n]: ");
+        let _ = io::stderr().flush();
+        let answer = read_tty_line()?;
+        if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+            eprintln!("Left as saved. A launch using this manifest will fail until it is fixed.");
+            return Ok(());
+        }
+    }
+}
+
 pub fn is_reserved(name: &str, paths: &Paths) -> bool {
     let reserved = [
         "version",
@@ -1919,6 +2245,7 @@ pub fn is_reserved(name: &str, paths: &Paths) -> bool {
         "uninstall",
         "pick",
         "run",
+        "edit-manifest",
         "help",
         "--help",
         "-h",
