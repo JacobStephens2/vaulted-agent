@@ -44,9 +44,9 @@ fn resolve_workdir(harness: &Harness, caller_cwd: &Path) -> Result<PathBuf> {
 
 /// True when the process can search (traverse) `path` — execute bit / ACL, not
 /// necessarily list. `open()` would demand read permission and false-negative a
-/// `setfacl …:x` fix (issue #56).
+/// `setfacl …:x` fix (issue #56). Shared by launch preflight and doctor (#58).
 #[cfg(unix)]
-fn path_is_traversable(path: &Path) -> std::io::Result<()> {
+pub(crate) fn path_is_traversable(path: &Path) -> std::io::Result<()> {
     // `test -x` follows the same search rules as path resolution.
     let status = Command::new("test").arg("-x").arg(path).status()?;
     if status.success() {
@@ -60,8 +60,49 @@ fn path_is_traversable(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn path_is_traversable(path: &Path) -> std::io::Result<()> {
+pub(crate) fn path_is_traversable(path: &Path) -> std::io::Result<()> {
     fs::metadata(path).map(|_| ())
+}
+
+/// Paths a `workdir = caller` launch is likely to need, for doctor probes.
+/// Always includes the caller's cwd; when `SUDO_USER` is set (re-exec from an
+/// operator), also their home directory.
+pub(crate) fn caller_probe_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(c) = env::var("VAULTED_AGENT_CALLER_CWD") {
+        if !c.is_empty() {
+            out.push(PathBuf::from(c));
+        }
+    } else if let Ok(c) = env::current_dir() {
+        out.push(c);
+    }
+    // After sudo -u service, HOME is usually the service account's. SUDO_USER
+    // still names the operator; their home is the ordinary 0700 failure case.
+    if let Ok(user) = env::var("SUDO_USER") {
+        if let Some(home) = home_dir_for_user(&user) {
+            if !out.iter().any(|p| p == &home) {
+                out.push(home);
+            }
+        }
+    }
+    out
+}
+
+fn home_dir_for_user(user: &str) -> Option<PathBuf> {
+    let out = Command::new("getent")
+        .args(["passwd", user])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    // name:x:uid:gid:gecos:home:shell
+    let home = line.trim().split(':').nth(5)?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home))
 }
 
 /// Confirm the effective user can enter the resolved workdir before exec.

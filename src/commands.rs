@@ -515,13 +515,10 @@ fn report_token_file(
 
 /// What, if anything, to say about a harness's `workdir`.
 ///
-/// `workdir=caller` keeps sessions keyed to the directory the operator was
-/// standing in, which is what an agent wants -- but only while the launch stays
-/// in that operator's account. Under `service_user` the agent runs as someone
-/// else, and a home directory is conventionally mode 0700, so the service
-/// account cannot traverse the cwd and the launch dies at exec with a bare
-/// EACCES that names nothing. Recommending `caller` there points at the failure
-/// rather than away from it, so the advice inverts once a service user is set.
+/// `workdir=caller` + `service_user` used to always warn from config shape
+/// alone (issue #58). That cried wolf once homes had `setfacl …:x`. Doctor
+/// already runs as the service account, so probe real paths and warn only when
+/// traversal actually fails — same primitive as the launch preflight (#56).
 fn workdir_warning(
     service_user: Option<&str>,
     workdir: Option<&str>,
@@ -530,10 +527,53 @@ fn workdir_warning(
     let is_agent = matches!(harness, "claude" | "codex" | "grok" | "kimi");
     let wd_is_caller = workdir == Some("caller");
     match (service_user, wd_is_caller) {
-        (Some(svc), true) => Some(format!(
-            "workdir=caller with service_user={svc}: launching from a directory {svc} cannot traverse (a 0700 home) fails at exec; \
-             prefer an absolute workdir, or `setfacl -m u:{svc}:x ~` for traverse-only access"
-        )),
+        (Some(svc), true) => {
+            let failed: Vec<_> = launch::caller_probe_paths()
+                .into_iter()
+                .filter(|p| launch::path_is_traversable(p).is_err())
+                .collect();
+            if failed.is_empty() {
+                return None;
+            }
+            let paths = failed
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let example = failed[0].display();
+            Some(format!(
+                "workdir=caller with service_user={svc}, and {svc} cannot enter {paths} \
+                 (Permission denied). Launching from there fails at exec. \
+                 Fix: setfacl -m u:{svc}:x {example}   # traverse only — does not allow listing \
+                 (or set an absolute workdir {svc} can enter)"
+            ))
+        }
+        (Some(svc), false) => {
+            // Absolute / fixed workdir: probe the resolved path when we can.
+            let raw = workdir.filter(|s| !s.is_empty())?;
+            if raw == "caller" {
+                return None;
+            }
+            let path = {
+                let s = if let Some(rest) = raw.strip_prefix("$HOME") {
+                    format!("{}{rest}", std::env::var("HOME").unwrap_or_default())
+                } else if let Some(rest) = raw.strip_prefix("${HOME}") {
+                    format!("{}{rest}", std::env::var("HOME").unwrap_or_default())
+                } else {
+                    raw.to_string()
+                };
+                std::path::PathBuf::from(s)
+            };
+            if launch::path_is_traversable(&path).is_ok() {
+                return None;
+            }
+            Some(format!(
+                "workdir={raw} with service_user={svc}, and {svc} cannot enter {} \
+                 (Permission denied). Fix: setfacl -m u:{svc}:x {} or pick a path {svc} can enter",
+                path.display(),
+                path.display()
+            ))
+        }
         (None, false) if is_agent => Some("agent harness without workdir=caller".to_string()),
         _ => None,
     }
@@ -1788,18 +1828,60 @@ mod tests {
     }
 
     #[test]
-    fn workdir_caller_is_warned_about_under_a_service_user() {
-        let w = workdir_warning(Some("conductor"), Some("caller"), "claude")
-            .expect("caller + service_user should warn");
-        assert!(w.contains("workdir=caller"));
-        assert!(w.contains("conductor"));
+    fn workdir_caller_is_silent_when_probe_paths_are_traversable() {
+        // Test cwd is always traversable; config shape alone must not warn.
+        assert_eq!(
+            workdir_warning(Some("conductor"), Some("caller"), "claude"),
+            None
+        );
     }
 
     #[test]
-    fn absolute_workdir_is_fine_under_a_service_user() {
-        // The old rule warned here, steering people toward the broken setting.
+    fn workdir_caller_warns_only_when_a_probe_path_fails() {
+        let uid = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .unwrap_or(0);
+        if uid == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("no-enter");
+        fs::create_dir(&blocked).unwrap();
+        let mut perms = fs::metadata(&blocked).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o000);
+        fs::set_permissions(&blocked, perms).unwrap();
+
+        std::env::set_var("VAULTED_AGENT_CALLER_CWD", &blocked);
+        let w = workdir_warning(Some("conductor"), Some("caller"), "claude")
+            .expect("blocked caller path should warn");
+        assert!(w.contains("cannot enter"), "{w}");
+        assert!(w.contains("conductor"), "{w}");
+        assert!(w.contains("setfacl"), "{w}");
+        std::env::remove_var("VAULTED_AGENT_CALLER_CWD");
+
+        let mut perms = fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&blocked, perms).unwrap();
+    }
+
+    #[test]
+    fn absolute_workdir_is_fine_under_a_service_user_when_traversable() {
+        let tmp = tempfile::tempdir().unwrap();
         assert_eq!(
-            workdir_warning(Some("conductor"), Some("/srv/orchestration"), "claude"),
+            workdir_warning(
+                Some("conductor"),
+                Some(tmp.path().to_str().unwrap()),
+                "claude"
+            ),
             None
         );
     }
