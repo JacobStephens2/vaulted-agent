@@ -96,3 +96,28 @@ fn conductor_symlink_still_refuses_harness_override() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("-H/--harness is not allowed"), "{err}");
 }
+
+#[test]
+fn conductor_symlink_refuses_a_manifest_override() {
+    // -m names the manifest outright, which is the same borrow -H is refused
+    // for by a shorter route: the point of the link is that a sudoers rule
+    // granting one harness grants one set of credentials.
+    let seam = seam_with_agent();
+    let link = conductor_link(&seam);
+    fs::write(seam.config_dir.join("manifests/wide.env"), "B=2\n").unwrap();
+
+    for args in [
+        vec!["-m", "wide.env"],
+        vec!["--manifest", "wide.env"],
+        vec!["--manifest=wide.env"],
+    ] {
+        let out = run(&seam, &link, &args);
+        assert!(!out.status.success(), "{args:?} should be refused");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("-m/--manifest is not allowed"), "{err}");
+    }
+
+    // The agent must not have run at all — a refusal that still launched would
+    // be worse than no check.
+    assert!(!seam.work_dir.join("agent.record").exists());
+}

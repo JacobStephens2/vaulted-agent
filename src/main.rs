@@ -36,10 +36,21 @@ fn main() {
         if let Some(harness) = invoked.strip_suffix(link_suffix) {
             // Honouring -H under a conductor symlink would let a caller entitled
             // to a narrow harness borrow a wider harness's manifest (bash guard).
+            // -m reaches the same place by a shorter route — it names the
+            // manifest outright — so it is refused here for the same reason.
+            // The symlink exists so a sudoers rule can grant one harness and
+            // have that mean one set of credentials.
             for a in argv.iter().skip(1) {
                 if a == "-H" || a == "--harness" || a.starts_with("--harness=") {
                     eprintln!(
                         "vaulted-agent: -H/--harness is not allowed when invoked as '{invoked}' (harness is fixed by the symlink)"
+                    );
+                    process::exit(1);
+                }
+                if a == "-m" || a == "--manifest" || a.starts_with("--manifest=") {
+                    eprintln!(
+                        "vaulted-agent: -m/--manifest is not allowed when invoked as '{invoked}' \
+                         (the harness fixes which credentials this entitlement carries)"
                     );
                     process::exit(1);
                 }
@@ -68,7 +79,7 @@ fn main() {
             if extra.first().is_some_and(|s| s == "--") {
                 extra.remove(0);
             }
-            if let Err(e) = commands::cmd_launch_harness(&paths, harness, &extra, force) {
+            if let Err(e) = commands::cmd_launch_harness(&paths, harness, &extra, force, None) {
                 eprintln!("vaulted-agent: {e}");
                 process::exit(1);
             }
@@ -105,11 +116,31 @@ fn main() {
         force_prompt = true;
     }
     let mut harness_flag: Option<String> = None;
+    let mut manifest_flag: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut args = argv.iter().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "-p" | "--prompt-auth" => force_prompt = true,
+            "-m" | "--manifest" => {
+                let v = args.next().cloned().unwrap_or_else(|| {
+                    eprintln!("vaulted-agent: -m requires a value");
+                    process::exit(1);
+                });
+                if v.is_empty() {
+                    eprintln!("vaulted-agent: -m requires a non-empty path");
+                    process::exit(1);
+                }
+                manifest_flag = Some(v);
+            }
+            s if s.starts_with("--manifest=") => {
+                let v = s["--manifest=".len()..].to_string();
+                if v.is_empty() {
+                    eprintln!("vaulted-agent: --manifest= requires a non-empty path");
+                    process::exit(1);
+                }
+                manifest_flag = Some(v);
+            }
             "-H" | "--harness" => {
                 harness_flag = Some(args.next().cloned().unwrap_or_else(|| {
                     eprintln!("vaulted-agent: -H requires a value");
@@ -165,6 +196,17 @@ fn main() {
 
     // Reserved management commands
     if commands::is_reserved(&name, &paths) {
+        // `run` and `refresh` read their own -m from after the command name.
+        // A launcher-level -m in front of those would be read by neither.
+        // `pick` is a harness launch after the menu, so -m is allowed and
+        // applied to the chosen harness.
+        if manifest_flag.is_some() && name != "pick" {
+            eprintln!(
+                "vaulted-agent: -m/--manifest applies to a harness launch \
+                 (including pick), not to '{name}'"
+            );
+            process::exit(1);
+        }
         // doctor reports on what a launch will find, and a launch runs as
         // service_user. Take the same hop first so its filesystem checks are
         // answered by the account that will actually run the agent; otherwise
@@ -177,7 +219,7 @@ fn main() {
                 eprintln!("vaulted-agent: could not check as the service user: {e}");
             }
         }
-        let code = dispatch_mgmt(&paths, &name, &rest, force_prompt);
+        let code = dispatch_mgmt(&paths, &name, &rest, force_prompt, manifest_flag.as_deref());
         process::exit(code);
     }
 
@@ -189,7 +231,9 @@ fn main() {
         process::exit(1);
     }
 
-    if let Err(e) = commands::cmd_launch_harness(&paths, &name, &rest, force_prompt) {
+    if let Err(e) =
+        commands::cmd_launch_harness(&paths, &name, &rest, force_prompt, manifest_flag.as_deref())
+    {
         eprintln!("vaulted-agent: {e}");
         if matches!(e, Error::UnknownHarness { .. }) {
             commands::usage(&paths);
@@ -198,7 +242,13 @@ fn main() {
     }
 }
 
-fn dispatch_mgmt(paths: &Paths, name: &str, rest: &[String], force_prompt: bool) -> i32 {
+fn dispatch_mgmt(
+    paths: &Paths,
+    name: &str,
+    rest: &[String],
+    force_prompt: bool,
+    manifest_override: Option<&str>,
+) -> i32 {
     let result = match name {
         "version" | "--version" | "-V" => {
             commands::cmd_version();
@@ -216,7 +266,9 @@ fn dispatch_mgmt(paths: &Paths, name: &str, rest: &[String], force_prompt: bool)
         "uninstall" => commands::cmd_uninstall(rest),
         "run" => commands::cmd_run(paths, rest, force_prompt),
         "pick" => match commands::cmd_pick(paths) {
-            Ok(chosen) => commands::cmd_launch_harness(paths, &chosen, rest, force_prompt),
+            Ok(chosen) => {
+                commands::cmd_launch_harness(paths, &chosen, rest, force_prompt, manifest_override)
+            }
             Err(e) => Err(e),
         },
         other => Err(Error::Message(format!("unknown command '{other}'"))),
