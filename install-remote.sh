@@ -150,16 +150,26 @@ try_asset() {
   fi
 
   tar -xzf "$workdir/bin.tgz" -C "$workdir"
-  [[ -f "$workdir/$asset_name" ]] || {
-    printf '  (archive did not contain %s)\n' "$asset_name" >&2
+  # Accept either member name. release.yml stages the binary under the
+  # per-target asset name, but a release cut by hand packages it under the
+  # plain program name, and v0.4.3 shipped exactly that: a valid, correctly
+  # checksummed musl binary that this function threw away over its name,
+  # falling back to a source build and then failing outright on any host
+  # without Rust. The name inside the archive is not worth an install failure.
+  bin="$workdir/vaulted-agent"
+  local staged=""
+  for cand in "$workdir/$asset_name" "$bin"; do
+    [[ -f "$cand" ]] && { staged="$cand"; break; }
+  done
+  if [[ -z "$staged" ]]; then
+    printf '  (archive contained neither %s nor vaulted-agent)\n' "$asset_name" >&2
     return 1
-  }
+  fi
   # Stage under the real program name. The launcher dispatches on argv[0]
   # (`vaulted-agent`, `va`, or a `*-conductor` link) and refuses anything else,
   # so running it under the per-target download name would fail on a perfectly
   # good binary. install.sh installs it as `vaulted-agent` regardless.
-  bin="$workdir/vaulted-agent"
-  mv -f "$workdir/$asset_name" "$bin"
+  [[ "$staged" == "$bin" ]] || mv -f "$staged" "$bin"
   chmod +x "$bin"
 
   # The asset has to actually start on this host. A glibc-linked asset built on
