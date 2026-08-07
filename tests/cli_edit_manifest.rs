@@ -71,6 +71,38 @@ fn a_named_manifest_opens_in_the_editor_and_reports_it_is_clean() {
 }
 
 #[test]
+fn an_edit_that_puts_a_reference_in_a_comment_is_caught() {
+    // Same rule as doctor: op inject reads comments. edit-manifest must not
+    // report "no problems" for a file that cannot inject.
+    let seam = CliSeam::new();
+    seam_with_manifests(&seam);
+    let editor = seam.work_dir.join("comment-ref.sh");
+    fs::write(
+        &editor,
+        "#!/usr/bin/env bash\nprintf '# see op://Vault/item/field for details\\nA=op://V/item/a\\n' > \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = seam
+        .vaulted_agent()
+        .env("EDITOR", &editor)
+        .args(["edit-manifest", "narrow.env.tpl"])
+        .output()
+        .expect("run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("problem"), "{text}");
+    assert!(text.contains("comment") && text.contains("op://"), "{text}");
+}
+
+#[test]
 fn an_edit_that_breaks_a_reference_is_reported_not_accepted_silently() {
     let seam = CliSeam::new();
     seam_with_manifests(&seam);

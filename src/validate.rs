@@ -148,6 +148,29 @@ pub fn validate_manifest_text(text: &str, backend: Backend) -> Result<Vec<(Strin
     Ok(out)
 }
 
+/// 1-based line numbers of `#` comments that contain an `op://` token.
+///
+/// `op inject` resolves references in comments too; one failed lookup aborts
+/// the whole file. Shared by doctor and `edit-manifest` so the two agree.
+pub fn comment_lines_with_op_refs(text: &str) -> Vec<usize> {
+    let mut lines = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim_start();
+        if !line.starts_with('#') {
+            continue;
+        }
+        // Same rough scanner as op: a whitespace-delimited token that claims
+        // to be a reference is enough to fail inject if it does not resolve.
+        for tok in line.split_whitespace() {
+            if tok.starts_with("op://") {
+                lines.push(n + 1);
+                break;
+            }
+        }
+    }
+    lines
+}
+
 /// Every problem in a manifest, each with its line number.
 ///
 /// `validate_manifest_text` stops at the first error, which is right for a
@@ -159,7 +182,7 @@ pub fn validate_manifest_text(text: &str, backend: Backend) -> Result<Vec<(Strin
 /// does not fail alone: the scanner stops at the offending character, the
 /// reference comes out truncated, and the whole injection aborts. One typo
 /// therefore costs every other variable in the file, so it is worth catching
-/// while the editor is still open.
+/// while the editor is still open. Comments are included: inject reads them.
 pub fn manifest_problems(text: &str) -> Vec<String> {
     let mut problems = Vec::new();
 
@@ -167,6 +190,14 @@ pub fn manifest_problems(text: &str) -> Vec<String> {
     // from the same parser resolve uses, so the editor agrees with the launch.
     if let Err(e) = crate::config::parse_dotenv_pairs(text) {
         problems.push(format!("{e}"));
+    }
+
+    for n in comment_lines_with_op_refs(text) {
+        problems.push(format!(
+            "line {n}: comment contains a secret reference (op://…). \
+             `op inject` resolves references in comments too, and one that fails \
+             aborts the whole manifest"
+        ));
     }
 
     let mut seen: Vec<String> = Vec::new();
@@ -214,6 +245,27 @@ pub fn validate_manifest_file(path: &Path, backend: Backend) -> Result<Vec<(Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_lines_with_op_refs_finds_only_references() {
+        let text = "\
+# prose about 1Password, no reference\n\
+# see op://Vault/item/field\n\
+GOOD=op://Vault/item/field\n\
+# TODO: clean this up\n";
+        assert_eq!(comment_lines_with_op_refs(text), vec![2]);
+    }
+
+    #[test]
+    fn manifest_problems_flags_comment_refs() {
+        let text = "# note op://Vault/x/y\nA=op://Vault/item/field\n";
+        let p = manifest_problems(text);
+        assert!(
+            p.iter()
+                .any(|s| s.contains("comment") && s.contains("line 1")),
+            "{p:?}"
+        );
+    }
 
     #[test]
     fn rejects_placeholder() {

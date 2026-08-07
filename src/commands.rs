@@ -722,44 +722,26 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                     })
                     .unwrap_or_default();
                 // `op inject` resolves every reference in the file, comments
-                // included, so an illustrative one in a comment is a real
-                // lookup — and a failed lookup aborts the injection of the
-                // whole manifest. Nothing above sees this: the dotenv parser
-                // drops comments before any of it runs, so a file that cannot
-                // inject at all was reported healthy. Observed in the wild
-                // after someone wrote `op://.../field` into a header note.
-                let mut in_comments: Vec<usize> = Vec::new();
+                // included. The dotenv parser drops comments, so without this
+                // a file that cannot inject at all was reported healthy.
+                // Shared helper with edit-manifest so the two agree.
                 if let Ok(text) = fs::read_to_string(&man_path) {
-                    for (n, raw) in text.lines().enumerate() {
-                        let line = raw.trim_start();
-                        if !line.starts_with('#') {
-                            continue;
-                        }
-                        // Same scanner op uses: it reads to the end of a
-                        // reference-shaped run, so the prose after it is part
-                        // of what fails to resolve.
-                        for tok in line.split_whitespace() {
-                            if tok.starts_with("op://") {
-                                in_comments.push(n + 1);
-                                break;
-                            }
-                        }
+                    let in_comments = crate::validate::comment_lines_with_op_refs(&text);
+                    if !in_comments.is_empty() {
+                        println!(
+                            "  ERROR: {} comment line(s) contain a secret reference ({}). \
+                             `op inject` resolves references in comments too, and one that \
+                             fails aborts the whole manifest — every variable, not just \
+                             these. Remove the reference or reword the comment.",
+                            in_comments.len(),
+                            in_comments
+                                .iter()
+                                .map(|n| format!("line {n}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        issues += 1;
                     }
-                }
-                if !in_comments.is_empty() {
-                    println!(
-                        "  ERROR: {} comment line(s) contain a secret reference ({}). \
-                         `op inject` resolves references in comments too, and one that \
-                         fails aborts the whole manifest — every variable, not just \
-                         these. Remove the reference or reword the comment.",
-                        in_comments.len(),
-                        in_comments
-                            .iter()
-                            .map(|n| format!("line {n}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    issues += 1;
                 }
                 if !unparseable.is_empty() {
                     unparseable.sort();
@@ -1963,6 +1945,7 @@ pub fn usage(paths: &Paths) {
          \x20      vaulted-agent secrets …\n\
          \x20      vaulted-agent setup\n\
          \x20      vaulted-agent refresh [file]\n\
+         \x20      vaulted-agent edit-manifest [name]\n\
          \x20      vaulted-agent auth-mode [mode]\n\
          \x20      vaulted-agent version\n\
          \x20      vaulted-agent uninstall [opts]\n\

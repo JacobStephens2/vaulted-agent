@@ -69,6 +69,7 @@ elevated launches always read the machine config dir).
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
 | Map new vault secrets into refs | `va refresh` / `va refresh --backend onepassword` |
 | Skip fields by name pattern (1P) | `va refresh --exclude '*_USERNAME'` |
+| Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
 | Uninstall | `sudo va uninstall` |
@@ -97,13 +98,21 @@ to drop `--auto` if you want manual approval.
    machine / service account.
 2. Map it into a refs file under `/etc/vaulted-agent/manifests/`:
    - Prefer: `va refresh` (interactive merge of unmapped secrets).
-   - Or append one line:
+     If the file is root-owned, `refresh` fails *before* vault work and tells you
+     to re-run as `sudo /usr/local/bin/vaulted-agent refresh`.
+   - Or edit with checks: `va edit-manifest` (or `va edit-manifest name.env.tpl`).
+     Uses `sudoedit` when needed so the editor is not root.
+   - Or append one line by hand:
      - Bitwarden: `OPENAI_API_KEY=name:openai-api-key`
      - 1Password: `OPENAI_API_KEY=op://Vault/item/field`
 3. Ensure the harness conf has `manifest = that-file` (relative to `manifests/`).
 
+**Never put illustrative `op://…` in comments.** `op inject` resolves comments too;
+one bad reference aborts the whole manifest. `va doctor` and `edit-manifest` both
+flag that.
+
 **Rotate value in vault** → no command; next launch fetches live.  
-**Add a new mapping** → `va refresh` or hand-edit the refs line.  
+**Add a new mapping** → `va refresh` or `va edit-manifest`.  
 **1Password name cleanup / exclude** → see MIGRATION.md; `va refresh --exclude '…'`.
 
 ### Launch with a particular manifest (one session)
