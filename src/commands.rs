@@ -313,6 +313,41 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
     }
 }
 
+/// Report whether a vault token file is present, missing, or unreadable.
+/// Returns 1 when the file is unreadable (counts as a doctor error), else 0.
+fn report_token_file(
+    label: &str,
+    path: &std::path::Path,
+    running_as: &str,
+    service_user: Option<&str>,
+) -> usize {
+    use crate::auth::{token_file_status, TokenFileStatus};
+    match token_file_status(path) {
+        TokenFileStatus::Present => {
+            println!("{label}: present");
+            0
+        }
+        TokenFileStatus::Missing => {
+            println!("{label}: missing");
+            0
+        }
+        TokenFileStatus::Unreadable { source } => {
+            let who = if running_as.is_empty() {
+                "this process".to_string()
+            } else {
+                running_as.to_string()
+            };
+            println!("{label}: unreadable ({source} as {who})");
+            if service_user.is_none() {
+                println!(
+                    "  HINT: no service_user set — launches never hop to the account that can read this file"
+                );
+            }
+            1
+        }
+    }
+}
+
 /// What, if anything, to say about a harness's `workdir`.
 ///
 /// `workdir=caller` keeps sessions keyed to the directory the operator was
@@ -389,16 +424,21 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
         yn(have_pass)
     );
 
-    if paths.bws_env_file.is_file() {
-        println!("bws.env: present");
-    } else {
-        println!("bws.env: missing");
-    }
-    if paths.op_env_file.is_file() {
-        println!("op.env: present");
-    } else {
-        println!("op.env: missing");
-    }
+    // Three states, not two: is_file() used to report EACCES as "missing"
+    // (issue #51), which sent operators hunting for a file that was present
+    // and steered them toward pasting a vault token by hand.
+    issues += report_token_file(
+        "bws.env",
+        &paths.bws_env_file,
+        &running_as,
+        service_user.as_deref(),
+    );
+    issues += report_token_file(
+        "op.env",
+        &paths.op_env_file,
+        &running_as,
+        service_user.as_deref(),
+    );
 
     let names = list_harness_names(paths)?;
     if names.is_empty() {
