@@ -526,6 +526,28 @@ mod tests {
         assert!(!op_reference_is_parseable("op://V/item"));
         // Not a 1Password reference at all.
         assert!(!op_reference_is_parseable("name:some-secret"));
+        // Literals are not parseable references — callers must gate on the
+        // op:// prefix so doctor does not treat them as errors (issue #53).
+        assert!(!op_reference_is_parseable("us-east-1"));
+        assert!(!op_reference_is_parseable("https://example.com/v1"));
+    }
+
+    #[test]
+    fn doctor_style_filter_flags_only_malformed_op_refs() {
+        // Same rule the doctor call site uses: only values that claim to be
+        // references, and fail the scanner among those.
+        let lines = [
+            ("GOOD", "op://V/item/field"),
+            ("BAD_PARENS", "op://V/db-admin (rw)/user"),
+            ("LITERAL_REGION", "us-east-1"),
+            ("LITERAL_URL", "https://example.com/v1"),
+        ];
+        let flagged: Vec<&str> = lines
+            .iter()
+            .filter(|(_, v)| v.starts_with("op://") && !op_reference_is_parseable(v))
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(flagged, vec!["BAD_PARENS"]);
     }
 
     #[test]

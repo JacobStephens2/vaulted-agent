@@ -474,12 +474,19 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             // hands out a green that the next launch immediately contradicts.
             // Checked offline: this reads the file, never the vault.
             if be == Backend::OnePassword {
+                // Only values that claim to be references. A plain literal
+                // (region, URL, phone) is valid in a template: op inject
+                // passes non-op:// text through. Treating "not a reference"
+                // as "malformed reference" painted healthy manifests red
+                // (issue #53).
                 let mut unparseable: Vec<String> = fs::read_to_string(&man_path)
                     .ok()
                     .and_then(|t| parse_dotenv_keys(&t).ok())
                     .map(|m| {
                         m.into_iter()
-                            .filter(|(_, v)| !refs::op_reference_is_parseable(v))
+                            .filter(|(_, v)| {
+                                v.starts_with("op://") && !refs::op_reference_is_parseable(v)
+                            })
                             .map(|(k, _)| k)
                             .collect()
                     })
