@@ -77,6 +77,7 @@ va doctor
 va secrets list           # Bitwarden SM (same auth as launches)
 va secrets validate
 va refresh                # build/update a refs file (Bitwarden or 1Password)
+va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
 sudo va uninstall
 ```
@@ -87,7 +88,8 @@ can see and asks which to include; each chosen item's fields become
 prompt appears immediately rather than after a call per item. Refresh output is
 meant to inject without hand-editing: notes fields are skipped, item titles
 `op` cannot parse fall back to the item id, and the generated header never
-contains a sample `op://` that would abort inject.
+contains a sample `op://` that would abort inject. To hand-edit an existing
+refs file with the same checks doctor uses, run `va edit-manifest`.
 
 ```bash
 va refresh                        # backend comes from your harnesses
@@ -158,7 +160,7 @@ va run -m openai.env.refs --backend bitwarden -p -- \
 |---|---|
 | Rotated a value | Nothing — next launch fetches live |
 | Added a secret you want mapped | `va refresh` (merge) or `va refresh --replace --all` |
-| Removed a mapping | Edit the refs file by hand |
+| Removed or fixed a mapping | `va edit-manifest` (checks on save) or edit the refs file by hand |
 
 **Install options** (clone, shared host, flags): [Install details](#install-details).  
 **Auth / backends / harness format:** [Configuration](#configuration) · [Backends](#backends).

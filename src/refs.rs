@@ -552,24 +552,50 @@ fn set_refs_mode(path: &Path) {
     let _ = path;
 }
 
+/// A menu reply: `all`, or comma-separated numbers and `a-b` ranges.
+///
+/// Ranges matter at the size these menus reach. A 65-item vault makes
+/// "everything but the last few" a line of sixty numbers, so the affordance
+/// people reach for anyway — `1-40, 45, 50-60` — should be the one that works.
+/// A descending range (`20-5`) is read as the same span rather than rejected;
+/// it is unambiguous, and refusing it teaches nothing.
+///
+/// Duplicates are collapsed and the result is ordered, so overlapping ranges
+/// select each item once.
 pub fn parse_index_list(s: &str, n: usize) -> Result<Vec<usize>> {
-    if s == "all" {
+    if s.trim() == "all" {
         return Ok((0..n).collect());
     }
-    let mut out = Vec::new();
+    let one = |tok: &str| -> Result<usize> {
+        let num: usize = tok
+            .trim()
+            .parse()
+            .map_err(|_| Error::Message(format!("bad index {}", tok.trim())))?;
+        if num == 0 || num > n {
+            return Err(Error::Message(format!("index out of range: {num}")));
+        }
+        Ok(num)
+    };
+
+    let mut out: Vec<usize> = Vec::new();
     for part in s.split(',') {
         let part = part.trim();
         if part.is_empty() {
             continue;
         }
-        let num: usize = part
-            .parse()
-            .map_err(|_| Error::Message(format!("bad index {part}")))?;
-        if num == 0 || num > n {
-            return Err(Error::Message(format!("index out of range: {num}")));
+        // Split on the first '-' only: indices are positive, so a second one is
+        // a typo rather than a nested range, and `one()` reports it as such.
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let (lo, hi) = (one(lo)?, one(hi)?);
+                let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                out.extend((lo..=hi).map(|i| i - 1));
+            }
+            None => out.push(one(part)? - 1),
         }
-        out.push(num - 1);
     }
+    out.sort_unstable();
+    out.dedup();
     Ok(out)
 }
 
@@ -790,6 +816,33 @@ mod tests {
         let var = var_from_line(line.trim()).unwrap();
         assert!(text_has_var(existing, var));
         assert!(!text_has_secret(existing, "other-id", "openai.api.key"));
+    }
+
+    #[test]
+    fn index_list_accepts_ranges_as_well_as_numbers() {
+        // A 65-item vault makes "most of them" a line of sixty numbers.
+        assert_eq!(parse_index_list("1-5", 65).unwrap(), vec![0, 1, 2, 3, 4]);
+        assert_eq!(
+            parse_index_list("1-3, 7, 10-11", 65).unwrap(),
+            vec![0, 1, 2, 6, 9, 10]
+        );
+        assert_eq!(parse_index_list("all", 3).unwrap(), vec![0, 1, 2]);
+        // Overlapping spans select each item once.
+        assert_eq!(parse_index_list("1-3,2-4", 10).unwrap(), vec![0, 1, 2, 3]);
+        // Descending is unambiguous; refusing it would teach nothing.
+        assert_eq!(parse_index_list("5-3", 10).unwrap(), vec![2, 3, 4]);
+        // A single number still behaves.
+        assert_eq!(parse_index_list("4", 10).unwrap(), vec![3]);
+        assert!(parse_index_list("", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn index_list_still_refuses_what_it_cannot_mean() {
+        assert!(parse_index_list("0-3", 10).is_err()); // menus are 1-based
+        assert!(parse_index_list("1-99", 10).is_err()); // past the end
+        assert!(parse_index_list("1-2-3", 10).is_err()); // not a range
+        assert!(parse_index_list("x", 10).is_err());
+        assert!(parse_index_list("1-x", 10).is_err());
     }
 
     #[test]
