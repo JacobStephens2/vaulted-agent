@@ -12,7 +12,7 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [vaultedagent.com](https://vaultedagent.com/) ·
-Latest: [v0.4.5](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.6)
+Latest: [v0.4.6](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.6)
 (Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
@@ -151,7 +151,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.4.5](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.6)
+Latest: [v0.4.6](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.6)
 
 ## The honest claim
 
