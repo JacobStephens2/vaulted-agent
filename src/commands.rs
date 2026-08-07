@@ -740,6 +740,7 @@ fn refresh_onepassword(
     // Fields are fetched only for the items actually chosen.
     let mut entries: Vec<(String, String)> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
+    let mut unrepresentable: Vec<String> = Vec::new();
     for i in indices {
         let (id, title, vault) = &items[i];
         // A per-item failure (transient 502 from the vault API, an item the
@@ -760,13 +761,42 @@ fn refresh_onepassword(
         }
         for f in fields {
             let section = f.section.as_deref();
+            // An item has an opaque ID to fall back on when its title does not
+            // parse; a section or field label has no such fallback. Report and
+            // skip those rather than writing a reference that would abort the
+            // injection of every other variable in the file.
+            if !section.map(refs::op_component_is_safe).unwrap_or(true)
+                || !refs::op_component_is_safe(&f.label)
+            {
+                eprintln!(
+                    "  warn: {title}: field '{}' has characters op cannot parse, skipped",
+                    f.label
+                );
+                unrepresentable.push(title.clone());
+                continue;
+            }
             entries.push((
                 refs::op_ref_var(title, section, &f.label),
-                refs::op_reference(vault, title, section, &f.label),
+                refs::op_reference(vault, refs::op_item_component(title, id), section, &f.label),
             ));
         }
     }
     drop(token);
+
+    if !unrepresentable.is_empty() {
+        let mut names = unrepresentable.clone();
+        names.sort();
+        names.dedup();
+        println!(
+            "\n{} field(s) on {} item(s) cannot be written as a reference and were \
+             left out: {}\n\
+             Rename the section or field in the vault to use letters, digits, \
+             spaces, '.', '_' or '-' if you need them.",
+            unrepresentable.len(),
+            names.len(),
+            names.join(", ")
+        );
+    }
 
     if !unreadable.is_empty() {
         println!(
