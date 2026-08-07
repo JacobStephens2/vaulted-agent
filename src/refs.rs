@@ -243,6 +243,18 @@ pub fn op_component_is_safe(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
 }
 
+/// True when `op` can read a whole reference: the scheme, then at least a
+/// vault, an item and a field, each built only from characters its scanner
+/// accepts. One reference that fails this aborts the injection of the entire
+/// manifest, so it is worth checking before a launch rather than during one.
+pub fn op_reference_is_parseable(reference: &str) -> bool {
+    let Some(rest) = reference.strip_prefix("op://") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() >= 3 && parts.iter().all(|p| op_component_is_safe(p))
+}
+
 /// The item component of a reference: the readable title when `op` can parse
 /// it, otherwise the item's opaque ID, which always parses. Variable names are
 /// still derived from the title, so a fallback here costs readability only in
@@ -496,6 +508,24 @@ mod tests {
             ),
             format!("op://V/{id}/username")
         );
+    }
+
+    #[test]
+    fn reference_parseability_matches_op() {
+        assert!(op_reference_is_parseable("op://V/item/field"));
+        assert!(op_reference_is_parseable("op://V/item/add more/field"));
+        assert!(op_reference_is_parseable(
+            "op://V/db-admin jstephens/username"
+        ));
+        // Truncated by op's scanner, so op reports "too few '/'".
+        assert!(!op_reference_is_parseable(
+            "op://V/db-admin (read-write)/username"
+        ));
+        assert!(!op_reference_is_parseable("op://V/Grafana — host/username"));
+        // Genuinely too few components, before any character question.
+        assert!(!op_reference_is_parseable("op://V/item"));
+        // Not a 1Password reference at all.
+        assert!(!op_reference_is_parseable("name:some-secret"));
     }
 
     #[test]
