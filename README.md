@@ -89,8 +89,9 @@ meant to inject without hand-editing: notes fields are skipped, item titles
 contains a sample `op://` that would abort inject.
 
 ```bash
-va refresh                       # backend comes from your harnesses
-va refresh --backend onepassword # or say it explicitly
+va refresh                        # backend comes from your harnesses
+va refresh --backend onepassword  # or say it explicitly
+va refresh --exclude '*_USERNAME' # and never map these
 ```
 
 ```
@@ -108,6 +109,19 @@ sections - a host item with a top-level `password` plus one per section - and
 they are different secrets. Pick the items an agent actually needs; a manifest
 naming the whole vault hands every secret to every agent it launches, which is
 the opposite of what manifests are for.
+
+A section the operator named goes into the variable name, because the label
+alone is not unique within an item. The one 1Password supplies itself does not:
+fields added without choosing a section land in a section labelled `add more`,
+and `ANTHROPIC_CONDUCTOR_API_KEY` is the name worth having.
+
+**Leaving fields out.** An item holds more than its credential - the `username`
+beside the password, or a password field reading `google` because the account
+signs in with Google. `--exclude` takes a variable-name pattern (`*` and `?`,
+whole name, case-insensitive), repeats, and is recorded in the manifest as an
+`# exclude:` line so later runs honour it without retyping. Excluded fields are
+listed on every run rather than dropped quietly. Delete the line to map them
+again.
 
 **`va doctor`** runs as `service_user` when configured (same hop as a launch)
 and reports token files as `present`, `missing`, or `unreadable` - never

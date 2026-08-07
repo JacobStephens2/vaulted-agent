@@ -1,3 +1,67 @@
+# Migration: 1Password refresh naming and duplicates (unreleased)
+
+## 1Password variable names drop the default section label
+
+`refresh` builds each variable name from item title + section + field. 1Password
+labels the section holding custom fields added without choosing one `add more`,
+so items across a vault carry a section nobody named, and every field under one
+was mapped as `ANTHROPIC_ADD_MORE_CONDUCTOR_API_KEY` rather than
+`ANTHROPIC_CONDUCTOR_API_KEY`.
+
+A default section label no longer reaches the name. References are unchanged —
+they still carry the section, so what `op` resolves is exactly what it was.
+
+**This renames variables the next `refresh` writes.** Existing manifests are not
+rewritten and keep working; nothing breaks until you refresh, and then only for
+names the tool generated. `doctor` reports any manifest still carrying the old
+form.
+
+To adopt the new names:
+
+```bash
+vaulted-agent doctor                      # lists manifests with legacy names
+vaulted-agent refresh --replace           # rewrite with the new scheme
+```
+
+Rewriting drops names you hand-wrote, so if a manifest mixes curated and
+generated entries, edit the generated ones in place instead — or leave them.
+Anything reading a renamed variable (a service file, an agent's config) has to
+move at the same time, which is why nothing renames itself.
+
+Two fields in one item that would now collide — the same label inside and
+outside the default section — both keep the section, so no secret is lost to
+the rename.
+
+## `refresh` no longer has to map every field
+
+`refresh` maps every referenceable field of every item it is given, including
+the ones around a credential: the `username` beside a password, or a login item
+whose password field holds `google` because the account signs in with Google.
+
+`--exclude` takes a variable-name pattern (`*` and `?`, matched against the
+whole name, case-insensitive), is repeatable, and is recorded in the manifest so
+later runs honour it without retyping:
+
+```bash
+vaulted-agent refresh --exclude '*_USERNAME' --exclude 'ZOOM_*'
+```
+
+Patterns live as `# exclude: <pattern>` lines and survive `--replace`. Remove a
+line to map those fields again. Excluded fields are listed on each run rather
+than dropped silently.
+
+## Duplicate mappings on merge
+
+`refresh --merge` skipped an entry only when the manifest held a byte-identical
+`op://` string. A curated `op://V/item/field` and a generated
+`op://V/item/add more/field` are the same secret, so merge appended the second
+as a new mapping — on one 60-item vault, 81 credentials reaching the agent twice
+under two names.
+
+Merge now compares the field a reference identifies, treating a default section
+label as equivalent to no section. Existing duplicates are not removed; a
+`refresh --replace`, or deleting the generated lines, clears them.
+
 # Migration: Bash runtime → Rust (v0.4.0)
 
 ## What changed
