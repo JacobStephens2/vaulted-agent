@@ -35,7 +35,7 @@ REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent-launcher}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # Bump this when cutting a release so unpinned one-liners stay intentional.
 # Must match a published GitHub release tag (and Cargo.toml version).
-DEFAULT_VERSION="v0.4.11"
+DEFAULT_VERSION="v0.4.12"
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"
