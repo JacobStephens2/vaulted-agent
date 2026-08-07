@@ -39,9 +39,14 @@ Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 ### 2. Wire a vault
 
 ```bash
-va setup          # pick Bitwarden / 1Password / …; may write a refs file
+va setup          # auth mode, who agents run as, start directory, vault backend
 va doctor         # health check as the account a launch would use
 ```
+
+`va setup` (interactive) also asks **who agents run as** (you vs a
+`service_user`) and **where they start** (`workdir = caller` vs a fixed path),
+and warns when those two combine on a locked-down home. Non-interactive setup
+leaves existing choices alone.
 
 Day-one harnesses start with **no vault secrets** until you set them up.
 Bitwarden: `va setup bitwarden` builds a refs file (env var → secret *reference*
