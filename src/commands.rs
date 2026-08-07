@@ -1,5 +1,6 @@
 //! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, pick, run.
 
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -601,6 +602,10 @@ fn sample(names: &[String]) -> String {
 pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     let mut issues = 0usize;
     let mut warn = 0usize;
+    // Legacy-name warnings are about the *manifest*, not the harness. Five
+    // harnesses on one whole-vault file would otherwise reprint the same
+    // sample five times and inflate the summary (follow-up to #60/#61).
+    let mut legacy_warned: HashSet<PathBuf> = HashSet::new();
     println!("vaulted-agent doctor");
     println!("config: {}", paths.config_dir.display());
     println!("auth_mode: {}", load_auth_mode(paths).as_str());
@@ -746,13 +751,17 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                             .collect()
                     })
                     .unwrap_or_default();
-                if !legacy.is_empty() {
+                if !legacy.is_empty() && legacy_warned.insert(man_path.clone()) {
                     legacy.sort();
                     println!(
-                        "  WARN: {} variable(s) carry a 1Password default section label \
-                         in the name ({}). They work; `refresh` now generates the shorter \
-                         name for the same field. See MIGRATION.md.",
+                        "  WARN: {} variable(s) in {} carry a 1Password default section \
+                         label in the name ({}). They work; `refresh` now generates the \
+                         shorter name for the same field. See MIGRATION.md.",
                         legacy.len(),
+                        man_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("manifest"),
                         sample(&legacy)
                     );
                     warn += 1;

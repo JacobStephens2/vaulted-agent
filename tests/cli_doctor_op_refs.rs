@@ -158,7 +158,7 @@ fn legacy_name_warning_is_counted_and_does_not_dump_the_whole_manifest() {
     );
 
     assert!(
-        combined.contains("30 variable(s) carry a 1Password default section label"),
+        combined.contains("30 variable(s) in legacy.env.tpl carry a 1Password default section"),
         "expected the legacy-name warning:\n{combined}"
     );
     // Truncated: a sample plus a count, not all 30.
@@ -174,5 +174,64 @@ fn legacy_name_warning_is_counted_and_does_not_dump_the_whole_manifest() {
     assert!(
         !combined.contains("0 warning(s)"),
         "a printed warning must reach the summary count:\n{combined}"
+    );
+    assert!(
+        combined.contains("1 warning(s)"),
+        "legacy-name warning must count as one:\n{combined}"
+    );
+}
+
+#[test]
+fn legacy_name_warning_is_once_per_manifest_not_per_harness() {
+    // Five harnesses on one whole-vault file used to print the same 81 names
+    // five times. Sample + count once per path; summary stays honest.
+    let seam = CliSeam::new();
+    let mut manifest = String::new();
+    for i in 0..12 {
+        manifest.push_str(&format!(
+            "ITEM{i}_ADD_MORE_API_KEY=op://Vault/item{i}/add more/api-key\n"
+        ));
+    }
+    fs::write(seam.config_dir.join("manifests/shared.env.tpl"), &manifest).unwrap();
+    for name in ["a", "b", "c"] {
+        fs::write(
+            seam.config_dir.join(format!("harnesses.d/{name}.conf")),
+            "backend = onepassword\nmanifest = shared.env.tpl\ncommand = true\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "auth_mode = file\ndefault_backend = onepassword\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("op.env"),
+        "OP_SERVICE_ACCOUNT_TOKEN=dummy\n",
+    )
+    .unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .args(["doctor"])
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .output()
+        .expect("doctor");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let n = combined
+        .matches("variable(s) in shared.env.tpl carry a 1Password default section")
+        .count();
+    assert_eq!(
+        n, 1,
+        "legacy-name warning must appear once for the shared manifest, got {n}:\n{combined}"
+    );
+    assert!(
+        combined.contains("1 warning(s)"),
+        "summary must count one warning, not one per harness:\n{combined}"
     );
 }
