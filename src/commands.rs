@@ -148,7 +148,11 @@ fn ensure_auth_mode_for_setup(paths: &Paths) -> Result<AuthMode> {
 }
 
 fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
-    // Preserve other defaults keys (default_backend, service_user, …).
+    write_defaults_key(paths, "auth_mode", Some(mode.as_str()))
+}
+
+/// Set or remove a key in defaults.conf, preserving all other lines.
+fn write_defaults_key(paths: &Paths, key: &str, value: Option<&str>) -> Result<()> {
     let existing = fs::read_to_string(&paths.defaults_file).unwrap_or_default();
     let mut lines: Vec<String> = Vec::new();
     let mut saw = false;
@@ -162,16 +166,21 @@ fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
             continue;
         }
         if let Some((k, _)) = line.split_once('=') {
-            if k.trim() == "auth_mode" {
-                lines.push(format!("auth_mode = {}", mode.as_str()));
-                saw = true;
+            if k.trim() == key {
+                if let Some(v) = value {
+                    lines.push(format!("{key} = {v}"));
+                    saw = true;
+                }
+                // value None → drop the key
                 continue;
             }
         }
         lines.push(raw.to_string());
     }
     if !saw {
-        lines.push(format!("auth_mode = {}", mode.as_str()));
+        if let Some(v) = value {
+            lines.push(format!("{key} = {v}"));
+        }
     }
     let body = lines.join("\n") + "\n";
     if let Some(parent) = paths.defaults_file.parent() {
@@ -186,6 +195,162 @@ fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
             let mut p = meta.permissions();
             p.set_mode(0o644);
             let _ = fs::set_permissions(&paths.defaults_file, p);
+        }
+    }
+    Ok(())
+}
+
+/// Interactive: who agents run as (defaults to "you" = no service_user).
+/// Non-interactive: leave defaults alone.
+fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
+    if !can_prompt_user() {
+        return Ok(load_service_user(paths));
+    }
+    let me = crate::privilege::current_user();
+    let me_label = if me.is_empty() {
+        "you".to_string()
+    } else {
+        me.clone()
+    };
+    let current = load_service_user(paths);
+    eprintln!("\nRun agents as:");
+    eprintln!("  1) you ({me_label})            [default]");
+    eprintln!("  2) a dedicated service account");
+    if let Some(ref svc) = current {
+        eprintln!("     (currently service_user = {svc})");
+    }
+    eprint!("choice [1-2, default 1]: ");
+    let _ = io::stderr().flush();
+    let line = read_tty_line()?;
+    let choice = line.trim();
+    match choice {
+        "" | "1" | "you" | "me" => {
+            write_defaults_key(paths, "service_user", None)?;
+            println!("service_user: (unset — agents run as the invoking user)");
+            Ok(None)
+        }
+        "2" | "service" | "svc" => {
+            eprint!("service account name: ");
+            let _ = io::stderr().flush();
+            let name = read_tty_line()?.trim().to_string();
+            if name.is_empty() {
+                eprintln!("  empty name; leaving service_user unchanged");
+                return Ok(load_service_user(paths));
+            }
+            write_defaults_key(paths, "service_user", Some(&name))?;
+            println!("service_user = {name}");
+            eprintln!(
+                "  NOTE: with service_user, `va run` is disabled unless allow_run = yes \
+                 in defaults.conf."
+            );
+            eprintln!(
+                "  Token files written by setup will be chowned root:{name} (mode 0640) \
+                 when run as root."
+            );
+            Ok(Some(name))
+        }
+        other => {
+            eprintln!("  unknown choice '{other}'; leaving service_user unchanged");
+            Ok(load_service_user(paths))
+        }
+    }
+}
+
+/// Set `workdir = …` on every harness conf, inserting if missing.
+fn set_harnesses_workdir(paths: &Paths, workdir: &str) -> Result<usize> {
+    let dir = &paths.harness_dir;
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut n = 0usize;
+    for ent in fs::read_dir(dir).map_err(|e| Error::Io {
+        path: dir.clone(),
+        source: e,
+    })? {
+        let ent = ent.map_err(|e| Error::Io {
+            path: dir.clone(),
+            source: e,
+        })?;
+        let path = ent.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("conf") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).map_err(|e| Error::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let mut lines: Vec<String> = Vec::new();
+        let mut saw = false;
+        for raw in text.lines() {
+            let trimmed = raw.trim();
+            if let Some((k, _)) = trimmed.split_once('=') {
+                if k.trim() == "workdir" {
+                    lines.push(format!("workdir  = {workdir}"));
+                    saw = true;
+                    continue;
+                }
+            }
+            lines.push(raw.to_string());
+        }
+        if !saw {
+            lines.push(format!("workdir  = {workdir}"));
+        }
+        let body = lines.join("\n") + "\n";
+        fs::write(&path, body).map_err(|e| Error::config_write(&path, e))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Interactive: where agents start (default = caller cwd).
+/// Non-interactive: leave harnesses alone.
+fn ensure_workdir_for_setup(paths: &Paths, service_user: Option<&str>) -> Result<()> {
+    if !can_prompt_user() {
+        return Ok(());
+    }
+    eprintln!("\nStart agents in:");
+    eprintln!("  1) the directory you run the command from   [default]");
+    eprintln!("  2) a fixed directory");
+    eprint!("choice [1-2, default 1]: ");
+    let _ = io::stderr().flush();
+    let line = read_tty_line()?;
+    let workdir = match line.trim() {
+        "" | "1" | "caller" => "caller".to_string(),
+        "2" | "fixed" | "absolute" => {
+            eprint!("absolute path (or $HOME/…): ");
+            let _ = io::stderr().flush();
+            let p = read_tty_line()?.trim().to_string();
+            if p.is_empty() {
+                eprintln!("  empty path; using workdir = caller");
+                "caller".to_string()
+            } else {
+                p
+            }
+        }
+        other => {
+            eprintln!("  unknown choice '{other}'; using workdir = caller");
+            "caller".to_string()
+        }
+    };
+
+    let n = set_harnesses_workdir(paths, &workdir)?;
+    if n == 0 {
+        println!(
+            "workdir = {workdir} (no harness confs yet — new harnesses should set this; \
+             install auto-harness uses caller)"
+        );
+    } else {
+        println!("workdir = {workdir} on {n} harness conf(s)");
+    }
+
+    if workdir == "caller" {
+        if let Some(svc) = service_user.filter(|s| !s.is_empty()) {
+            eprintln!(
+                "  NOTE: service_user={svc} with workdir=caller needs {svc} to traverse your cwd.\n  \
+                 If launches fail at exec from a 0700 home:\n    \
+                 setfacl -m u:{svc}:x ~   # traverse only — does not allow listing\n  \
+                 (or pick a fixed workdir {svc} can enter)"
+            );
         }
     }
     Ok(())
@@ -366,7 +531,8 @@ fn workdir_warning(
     let wd_is_caller = workdir == Some("caller");
     match (service_user, wd_is_caller) {
         (Some(svc), true) => Some(format!(
-            "workdir=caller with service_user={svc}: launching from a directory {svc} cannot traverse (a 0700 home) fails at exec; prefer an absolute workdir"
+            "workdir=caller with service_user={svc}: launching from a directory {svc} cannot traverse (a 0700 home) fails at exec; \
+             prefer an absolute workdir, or `setfacl -m u:{svc}:x ~` for traverse-only access"
         )),
         (None, false) if is_agent => Some("agent harness without workdir=caller".to_string()),
         _ => None,
@@ -1058,6 +1224,12 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
     // before any backend work that may write op.env / bws.env.
     let mode = ensure_auth_mode_for_setup(paths)?;
     println!("auth_mode: {}", mode.as_str());
+
+    // Who agents run as, and where they start — both shape every later launch,
+    // and interact (service_user + workdir=caller on a 0700 home). Ask before
+    // token write so chown root:service_user is right (issue #55).
+    let service_user = ensure_service_user_for_setup(paths)?;
+    ensure_workdir_for_setup(paths, service_user.as_deref())?;
 
     // Explicit backend: setup [bitwarden|onepassword|bws|op]
     let want = args
