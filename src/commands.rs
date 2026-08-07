@@ -708,6 +708,35 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                     println!("  Re-run `vaulted-agent refresh` to rewrite them.");
                     issues += 1;
                 }
+                // Names generated before default section labels were dropped.
+                // Reported, not an error: they resolve exactly as they always
+                // did. The point is that the next `refresh` writes a different
+                // name for the same field, and finding that out here beats
+                // finding it out when something reading the old name breaks.
+                let mut legacy: Vec<String> = fs::read_to_string(&man_path)
+                    .ok()
+                    .and_then(|t| parse_dotenv_keys(&t).ok())
+                    .map(|m| {
+                        m.into_iter()
+                            .filter(|(k, v)| {
+                                v.starts_with("op://")
+                                    && v.split('/').any(refs::op_section_is_default)
+                                    && refs::name_folds_default_section(k)
+                            })
+                            .map(|(k, _)| k)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !legacy.is_empty() {
+                    legacy.sort();
+                    println!(
+                        "  WARN: {} variable(s) carry a 1Password default section label \
+                         in the name ({}). They work; `refresh` now generates the shorter \
+                         name for the same field. See MIGRATION.md.",
+                        legacy.len(),
+                        legacy.join(", ")
+                    );
+                }
             }
             // Syntactically fine and completely empty is the shape `setup`
             // leaves behind when it auto-detects an agent before a vault is
@@ -777,21 +806,35 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     let mut take_all = false;
     let mut mode: Option<&str> = None;
     let mut backend_arg: Option<String> = None;
+    let mut exclude: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!(
-                    "usage: vaulted-agent refresh [manifest] [--all] [--merge|--replace] [--backend NAME]\n\
+                    "usage: vaulted-agent refresh [manifest] [--all] [--merge|--replace] [--backend NAME] [--exclude PATTERN]\n\
                      Update a refs file after adding secrets in the vault.\n\
                      Backend defaults to the one your harnesses use (bitwarden or onepassword).\n\
                      bitwarden   : pick from the secrets the token can see\n\
                      onepassword : pick items from the vault; each item's fields become refs\n\
+                     --exclude   : a VAR name refresh must not map ('*' and '?' allowed).\n\
+                     \x20             Repeatable, recorded in the manifest, honoured by later runs.\n\
                      Secret values are never stored — only references."
                 );
                 return Ok(());
             }
             "--all" | "-a" => take_all = true,
+            "-x" | "--exclude" => {
+                i += 1;
+                exclude.push(
+                    args.get(i)
+                        .ok_or_else(|| Error::Message("refresh: --exclude needs a pattern".into()))?
+                        .clone(),
+                );
+            }
+            s if s.starts_with("--exclude=") => {
+                exclude.push(s["--exclude=".len()..].to_string());
+            }
             "-b" | "--backend" => {
                 i += 1;
                 backend_arg = Some(
@@ -842,8 +885,15 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     };
 
     match be {
-        Backend::Bitwarden => refresh_bitwarden(paths, man_path, take_all, mode),
-        Backend::OnePassword => refresh_onepassword(paths, man_path, take_all, mode),
+        Backend::Bitwarden => {
+            if !exclude.is_empty() {
+                return Err(Error::Message(
+                    "refresh: --exclude applies to the onepassword backend only".into(),
+                ));
+            }
+            refresh_bitwarden(paths, man_path, take_all, mode)
+        }
+        Backend::OnePassword => refresh_onepassword(paths, man_path, take_all, mode, &exclude),
         other => Err(Error::Message(format!(
             "refresh does not apply to backend '{}'. It builds refs files, which only \
              bitwarden and onepassword use; {} manifests are edited directly.",
@@ -979,6 +1029,7 @@ fn refresh_onepassword(
     man_path: Option<String>,
     take_all: bool,
     mode: Option<&str>,
+    exclude: &[String],
 ) -> Result<()> {
     let token = load_op(paths)?;
     let items = backend::op_list_items(&token, None)?;
@@ -999,6 +1050,20 @@ fn refresh_onepassword(
         None => default_onepassword_manifest(paths)?,
     };
     let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
+
+    // Patterns already recorded in the manifest, plus any given on this run.
+    // Reading them here rather than inside the writer keeps the filtering
+    // visible: what was skipped is reported below, never silently dropped.
+    let mut exclusions = if path.is_file() {
+        refs::read_exclusions(&fs::read_to_string(&path).unwrap_or_default())
+    } else {
+        Vec::new()
+    };
+    for p in exclude {
+        if !exclusions.iter().any(|q| q == p) {
+            exclusions.push(p.clone());
+        }
+    }
 
     let indices: Vec<usize> = if take_all || !std::io::IsTerminal::is_terminal(&io::stdin()) {
         (0..items.len()).collect()
@@ -1022,6 +1087,7 @@ fn refresh_onepassword(
     let mut entries: Vec<(String, String)> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
     let mut unrepresentable: Vec<String> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
     for i in indices {
         let (id, title, vault) = &items[i];
         // A per-item failure (transient 502 from the vault API, an item the
@@ -1040,6 +1106,9 @@ fn refresh_onepassword(
             println!("  {title}: no referenceable fields, skipped");
             continue;
         }
+        // Named per item, because dropping a default section label can make two
+        // of an item's fields want one name and only the whole item shows that.
+        let mut representable: Vec<backend::OpField> = Vec::new();
         for f in fields {
             let section = f.section.as_deref();
             // An item has an opaque ID to fall back on when its title does not
@@ -1056,13 +1125,45 @@ fn refresh_onepassword(
                 unrepresentable.push(title.clone());
                 continue;
             }
+            representable.push(f);
+        }
+
+        for f in &representable {
+            let section = f.section.as_deref();
+            let plain = refs::op_ref_var(title, section, &f.label);
+            // Two fields reduced to the same name are two different secrets, so
+            // keep the section on both rather than let either win. Rare: it
+            // needs one item holding the same label inside and outside its
+            // default section.
+            let clashes = representable
+                .iter()
+                .filter(|g| refs::op_ref_var(title, g.section.as_deref(), &g.label) == plain)
+                .count()
+                > 1;
+            let var = if clashes {
+                refs::op_ref_var_qualified(title, section, &f.label)
+            } else {
+                plain
+            };
+            if refs::is_excluded(&exclusions, &var) {
+                excluded.push(var);
+                continue;
+            }
             entries.push((
-                refs::op_ref_var(title, section, &f.label),
+                var,
                 refs::op_reference(vault, refs::op_item_component(title, id), section, &f.label),
             ));
         }
     }
     drop(token);
+
+    if !excluded.is_empty() {
+        println!(
+            "\n{} field(s) matched an exclusion and were left out: {}",
+            excluded.len(),
+            excluded.join(", ")
+        );
+    }
 
     if !unrepresentable.is_empty() {
         let mut names = unrepresentable.clone();
@@ -1089,9 +1190,18 @@ fn refresh_onepassword(
     }
 
     if entries.is_empty() {
-        return Err(Error::Message(
-            "Nothing selected has a referenceable field.".into(),
-        ));
+        return Err(Error::Message(if excluded.is_empty() {
+            "Nothing selected has a referenceable field.".into()
+        } else {
+            // Distinguishable from "the vault gave us nothing", because the
+            // operator's own patterns caused this and the fix is to relax one.
+            format!(
+                "Every referenceable field on what you selected matched an exclusion \
+                 ({} field(s)). Loosen a pattern in {} to map any of them.",
+                excluded.len(),
+                path.display()
+            )
+        }));
     }
 
     if let Some(parent) = path.parent() {
@@ -1100,7 +1210,7 @@ fn refresh_onepassword(
 
     match mode {
         "replace" => {
-            refs::write_op_refs_replace(&path, &entries, "vaulted-agent refresh")?;
+            refs::write_op_refs_replace(&path, &entries, &exclusions, "vaulted-agent refresh")?;
             println!(
                 "\nWrote refs file (replace, {} mapping(s)): {}",
                 entries.len(),
@@ -1108,7 +1218,8 @@ fn refresh_onepassword(
             );
         }
         _ => {
-            let added = refs::write_op_refs_merge(&path, &entries, "vaulted-agent refresh")?;
+            let added =
+                refs::write_op_refs_merge(&path, &entries, &exclusions, "vaulted-agent refresh")?;
             if added == 0 {
                 println!("\nNo new mappings to add: {}", path.display());
             } else {

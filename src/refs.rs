@@ -181,13 +181,57 @@ pub fn write_refs_merge(
     Ok(added)
 }
 
+/// True for a section label 1Password supplied rather than the operator.
+///
+/// `add more` is the label the app gives the section holding custom fields
+/// added to an item without choosing a section, so it turns up across a vault
+/// without anyone having typed it. Folding it into a variable name gives
+/// ANTHROPIC_ADD_MORE_CONDUCTOR_API_KEY where ANTHROPIC_CONDUCTOR_API_KEY was
+/// meant, and it carries nothing a reader wants: a section disambiguates
+/// fields *within* an item, and this one collects everything never grouped.
+///
+/// This governs naming and dedupe only. A written reference always keeps the
+/// section it was built with, so what `op` is asked to resolve never changes.
+pub fn op_section_is_default(section: &str) -> bool {
+    section.trim().eq_ignore_ascii_case("add more")
+}
+
+/// True when a variable name still carries a default section label folded into
+/// it, the shape `refresh` generated before it learned to drop one. Derived
+/// from the label rather than spelled out, so the two cannot drift apart.
+pub fn name_folds_default_section(name: &str) -> bool {
+    let fragment = var_from_parts("", Some("add more"), "");
+    name.to_ascii_uppercase().contains(&format!("_{fragment}_"))
+}
+
+/// The section as it should count toward a variable name: absent when there is
+/// no section, or when 1Password named it rather than the operator.
+fn section_for_naming(section: Option<&str>) -> Option<&str> {
+    section.filter(|s| !s.is_empty() && !op_section_is_default(s))
+}
+
 /// VAR name for a 1Password field: "anthropic" + "conductor-api-key" becomes
-/// ANTHROPIC_CONDUCTOR_API_KEY. The section is included when the field is in
-/// one, because label alone is not unique within an item.
+/// ANTHROPIC_CONDUCTOR_API_KEY. An operator-named section is included, because
+/// label alone is not unique within an item; a default section label is not
+/// (see `op_section_is_default`).
+///
+/// Dropping a default label can make two fields in one item want the same
+/// name. Only the caller can see that, because it holds the whole item; it
+/// resolves the clash with `op_ref_var_qualified`.
 pub fn op_ref_var(item: &str, section: Option<&str>, field: &str) -> String {
+    var_from_parts(item, section_for_naming(section), field)
+}
+
+/// `op_ref_var`, keeping a section label it would otherwise drop. For the one
+/// case that needs it: two fields in an item whose names would collide.
+pub fn op_ref_var_qualified(item: &str, section: Option<&str>, field: &str) -> String {
+    var_from_parts(item, section.filter(|s| !s.is_empty()), field)
+}
+
+fn var_from_parts(item: &str, section: Option<&str>, field: &str) -> String {
     let joined = match section {
-        Some(s) if !s.is_empty() => format!("{item}_{s}_{field}"),
-        _ => format!("{item}_{field}"),
+        Some(s) => format!("{item}_{s}_{field}"),
+        None => format!("{item}_{field}"),
     };
     let mut s: String = joined
         .chars()
@@ -267,15 +311,43 @@ pub fn op_item_component<'a>(title: &'a str, id: &'a str) -> &'a str {
     }
 }
 
-/// True if the refs file already points at this exact reference.
+/// A reference reduced to the field it identifies, so a generated mapping can
+/// be recognised in a manifest an operator wrote by hand.
+///
+/// `op://V/eta-factory-github-app/add more/app-id` and
+/// `op://V/eta-factory-github-app/app-id` are the same secret: a default
+/// section groups fields that were never grouped, and `op` resolves the
+/// unqualified form to the field inside it — checked against a real vault, by
+/// launching with both forms mapped and observing one value under both names.
+///
+/// Comparing the strings byte for byte instead reports "not present" for a
+/// field the manifest already maps, and merge appends a second mapping under
+/// the generated name. On a 60-item vault that was 81 duplicate variables,
+/// every one of them a live credential in the agent's environment twice.
+fn canonical_reference(reference: &str) -> String {
+    let Some(rest) = reference.strip_prefix("op://") else {
+        return reference.to_string();
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    match parts.as_slice() {
+        [vault, item, section, field] if op_section_is_default(section) => {
+            format!("op://{vault}/{item}/{field}")
+        }
+        _ => reference.to_string(),
+    }
+}
+
+/// True if the refs file already points at this field, under any name and
+/// through either the section-qualified or the unqualified form.
 fn text_has_reference(text: &str, reference: &str) -> bool {
+    let want = canonical_reference(reference);
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         if let Some((_, v)) = line.split_once('=') {
-            if v.trim() == reference {
+            if canonical_reference(v.trim()) == want {
                 return true;
             }
         }
@@ -285,11 +357,94 @@ fn text_has_reference(text: &str, reference: &str) -> bool {
 
 const OP_REFS_HEADER: &str = "1Password refs (no secret values). Generated by";
 
+/// Comment form recording a variable name `refresh` must never map.
+const EXCLUDE_DIRECTIVE: &str = "# exclude:";
+
+/// Variable-name patterns the manifest records as "do not map these".
+///
+/// `refresh` maps every referenceable field of every item it is given. That is
+/// the right default for a vault of credentials and the wrong one for the
+/// fields sitting beside them: the `username` next to a password, or a login
+/// item whose password field holds `google` because the account signs in with
+/// Google. Without this they become variables in the agent's environment, and
+/// the only way to be rid of them is to hand-edit a file `refresh` will
+/// repopulate on its next run.
+///
+/// The patterns live in the manifest rather than only in a flag, because that
+/// next run is the whole problem: an exclusion the operator has to remember to
+/// retype is one refresh away from being undone.
+pub fn read_exclusions(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        // Lenient about the space after '#': this is a file people hand-edit,
+        // and a directive that silently does nothing because of one missing
+        // character is worse than accepting both spellings.
+        let line = raw.trim();
+        let Some(body) = line.strip_prefix('#') else {
+            continue;
+        };
+        let Some(rest) = body
+            .trim_start()
+            .strip_prefix("exclude:")
+            .or_else(|| body.trim_start().strip_prefix("exclude "))
+        else {
+            continue;
+        };
+        let pat = rest.trim();
+        if !pat.is_empty() && !out.iter().any(|p: &String| p == pat) {
+            out.push(pat.to_string());
+        }
+    }
+    out
+}
+
+/// True when `name` matches any pattern. `*` matches any run of characters and
+/// `?` a single one; everything else is literal. Matching ignores case, so
+/// `*_username` and `*_USERNAME` both catch the variables refresh generates.
+pub fn is_excluded(patterns: &[String], name: &str) -> bool {
+    patterns.iter().any(|p| matches_pattern(p, name))
+}
+
+/// Anchored glob over the whole name, `*` and `?` only. Backtracks on the last
+/// `*` rather than recursing, so a pattern of all stars cannot blow the stack.
+pub fn matches_pattern(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let (mut star, mut after_star) = (None, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi].eq_ignore_ascii_case(&n[ni])) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            after_star = ni;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            after_star += 1;
+            ni = after_star;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+/// Directive lines for every pattern, for a writer building a fresh header.
+fn exclusion_lines(patterns: &[String]) -> String {
+    patterns
+        .iter()
+        .map(|p| format!("{EXCLUDE_DIRECTIVE} {p}\n"))
+        .collect()
+}
+
 /// Write a 1Password refs manifest from (var, reference) pairs, replacing any
 /// existing content.
 pub fn write_op_refs_replace(
     path: &Path,
     entries: &[(String, String)],
+    exclusions: &[String],
     source: &str,
 ) -> Result<()> {
     // The form line deliberately does not spell out a literal reference.
@@ -301,8 +456,16 @@ pub fn write_op_refs_replace(
         "# {OP_REFS_HEADER} {source}.\n\
          # Form: VAR= a secret reference (vault, item and field, slash separated).\n\
          # Update: vaulted-agent refresh\n\
-         # Values fetched live at launch.\n\n"
+         # Values fetched live at launch.\n"
     );
+    // Rewriting the file must not silently re-admit what the operator excluded,
+    // so the directives are carried into the new header rather than dropped
+    // with the rest of the old content.
+    if !exclusions.is_empty() {
+        body.push_str("# Names refresh will not map (vaulted-agent refresh --exclude):\n");
+        body.push_str(&exclusion_lines(exclusions));
+    }
+    body.push('\n');
     let mut seen = std::collections::HashSet::new();
     for (var, reference) in entries {
         if !seen.insert(var.clone()) {
@@ -323,6 +486,7 @@ pub fn write_op_refs_replace(
 pub fn write_op_refs_merge(
     path: &Path,
     entries: &[(String, String)],
+    exclusions: &[String],
     source: &str,
 ) -> Result<usize> {
     let existing = if path.is_file() {
@@ -348,13 +512,23 @@ pub fn write_op_refs_merge(
         new_lines.push_str(&format!("{var}={reference}\n"));
         added += 1;
     }
-    if added == 0 {
+    // Patterns given on this run and not yet written down. Recorded even when
+    // nothing was added, so `--exclude` takes effect on the next refresh rather
+    // than only on one that happened to find new fields.
+    let already = read_exclusions(&existing);
+    let fresh: Vec<String> = exclusions
+        .iter()
+        .filter(|p| !already.iter().any(|q| q == *p))
+        .cloned()
+        .collect();
+    if added == 0 && fresh.is_empty() {
         return Ok(0);
     }
+    let block = format!("{}{new_lines}", exclusion_lines(&fresh));
     let body = if existing.is_empty() {
-        format!("# {OP_REFS_HEADER} {source}.\n\n{new_lines}")
+        format!("# {OP_REFS_HEADER} {source}.\n\n{block}")
     } else {
-        format!("{existing}\n\n# --- appended by {source} ---\n{new_lines}")
+        format!("{existing}\n\n# --- appended by {source} ---\n{block}")
     };
     fs::write(path, body).map_err(|e| Error::Io {
         path: path.to_path_buf(),
@@ -563,7 +737,7 @@ mod tests {
             "A_KEY".to_string(),
             "op://V/anthropic/conductor-api-key".to_string(),
         )];
-        write_op_refs_replace(&p, &entries, "test").unwrap();
+        write_op_refs_replace(&p, &entries, &[], "test").unwrap();
 
         for line in fs::read_to_string(&p).unwrap().lines() {
             if line.trim_start().starts_with('#') {
@@ -587,22 +761,22 @@ mod tests {
             ),
             ("B_KEY".to_string(), "op://V/github token/tok".to_string()),
         ];
-        write_op_refs_replace(&p, &entries, "test").unwrap();
+        write_op_refs_replace(&p, &entries, &[], "test").unwrap();
         let first = fs::read_to_string(&p).unwrap();
         assert!(first.contains("A_KEY=op://V/anthropic/conductor-api-key"));
 
         // Same entries again: nothing new.
-        assert_eq!(write_op_refs_merge(&p, &entries, "test").unwrap(), 0);
+        assert_eq!(write_op_refs_merge(&p, &entries, &[], "test").unwrap(), 0);
         assert_eq!(fs::read_to_string(&p).unwrap(), first);
 
         // A new reference under a VAR the operator already pinned is skipped
         // rather than appended as a second mapping.
         let clash = vec![("A_KEY".to_string(), "op://V/other/field".to_string())];
-        assert_eq!(write_op_refs_merge(&p, &clash, "test").unwrap(), 0);
+        assert_eq!(write_op_refs_merge(&p, &clash, &[], "test").unwrap(), 0);
 
         // A genuinely new one is appended.
         let fresh = vec![("C_KEY".to_string(), "op://V/third/field".to_string())];
-        assert_eq!(write_op_refs_merge(&p, &fresh, "test").unwrap(), 1);
+        assert_eq!(write_op_refs_merge(&p, &fresh, &[], "test").unwrap(), 1);
         assert!(fs::read_to_string(&p)
             .unwrap()
             .contains("C_KEY=op://V/third/field"));
@@ -616,5 +790,163 @@ mod tests {
         let var = var_from_line(line.trim()).unwrap();
         assert!(text_has_var(existing, var));
         assert!(!text_has_secret(existing, "other-id", "openai.api.key"));
+    }
+
+    #[test]
+    fn default_section_label_does_not_reach_the_name() {
+        // 1Password labels the section holding ungrouped custom fields
+        // "add more". Nobody typed it, and it made every generated name carry
+        // it: ANTHROPIC_ADD_MORE_CONDUCTOR_API_KEY for a field whose own item
+        // and label already say everything.
+        assert_eq!(
+            op_ref_var("anthropic", Some("add more"), "conductor-api-key"),
+            "ANTHROPIC_CONDUCTOR_API_KEY"
+        );
+        assert_eq!(
+            op_ref_var("anthropic", None, "conductor-api-key"),
+            op_ref_var("anthropic", Some("add more"), "conductor-api-key")
+        );
+        // 1Password's own casing is not guaranteed.
+        assert!(op_section_is_default("Add More"));
+        assert!(op_section_is_default(" add more "));
+        // A section the operator named still distinguishes fields, which is the
+        // whole reason the section is in the name at all.
+        assert!(!op_section_is_default("mysql"));
+        assert_eq!(
+            op_ref_var("mysql8.etadventures.com", Some("mysql"), "password"),
+            "MYSQL8_ETADVENTURES_COM_MYSQL_PASSWORD"
+        );
+    }
+
+    #[test]
+    fn qualified_form_is_available_when_dropping_the_label_would_collide() {
+        // One item carrying `app-id` loose and `app-id` under "add more" holds
+        // two secrets. The caller sees the clash and asks for both qualified,
+        // rather than letting one name win and the other secret vanish.
+        let a = op_ref_var("eta-factory-github-app", None, "app-id");
+        let b = op_ref_var("eta-factory-github-app", Some("add more"), "app-id");
+        assert_eq!(a, b);
+        let b_q = op_ref_var_qualified("eta-factory-github-app", Some("add more"), "app-id");
+        assert_eq!(b_q, "ETA_FACTORY_GITHUB_APP_ADD_MORE_APP_ID");
+        assert_ne!(a, b_q);
+        // With no section there is nothing to add back.
+        assert_eq!(op_ref_var_qualified("item", None, "field"), "ITEM_FIELD");
+    }
+
+    #[test]
+    fn legacy_names_are_recognisable_for_doctor() {
+        assert!(name_folds_default_section(
+            "ETA_FACTORY_GITHUB_APP_ADD_MORE_APP_ID"
+        ));
+        assert!(name_folds_default_section(&op_ref_var_qualified(
+            "anthropic",
+            Some("add more"),
+            "conductor-api-key"
+        )));
+        // What refresh generates now must never look legacy.
+        assert!(!name_folds_default_section(&op_ref_var(
+            "anthropic",
+            Some("add more"),
+            "conductor-api-key"
+        )));
+        assert!(!name_folds_default_section("PLAIN_API_KEY"));
+        // A field genuinely named "add-more-seats" produces the same fragment,
+        // so this cannot be the whole test. Doctor pairs it with the reference,
+        // which only carries a default section when there really is one:
+        // op://V/zoom/add-more-seats-url has no section component at all.
+        assert!(name_folds_default_section("ZOOM_ADD_MORE_SEATS_URL"));
+        assert!(!"op://V/zoom/add-more-seats-url"
+            .split('/')
+            .any(op_section_is_default));
+        assert!("op://V/anthropic/add more/conductor-api-key"
+            .split('/')
+            .any(op_section_is_default));
+    }
+
+    #[test]
+    fn merge_recognises_a_field_the_operator_mapped_without_the_section() {
+        // The duplicate that started this: a curated GH_ETA_FACTORY_APP_ID and
+        // a generated ETA_FACTORY_GITHUB_APP_ADD_MORE_APP_ID are one field, and
+        // comparing reference strings byte for byte saw two. Every such pair
+        // reached the agent as the same credential under two names.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("op.refs");
+        fs::write(
+            &p,
+            "GH_ETA_FACTORY_APP_ID=op://Orchestrator/eta-factory-github-app/app-id\n",
+        )
+        .unwrap();
+
+        let generated = vec![(
+            "ETA_FACTORY_GITHUB_APP_APP_ID".to_string(),
+            "op://Orchestrator/eta-factory-github-app/add more/app-id".to_string(),
+        )];
+        assert_eq!(write_op_refs_merge(&p, &generated, &[], "test").unwrap(), 0);
+        assert!(!fs::read_to_string(&p).unwrap().contains("add more"));
+
+        // The reverse direction too: a curated section-qualified line already
+        // covers the unqualified form of the same field.
+        let q = dir.path().join("q.refs");
+        fs::write(&q, "PINNED=op://V/item/add more/app-id\n").unwrap();
+        let plain = vec![("ITEM_APP_ID".to_string(), "op://V/item/app-id".to_string())];
+        assert_eq!(write_op_refs_merge(&q, &plain, &[], "test").unwrap(), 0);
+
+        // A genuinely different field on the same item is still added.
+        let other = vec![(
+            "ITEM_TOKEN".to_string(),
+            "op://V/item/add more/token".to_string(),
+        )];
+        assert_eq!(write_op_refs_merge(&q, &other, &[], "test").unwrap(), 1);
+        // An operator-named section is not a default one, so it is not folded
+        // away and two such fields stay distinct.
+        assert_eq!(
+            canonical_reference("op://V/host/mysql/password"),
+            "op://V/host/mysql/password"
+        );
+    }
+
+    #[test]
+    fn exclusion_patterns_round_trip_through_the_manifest() {
+        assert!(matches_pattern("*_USERNAME", "TWILIO_USERNAME"));
+        assert!(matches_pattern("*_username", "TWILIO_USERNAME"));
+        assert!(matches_pattern("ZOOM_*", "ZOOM_ACCOUNT_ID"));
+        assert!(matches_pattern("EXACT", "EXACT"));
+        assert!(matches_pattern("*", "ANYTHING"));
+        assert!(matches_pattern("A?C", "ABC"));
+        // Anchored at both ends: a bare substring is not a match.
+        assert!(!matches_pattern("USERNAME", "TWILIO_USERNAME"));
+        assert!(!matches_pattern("ZOOM_*", "TWILIO_ZOOM_ID"));
+        assert!(!matches_pattern("A?C", "ABBC"));
+
+        assert!(is_excluded(&["*_USERNAME".to_string()], "APOLLO_USERNAME"));
+        assert!(!is_excluded(&["*_USERNAME".to_string()], "APOLLO_API_KEY"));
+        assert!(!is_excluded(&[], "ANYTHING"));
+
+        let text = "# a comment\n# exclude: *_USERNAME\nA=op://V/i/f\n#exclude:ZOOM_*\n";
+        assert_eq!(read_exclusions(text), vec!["*_USERNAME", "ZOOM_*"]);
+    }
+
+    #[test]
+    fn exclusions_survive_both_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("op.refs");
+        let entries = vec![("A_KEY".to_string(), "op://V/anthropic/key".to_string())];
+        let ex = vec!["*_USERNAME".to_string()];
+
+        // Replace rewrites the file, and must not drop the operator's patterns
+        // along with the content: the next refresh would re-admit everything.
+        write_op_refs_replace(&p, &entries, &ex, "test").unwrap();
+        assert_eq!(read_exclusions(&fs::read_to_string(&p).unwrap()), ex);
+
+        // Merge records a pattern first seen on this run even when it found no
+        // new mappings, so --exclude takes effect on a run that happens to add
+        // nothing. The count is mappings added, so recording a pattern is 0.
+        let more = vec!["*_USERNAME".to_string(), "ZOOM_*".to_string()];
+        assert_eq!(write_op_refs_merge(&p, &entries, &more, "test").unwrap(), 0);
+        assert_eq!(read_exclusions(&fs::read_to_string(&p).unwrap()), more);
+
+        // Recorded once, not appended again on every subsequent run.
+        assert_eq!(write_op_refs_merge(&p, &entries, &more, "test").unwrap(), 0);
+        assert_eq!(read_exclusions(&fs::read_to_string(&p).unwrap()), more);
     }
 }
