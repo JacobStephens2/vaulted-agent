@@ -24,9 +24,14 @@ mean one set of credentials; a flag naming the manifest outright would undo it.
 On the direct `va` path there is nothing to protect — a caller who can run `va`
 can already run `va run -m` with any manifest — so it is allowed there.
 
-Also refused in front of a management command (`va -m x doctor`), where `run`
-and `refresh` read their own `-m` from after the command name and a launcher-level
-one would be read by neither.
+Also refused in front of most management commands (`va -m x doctor`), where
+`run` and `refresh` read their own `-m` from after the command name. Allowed
+with `pick` (`va -m narrow.env pick`), which is a harness launch after the menu.
+
+With `service_user`, the privilege hop re-execs the command line as typed. A
+sudoers rule that only allows `vaulted-agent claude` will not match
+`vaulted-agent -m … claude`. Prefer conductor links for delegated grants, or
+extend sudoers to allow the launcher flags before the harness name.
 
 # Migration: 1Password refresh naming and duplicates (unreleased)
 

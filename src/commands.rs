@@ -1807,16 +1807,14 @@ pub fn cmd_pick(paths: &Paths) -> Result<String> {
     }
 }
 
-/// Launch a named harness with optional extra agent args.
-/// Launch a harness, optionally against a manifest other than its configured
-/// one.
+/// Launch a harness, optionally against a manifest other than its configured one.
 ///
-/// The override serves the direct `va <harness>` path only. Under a
-/// `*-conductor` symlink it is refused before this is reached, alongside `-H`
-/// and for the same reason: the symlink is what lets a sudoers rule grant one
-/// harness and have that mean one set of credentials. On the direct path the
-/// caller can already reach `run -m` with any manifest they like, so refusing
-/// here would cost convenience and buy no safety.
+/// The override serves the direct `va <harness>` path (and `va pick`) only.
+/// Under a `*-conductor` symlink it is refused before this is reached, alongside
+/// `-H` and for the same reason: the symlink is what lets a sudoers rule grant
+/// one harness and have that mean one set of credentials. On the direct path
+/// the caller can already reach `run -m` with any manifest they like, so
+/// refusing here would cost convenience and buy no safety.
 pub fn cmd_launch_harness(
     paths: &Paths,
     name: &str,

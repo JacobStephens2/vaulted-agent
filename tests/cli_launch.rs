@@ -193,5 +193,21 @@ fn manifest_override_is_refused_in_front_of_a_management_command() {
         .expect("run");
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("applies to a harness launch"), "{err}");
+    assert!(
+        err.contains("applies to a harness launch") || err.contains("not to 'doctor'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn empty_manifest_override_is_rejected() {
+    let seam = CliSeam::new();
+    let out = seam
+        .vaulted_agent()
+        .args(["--manifest=", "claude"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("non-empty"), "{err}");
 }
