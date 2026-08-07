@@ -1977,7 +1977,6 @@ pub fn usage(paths: &Paths) {
     }
 }
 
-/// Reserved management command names (unless a harness .conf of that name exists).
 /// Files under `manifests/` that are candidates to edit.
 ///
 /// Backups and the launcher's own shipped samples are skipped. Offering one in
@@ -2215,6 +2214,7 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
     }
 }
 
+/// Reserved management command names (unless a harness .conf of that name exists).
 pub fn is_reserved(name: &str, paths: &Paths) -> bool {
     let reserved = [
         "version",
