@@ -1,3 +1,33 @@
+# Migration: launching a harness against another manifest (unreleased)
+
+## `-m` on the harness path
+
+`va run -m MANIFEST -- cmd` has always let a one-off command name its own
+manifest. A harness could not: `claude.conf` fixed the manifest, and trying a
+narrower one for a session meant editing config.
+
+`va -m readonly.env.tpl claude` now launches the `claude` harness against
+`readonly.env.tpl`. The harness still decides the command, the workdir, the
+backend and everything else; only which credentials it carries changes. The
+override replaces the configured manifest rather than merging with it, and a
+manifest that does not exist is an error before the agent starts rather than an
+agent that launches with an empty environment. Each overridden launch prints
+which manifest it used.
+
+Like `-p` and `-H`, it is a launcher flag, so it goes **before** the harness
+name — `va -m x claude`, not `va claude -m x`, where it would be passed to the
+agent instead.
+
+**Refused under a `*-conductor` symlink**, alongside `-H` and for the same
+reason. That symlink is what lets a sudoers rule grant one harness and have it
+mean one set of credentials; a flag naming the manifest outright would undo it.
+On the direct `va` path there is nothing to protect — a caller who can run `va`
+can already run `va run -m` with any manifest — so it is allowed there.
+
+Also refused in front of a management command (`va -m x doctor`), where `run`
+and `refresh` read their own `-m` from after the command name and a launcher-level
+one would be read by neither.
+
 # Migration: 1Password refresh naming and duplicates (unreleased)
 
 ## 1Password variable names drop the default section label
@@ -87,7 +117,7 @@ label as equivalent to no section. Existing duplicates are not removed; a
   `install-remote.sh` / a release asset (`VAULTED_AGENT_BIN=…`).
 - Bash-only extensions that sourced `bin/vaulted-agent` internals no longer
   work; use the CLI surface (`run`, `secrets`, `doctor`, …).
-- Launcher flags (`-p`/`--prompt-auth`, `-H`/`--harness`) are only parsed
+- Launcher flags (`-p`/`--prompt-auth`, `-H`/`--harness`, `-m`/`--manifest`) are only parsed
   **before** the first non-flag token. After the harness name, flags go to the
   agent (`va claude --version`, `va claude -p "…"`). Put launcher `-p` first:
   `va -p claude`.

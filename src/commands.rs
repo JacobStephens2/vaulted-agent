@@ -1808,13 +1808,45 @@ pub fn cmd_pick(paths: &Paths) -> Result<String> {
 }
 
 /// Launch a named harness with optional extra agent args.
+/// Launch a harness, optionally against a manifest other than its configured
+/// one.
+///
+/// The override serves the direct `va <harness>` path only. Under a
+/// `*-conductor` symlink it is refused before this is reached, alongside `-H`
+/// and for the same reason: the symlink is what lets a sudoers rule grant one
+/// harness and have that mean one set of credentials. On the direct path the
+/// caller can already reach `run -m` with any manifest they like, so refusing
+/// here would cost convenience and buy no safety.
 pub fn cmd_launch_harness(
     paths: &Paths,
     name: &str,
     extra_args: &[String],
     force_prompt: bool,
+    manifest_override: Option<&str>,
 ) -> Result<()> {
-    let harness = Harness::load(paths, name)?;
+    let mut harness = Harness::load(paths, name)?;
+    if let Some(manifest) = manifest_override {
+        harness.manifest = manifest.to_string();
+        // Checked here rather than at injection, so a typo is a clear message
+        // instead of a manifest that reads as empty and an agent that starts
+        // with nothing in its environment and fails much later.
+        let path = harness.resolve_manifest_path(paths);
+        if !path.is_file() {
+            return Err(Error::Message(format!(
+                "no manifest at {} (-m takes a file in {} or an absolute path)",
+                path.display(),
+                paths.manifest_dir.display()
+            )));
+        }
+        // Announce it. A flag that quietly changes which credentials an agent
+        // carries is the kind of thing nobody notices until afterwards, and
+        // this line is what a scrollback search finds.
+        eprintln!(
+            "vaulted-agent: {name} launching with manifest '{}' instead of its configured one",
+            harness.manifest
+        );
+    }
+    let harness = harness;
     launch::launch_harness(
         paths,
         &harness,
@@ -1836,8 +1868,8 @@ pub fn usage(paths: &Paths) {
     let mode = load_auth_mode(paths);
     let be = default_backend(paths);
     eprintln!(
-        "usage: vaulted-agent <harness> [args...]\n\
-         \x20      va <harness> [args...]\n\
+        "usage: vaulted-agent [-m MANIFEST] <harness> [args...]\n\
+         \x20      va [-m MANIFEST] <harness> [args...]\n\
          \x20      vaulted-agent run -m MANIFEST [--backend NAME] -- cmd [args...]\n\
          \x20      vaulted-agent pick [args...]\n\
          \x20      vaulted-agent doctor\n\
@@ -1848,6 +1880,10 @@ pub fn usage(paths: &Paths) {
          \x20      vaulted-agent version\n\
          \x20      vaulted-agent uninstall [opts]\n\
          \nlauncher flags:  --prompt-auth|-p   prompt for vault token this launch\n\
+         \x20                --manifest|-m     launch the harness against this manifest\n\
+         \x20                                  instead of its configured one (before the\n\
+         \x20                                  harness name; not allowed under a\n\
+         \x20                                  *-conductor symlink)\n\
          default auth_mode: {}  (file = token on disk; prompt = paste each launch)\n\
          default backend:   {}\n\
          config: VAULTED_AGENT_CONFIG_DIR (default /etc/vaulted-agent)\n\

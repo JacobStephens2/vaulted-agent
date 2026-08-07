@@ -71,6 +71,7 @@ auth there.
 ```bash
 va                        # list harnesses
 va pick                   # interactive menu
+va -m readonly.env.tpl claude   # this launch only, against another manifest
 va claude --resume <id>   # agent args pass through; resume shape is normalized
 va doctor
 va secrets list           # Bitwarden SM (same auth as launches)
@@ -122,6 +123,18 @@ whole name, case-insensitive), repeats, and is recorded in the manifest as an
 `# exclude:` line so later runs honour it without retyping. Excluded fields are
 listed on every run rather than dropped quietly. Delete the line to map them
 again.
+
+**Launching against another manifest.** `va -m <manifest> <harness>` runs a
+harness against a manifest other than its configured one — useful for taking a
+narrower set of credentials into a session without editing config. It replaces
+the manifest rather than merging, errors if the file is missing, and prints
+which manifest it used.
+
+It is a launcher flag, so it goes before the harness name. It is **refused under
+a `*-conductor` symlink**, alongside `-H`: that symlink is what lets a sudoers
+rule grant one harness and have it mean one set of credentials, and a flag
+naming the manifest would undo it. On the direct `va` path a caller can already
+reach `va run -m` with any manifest, so there is nothing extra to protect.
 
 **`va doctor`** runs as `service_user` when configured (same hop as a launch)
 and reports token files as `present`, `missing`, or `unreadable` - never
