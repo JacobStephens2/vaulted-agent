@@ -1,5 +1,6 @@
 //! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, pick, run.
 
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -579,9 +580,32 @@ fn workdir_warning(
     }
 }
 
+/// Names for a one-line report: the first few, then a count of the rest.
+///
+/// A whole-vault manifest puts 81 names in one warning, repeated for every
+/// harness pointing at that manifest. Five harnesses turned a health report
+/// into five screens of names, which is the same as printing nothing: the
+/// operator scrolls past it to find the summary. Enough names to recognise
+/// which manifest is meant, and a count for the scale of it.
+fn sample(names: &[String]) -> String {
+    const SHOWN: usize = 8;
+    if names.len() <= SHOWN {
+        return names.join(", ");
+    }
+    format!(
+        "{}, and {} more",
+        names[..SHOWN].join(", "),
+        names.len() - SHOWN
+    )
+}
+
 pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     let mut issues = 0usize;
     let mut warn = 0usize;
+    // Legacy-name warnings are about the *manifest*, not the harness. Five
+    // harnesses on one whole-vault file would otherwise reprint the same
+    // sample five times and inflate the summary (follow-up to #60/#61).
+    let mut legacy_warned: HashSet<PathBuf> = HashSet::new();
     println!("vaulted-agent doctor");
     println!("config: {}", paths.config_dir.display());
     println!("auth_mode: {}", load_auth_mode(paths).as_str());
@@ -727,15 +751,20 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                             .collect()
                     })
                     .unwrap_or_default();
-                if !legacy.is_empty() {
+                if !legacy.is_empty() && legacy_warned.insert(man_path.clone()) {
                     legacy.sort();
                     println!(
-                        "  WARN: {} variable(s) carry a 1Password default section label \
-                         in the name ({}). They work; `refresh` now generates the shorter \
-                         name for the same field. See MIGRATION.md.",
+                        "  WARN: {} variable(s) in {} carry a 1Password default section \
+                         label in the name ({}). They work; `refresh` now generates the \
+                         shorter name for the same field. See MIGRATION.md.",
                         legacy.len(),
-                        legacy.join(", ")
+                        man_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("manifest"),
+                        sample(&legacy)
                     );
+                    warn += 1;
                 }
             }
             // Syntactically fine and completely empty is the shape `setup`
@@ -1873,6 +1902,22 @@ pub fn is_reserved(name: &str, paths: &Paths) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_lists_short_sets_whole_and_truncates_long_ones() {
+        let three: Vec<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(sample(&three), "A, B, C");
+        assert_eq!(sample(&[]), "");
+
+        // At the boundary nothing is hidden, so no misleading "and 0 more".
+        let eight: Vec<String> = (0..8).map(|i| format!("V{i}")).collect();
+        assert_eq!(sample(&eight), eight.join(", "));
+
+        let nine: Vec<String> = (0..9).map(|i| format!("V{i}")).collect();
+        let out = sample(&nine);
+        assert!(out.ends_with("and 1 more"), "{out}");
+        assert!(!out.contains("V8"), "{out}");
+    }
 
     #[test]
     fn parse_auth_mode_choice_accepts_aliases() {
