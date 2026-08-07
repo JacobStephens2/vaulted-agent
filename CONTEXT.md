@@ -21,12 +21,16 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets only. |
 | **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |
 | **Caller cwd** | Invocation directory preserved across sudo re-exec (`VAULTED_AGENT_CALLER_CWD`) for `workdir = caller`. |
+| **Manifest override** | Launcher flag `-m` / `--manifest` before the harness name: this launch uses another refs file (replace, no merge). Refused under conductor links. |
+| **Default section label** | 1Password’s unnamed custom-field section (`add more`); must not appear in generated env **names** (still may appear inside `op://` for inject). |
 
 ## Operator surface (acceptance seam)
 
 The **CLI** is the primary and sole public acceptance seam (story #50). Library modules support the binary; they are not a second product API.
 
 Management verbs: `setup`, `refresh`, `secrets`, `doctor`, `auth-mode`, `run`, `pick`, `uninstall`, `version`.
+
+Agent-facing ops contract (commands, recipes, failure modes): **`AGENTS.md`**.
 
 ## Invariants (do not break casually)
 
@@ -35,9 +39,12 @@ Management verbs: `setup`, `refresh`, `secrets`, `doctor`, `auth-mode`, `run`, `
 3. Sudo re-exec replays **original** argv so sudoers matches what the operator typed.
 4. Fail closed on unknown backend, bad var names, and placeholder refs (misconfiguration).
 5. `secrets validate` is the pre-flight gate before privileged/paid launches — must not fail open.
+6. Unreadable manager-token files are not reported as missing and do not fall through to an interactive SA-token paste.
+7. Conductor invocation must not honor `-H` or `-m` (fixed entitlement).
 
 ## Related docs
 
-- Issue #1 — user stories and implementation decisions
-- `MIGRATION.md` — Bash → Rust (v0.4.0) contract and intentional breaks
+- `AGENTS.md` — agent / operator contract (prefer for automation)
+- `MIGRATION.md` — Bash → Rust and later behavior breaks
 - `docs/adr/` — architecture decision records (create when a choice is load-bearing)
+- Product page: https://vaultedagent.com/ · agent copy: https://vaultedagent.com/AGENTS.md

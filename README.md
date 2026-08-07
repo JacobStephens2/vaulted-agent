@@ -20,7 +20,7 @@ Latest: [v0.4.11](https://github.com/JacobStephens2/vaulted-agent-launcher/relea
 - [Quick start](#quick-start) · [Everyday commands](#everyday-commands)
 - [How it works](#how-it-works) · [Honest claim](#the-honest-claim)
 - [Install details](#install-details) · [Configuration](#configuration) · [Backends](#backends)
-- [Uninstall](#uninstall) · [MIGRATION.md](MIGRATION.md)
+- [Uninstall](#uninstall) · [MIGRATION.md](MIGRATION.md) · **[AGENTS.md](AGENTS.md)** (agent-oriented contract)
 
 ## Quick start
 
