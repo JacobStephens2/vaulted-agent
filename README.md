@@ -1,4 +1,7 @@
-# vaulted-agent-launcher
+# vaulted-agent
+
+[![CI](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent-launcher)](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/latest)
 
 Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
 **in-process** - without leaving a pile of `.env` files on disk.
@@ -37,7 +40,7 @@ Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 
 ```bash
 va setup          # pick Bitwarden / 1Password / …; may write a refs file
-va doctor         # optional health check (no secret values printed)
+va doctor         # health check as the account a launch would use
 ```
 
 Day-one harnesses start with **no vault secrets** until you set them up.
@@ -50,11 +53,13 @@ only). Point harnesses at it, or use `va run -m …`.
 va claude
 va codex
 va grok
-va kimi
+va kimi           # --auto by default (matches claude's unattended posture)
 ```
 
 With `auth_mode=prompt`, paste the vault manager token when asked (not written
-to disk). Force a prompt once: `va grok -p`.
+to disk). Force once on the `va` path: `va grok -p`. Under a `*-conductor`
+symlink, `-p` is the agent's flag; use `VAULTED_AGENT_PROMPT_AUTH=1` for prompt
+auth there.
 
 ## Everyday commands
 
@@ -73,7 +78,10 @@ sudo va uninstall
 **Building a refs file from 1Password.** `va refresh` lists the items the token
 can see and asks which to include; each chosen item's fields become
 `VAR=op://VAULT/ITEM/FIELD` lines. Only the items you pick are read, so the
-prompt appears immediately rather than after a call per item.
+prompt appears immediately rather than after a call per item. Refresh output is
+meant to inject without hand-editing: notes fields are skipped, item titles
+`op` cannot parse fall back to the item id, and the generated header never
+contains a sample `op://` that would abort inject.
 
 ```bash
 va refresh                       # backend comes from your harnesses
@@ -95,6 +103,11 @@ sections - a host item with a top-level `password` plus one per section - and
 they are different secrets. Pick the items an agent actually needs; a manifest
 naming the whole vault hands every secret to every agent it launches, which is
 the opposite of what manifests are for.
+
+**`va doctor`** runs as `service_user` when configured (same hop as a launch)
+and reports token files as `present`, `missing`, or `unreadable` - never
+collapsing permission denied into missing. For 1Password harnesses it also
+flags `op://` references the scanner cannot parse (plain literals are fine).
 
 **One-shot (any command, no harness file):**
 
@@ -527,8 +540,12 @@ this launch”):
 5. built-in default `file`  
 
 Within a launch, if the token is already in the environment, that wins over
-file and prompt. If `auth_mode=file` but the file is missing and a TTY exists,
-the launcher offers a one-shot “this launch only” paste.
+file and prompt. If `auth_mode=file` but the file is **missing** and a TTY
+exists, the launcher offers a one-shot “this launch only” paste. If the file is
+**present but unreadable** (typical when it is `root:service_user` mode `0640`
+and this process is not that user), the launcher **fails closed** with a message
+that names the effective user and points at `service_user` - it does not pretend
+the file is missing or invite you to paste a vault service-account token.
 
 **`va setup` and the token file.** On a TTY, setup first asks how vault manager
 tokens should be supplied (same menu as install / `auth-mode`):
