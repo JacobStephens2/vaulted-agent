@@ -81,7 +81,7 @@ fn a_resolvable_manifest_passes_and_says_how_many() {
     );
     let (ok, out) = validate(&seam, &["m.env.tpl"]);
     assert!(ok, "{out}");
-    assert!(out.contains("2 reference(s) resolved"), "{out}");
+    assert!(out.contains("2 variable(s) resolved"), "{out}");
 }
 
 #[test]
@@ -107,5 +107,13 @@ fn validating_every_harness_resolves_each_one() {
     let seam = seam_with("A=op://Orchestrator/anthropic/conductor-api-key\n");
     let (ok, out) = validate(&seam, &[]);
     assert!(ok, "{out}");
-    assert!(out.contains("probe: ok (1 reference(s) resolved)"), "{out}");
+    assert!(out.contains("probe: ok (1 variable(s) resolved)"), "{out}");
+}
+
+#[test]
+fn unknown_option_is_rejected() {
+    let seam = seam_with("A=op://Orchestrator/anthropic/conductor-api-key\n");
+    let (ok, out) = validate(&seam, &["m.env.tpl", "--offine"]);
+    assert!(!ok, "typo flag must not be swallowed:\n{out}");
+    assert!(out.contains("unknown option"), "{out}");
 }

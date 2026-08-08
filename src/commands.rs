@@ -417,16 +417,88 @@ fn blame_manifest_lines(manifest: &Path, error: &str) -> Vec<String> {
             continue;
         };
         let (var, value) = (var.trim(), value.trim());
+        // Quoted values are still references once the outer quotes are gone.
+        let value = value
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(value);
         if !value.starts_with("op://") {
             continue;
         }
         // The item component is what op names when it cannot resolve one.
         let parts: Vec<&str> = value[5..].split('/').collect();
-        if parts.len() >= 2 && !parts[1].is_empty() && error.contains(parts[1]) {
+        if parts.len() < 2 || parts[1].is_empty() {
+            continue;
+        }
+        let item = parts[1];
+        // Match "item <title>" as op phrases it, not a bare substring of the
+        // title: a short name must not hitch a ride on a longer title's error.
+        if error_names_op_item(error, item) {
             blamed.push(format!("{var}\n      {value}"));
         }
     }
     blamed
+}
+
+/// True when `error` names this 1Password item the way `op` does.
+fn error_names_op_item(error: &str, item: &str) -> bool {
+    let needle = format!("item {item}");
+    let bytes = error.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = error[start..].find(&needle) {
+        let after = start + rel + needle.len();
+        let boundary = match bytes.get(after) {
+            None => true,
+            Some(b) => !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_',
+        };
+        if boundary {
+            return true;
+        }
+        start += rel + 1;
+    }
+    false
+}
+
+/// Shape-check a manifest, then either stop (offline) or resolve as a launch would.
+///
+/// Returns `None` for offline (syntax only) and `Some(n)` for the number of
+/// variables `backend::resolve` returned. Values themselves are never kept.
+fn validate_manifest_against_vault(
+    paths: &Paths,
+    backend: Backend,
+    manifest: &Path,
+    offline: bool,
+) -> Result<Option<usize>> {
+    validate_manifest_file(manifest, backend)?;
+    if offline {
+        return Ok(None);
+    }
+    resolve_for_validation(paths, backend, manifest).map(Some)
+}
+
+fn format_validate_ok(resolved: Option<usize>) -> String {
+    match resolved {
+        None => "ok (syntax only; vault not probed)".to_string(),
+        Some(n) => format!("ok ({n} variable(s) resolved)"),
+    }
+}
+
+fn print_validate_blame(manifest: &Path, error: &str, to_stdout: bool) {
+    let blamed = blame_manifest_lines(manifest, error);
+    if blamed.is_empty() {
+        return;
+    }
+    if to_stdout {
+        for b in blamed {
+            println!("    {b}");
+        }
+    } else {
+        eprintln!("{}: could not resolve:", manifest.display());
+        for b in &blamed {
+            eprintln!("    {b}");
+        }
+    }
 }
 
 pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
@@ -498,8 +570,19 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
             // Live by default: a gate that never asks the vault is not a gate.
             // --offline keeps the old cheap check for somewhere without a token.
             let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
-            let offline = rest.contains(&"--offline");
-            let positional: Vec<&str> = rest.into_iter().filter(|s| !s.starts_with("--")).collect();
+            let mut offline = false;
+            let mut positional: Vec<&str> = Vec::new();
+            for s in rest {
+                match s {
+                    "--offline" => offline = true,
+                    flag if flag.starts_with('-') => {
+                        return Err(Error::Message(format!(
+                            "secrets validate: unknown option '{flag}' (try --offline)"
+                        )));
+                    }
+                    other => positional.push(other),
+                }
+            }
             let target = positional.first().copied();
             match target {
                 None => {
@@ -511,24 +594,11 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         let be = h.backend.unwrap_or(be_default);
                         let man_path = h.resolve_manifest_path(paths);
                         print!("{name}: ");
-                        let checked =
-                            validate_manifest_file(&man_path, be)
-                                .map(|_| ())
-                                .and_then(|()| {
-                                    if offline {
-                                        Ok(None)
-                                    } else {
-                                        resolve_for_validation(paths, be, &man_path).map(Some)
-                                    }
-                                });
-                        match checked {
-                            Ok(None) => println!("ok (syntax only)"),
-                            Ok(Some(n)) => println!("ok ({n} reference(s) resolved)"),
+                        match validate_manifest_against_vault(paths, be, &man_path, offline) {
+                            Ok(n) => println!("{}", format_validate_ok(n)),
                             Err(e) => {
                                 println!("FAIL ({e})");
-                                for b in blame_manifest_lines(&man_path, &format!("{e}")) {
-                                    println!("    {b}");
-                                }
+                                print_validate_blame(&man_path, &format!("{e}"), true);
                                 err = true;
                             }
                         }
@@ -559,24 +629,13 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         };
                         (man_path, be)
                     };
-                    validate_manifest_file(&man_path, be)?;
-                    if offline {
-                        println!("ok: {} (syntax only; vault not probed)", man_path.display());
-                        return Ok(());
-                    }
-                    match resolve_for_validation(paths, be, &man_path) {
+                    match validate_manifest_against_vault(paths, be, &man_path, offline) {
                         Ok(n) => {
-                            println!("ok: {} ({n} reference(s) resolved)", man_path.display());
+                            println!("{}: {}", man_path.display(), format_validate_ok(n));
                             Ok(())
                         }
                         Err(e) => {
-                            let blamed = blame_manifest_lines(&man_path, &format!("{e}"));
-                            if !blamed.is_empty() {
-                                eprintln!("{}: could not resolve:", man_path.display());
-                                for b in &blamed {
-                                    eprintln!("    {b}");
-                                }
-                            }
+                            print_validate_blame(&man_path, &format!("{e}"), false);
                             Err(e)
                         }
                     }
