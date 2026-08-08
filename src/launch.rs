@@ -259,8 +259,38 @@ pub fn build_launch_plan(
         Backend::Pass | Backend::Sops | Backend::Plainfile => None,
     };
 
+    // A resolver failure names what the vault could not find — an item title,
+    // or a reference its scanner could not read — and the operator needs the
+    // variable, which is what they will grep the manifest for. `op inject`
+    // also fails the whole file at the first bad reference, so the message
+    // alone gives no sense of how much is broken. Say which entries are at
+    // fault and name the command that confirms a fix, then fail as before.
+    //
+    // The common cause is an item renamed in the vault since the manifest was
+    // written: the reference stays well-formed and stops resolving, so nothing
+    // offline can catch it.
     let secrets: HashMap<String, SecretValue> =
-        backend::resolve(backend_name, &manifest, paths, token.as_ref())?;
+        match backend::resolve(backend_name, &manifest, paths, token.as_ref()) {
+            Ok(s) => s,
+            Err(e) => {
+                let blamed = crate::validate::blame_manifest_lines(&manifest, &format!("{e}"));
+                if !blamed.is_empty() {
+                    eprintln!(
+                        "vaulted-agent: could not resolve {} reference(s) in {}:",
+                        blamed.len(),
+                        manifest.display()
+                    );
+                    for b in &blamed {
+                        eprintln!("    {b}");
+                    }
+                    eprintln!(
+                        "  An item may have been renamed or removed in the vault. \
+                         Confirm with: vaulted-agent secrets validate"
+                    );
+                }
+                return Err(e);
+            }
+        };
 
     // Token is dropped from the launcher process env so it is not ambient.
     // Residual plaintext in this process's heap is out of scope for the threat

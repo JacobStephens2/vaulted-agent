@@ -1,3 +1,33 @@
+# Migration: a failed launch names the variable (unreleased)
+
+When a launch could not resolve its manifest, the launcher printed the resolver
+error and nothing else. For 1Password that names the *item* the vault could not
+find, and `op inject` fails the whole file at the first bad reference — so the
+message said neither which of 200 variables was at fault nor how much else was
+broken.
+
+A launch that cannot resolve now lists the manifest entries the error implicates
+and names the command that confirms a fix:
+
+```
+vaulted-agent: could not resolve 1 reference(s) in orchestrator-all.env.tpl:
+    TOURBOT_WEBHOOK_SHARED_SECRET_PASSWORD
+      op://Orchestrator/Tourbot Webhook Shared Secret/password
+  An item may have been renamed or removed in the vault.
+  Confirm with: vaulted-agent secrets validate
+```
+
+The launch still fails, with the same error and exit status underneath. This is
+additive output on a path that was already failing.
+
+The attribution is the same one `secrets validate` uses, moved to
+`validate::blame_manifest_lines` so both call sites share it rather than
+drifting apart.
+
+Renaming an item in the vault is the usual cause: the reference stays
+well-formed and stops resolving, so no offline check can catch it. `doctor` is
+offline by design and will still pass.
+
 # Migration: `secrets validate` asks the vault (unreleased)
 
 `secrets validate` checked that each reference was well *formed* and stopped

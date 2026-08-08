@@ -211,3 +211,78 @@ fn empty_manifest_override_is_rejected() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("non-empty"), "{err}");
 }
+
+#[test]
+fn a_launch_that_cannot_resolve_names_the_variable_not_just_the_item() {
+    // The failure an operator actually meets: an item renamed in the vault
+    // leaves a well-formed reference that stops resolving, so nothing offline
+    // catches it and the launch is where it surfaces. op names the item; the
+    // manifest entry is what can be acted on.
+    let seam = CliSeam::new();
+    seam.install_stub_agent("agent");
+    seam.install_fake_op();
+    fs::write(
+        seam.config_dir.join("manifests/m.env.tpl"),
+        "GOOD=op://Orchestrator/anthropic/conductor-api-key\n\
+         GHOST=op://Orchestrator/renamed-away/password\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("harnesses.d/claude.conf"),
+        "backend  = onepassword\nmanifest = m.env.tpl\ncommand  = agent\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "auth_mode = file\ndefault_backend = onepassword\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("op.env"),
+        "OP_SERVICE_ACCOUNT_TOKEN=dummy\n",
+    )
+    .unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .arg("claude")
+        .output()
+        .expect("launch");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("GHOST"), "{err}");
+    assert!(
+        err.contains("op://Orchestrator/renamed-away/password"),
+        "{err}"
+    );
+    // The one that resolves must not be blamed beside it.
+    assert!(!err.contains("GOOD\n"), "{err}");
+    // And it must point at the command that confirms a fix.
+    assert!(err.contains("secrets validate"), "{err}");
+    // Still a failed launch: the agent must not have run.
+    assert!(!seam.work_dir.join("agent.record").exists());
+}
+
+#[test]
+fn a_launch_that_resolves_says_nothing_extra() {
+    // The blame block must not appear on a healthy launch.
+    let seam = CliSeam::new();
+    seam.install_stub_agent("agent");
+    fs::write(
+        seam.config_dir.join("manifests/ok.env"),
+        "APP_DB_PASS=corr3ct\n",
+    )
+    .unwrap();
+    write_plain_harness(&seam, "claude", "ok.env", "agent");
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .arg("claude")
+        .output()
+        .expect("launch");
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("could not resolve"), "{err}");
+    assert!(!err.contains("secrets validate"), "{err}");
+}
