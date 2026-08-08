@@ -38,7 +38,8 @@ vaulted-agent version   # expect 0.4.14 (git stamp may appear in parentheses)
 
 | Term | Meaning |
 |------|---------|
-| **Harness** | Named profile in `harnesses.d/<name>.conf` (command, manifest, backend, workdir, …) |
+| **Harness** | Named profile in `harnesses.d/<name>.conf` (command, manifest, backend, workdir, optional `alias` / `keep`, …) |
+| **Alias** | `alias = TARGET = SOURCE` in a harness conf: copy resolved SOURCE onto TARGET in that harness's child env only |
 | **Manifest / refs file** | Mapping file under `manifests/` - references only for vault backends |
 | **Manager token** | Vault SA token (`op.env` / `bws.env` or prompt) - used only to resolve, then dropped |
 | **Service user** | Optional OS account; launcher re-execs via `sudo -u` so the agent runs as that user |
@@ -91,6 +92,20 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 
 Shipped / auto harness defaults to `kimi --auto` (unattended). Edit the harness
 to drop `--auto` if you want manual approval.
+
+If Kimi is configured as an OpenAI-compatible provider (e.g. Fireworks) but the
+shared manifest maps `OPENAI_API_KEY` to the real OpenAI key, rename for this
+harness only:
+
+```ini
+# harnesses.d/kimi.conf
+manifest = orchestrator-all.env.tpl
+alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
+command  = kimi --auto
+```
+
+Source must already be in the resolved manifest. Missing source fails the launch
+(no silent wrong key).
 
 ## Recipes agents actually need
 

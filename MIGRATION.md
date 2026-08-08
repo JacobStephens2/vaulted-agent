@@ -1,3 +1,30 @@
+# Migration: harness `alias` renames an injected secret (unreleased)
+
+A harness could not hand an injected secret to the agent under a different
+variable name. When the agent hardcodes `OPENAI_API_KEY` (or similar) for a
+non-OpenAI provider, and a shared manifest already maps that name to another
+key, the harness launched with the wrong credential and the agent failed at the
+provider (issue #66).
+
+```ini
+# harnesses.d/kimi.conf
+manifest = orchestrator-all.env.tpl
+alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
+command  = kimi --auto
+```
+
+Read it as the assignment it resembles: in this harness's child environment,
+`OPENAI_API_KEY` takes a **copy** of the resolved value of `FIREWORKS_AI_API_KEY`.
+Every other harness on the same manifest is unchanged.
+
+Rules:
+
+- Fail closed if the source is missing or empty (no silent leave-wrong-key).
+- Source must be an **injected** secret from the manifest, not parent env
+  (`keep` already covers passthrough).
+- Manager-token names are refused as source and target.
+- A target that also appears in the manifest is overwritten for this harness.
+
 # Migration: a failed launch names the variable (unreleased)
 
 When a launch could not resolve its manifest, the launcher printed the resolver

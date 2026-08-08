@@ -476,6 +476,7 @@ command  = claude --permission-mode auto
 | `workdir`  | agent cwd: unset → install default; `caller` → your shell’s directory (needed for `--resume` / project sessions); or an absolute/`$HOME` path |
 | `labels`   | map non-UUID `--resume`/`--session-id` values to a stable UUIDv5    |
 | `keep`     | extra variables surviving the environment scrub, comma separated    |
+| `alias`    | repeatable: `TARGET = SOURCE` — copy an injected secret onto another name in this harness's child env only (fail closed if SOURCE missing; see issue #66) |
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 
