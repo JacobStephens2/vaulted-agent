@@ -301,6 +301,28 @@ impl Harness {
             paths.manifest_dir.join(p)
         }
     }
+
+    /// Basename of the first command token (`kimi`, `claude`, …).
+    pub fn command_basename(&self) -> Option<&str> {
+        let prog = self.command.first()?;
+        Path::new(prog).file_name().and_then(|s| s.to_str())
+    }
+}
+
+/// Why a known agent ignores vault-injected env credentials (issue #68).
+///
+/// Returns `None` when the launcher model matches the agent. Used by doctor
+/// and install guidance; keep in sync with `wire_day_one_harnesses` skips.
+pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
+    match command_basename {
+        "kimi" => Some(
+            "kimi does not read custom OpenAI-compatible provider credentials from the \
+             process environment; put the key in ~/.kimi-code/config.toml (api_key = \"…\"). \
+             Injected manifest variables and alias= are a silent no-op for those providers. \
+             KIMI_API_KEY is only for kimi's built-in provider. See issue #68.",
+        ),
+        _ => None,
+    }
 }
 
 /// Read a single `key = value` from defaults.conf (first match wins).

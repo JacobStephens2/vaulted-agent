@@ -58,7 +58,7 @@ only). Point harnesses at it, or use `va run -m …`.
 va claude
 va codex
 va grok
-va kimi           # --auto by default (matches claude's unattended posture)
+va kimi           # --auto; credentials for custom providers go in ~/.kimi-code/config.toml (not env inject)
 ```
 
 With `auth_mode=prompt`, paste the vault manager token when asked (not written

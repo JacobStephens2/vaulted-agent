@@ -1,3 +1,29 @@
+# Migration: kimi is env-blind for custom providers (unreleased)
+
+Kimi Code does not read custom OpenAI-compatible provider credentials from the
+process environment (issue #68). Pointing `kimi` at a vault manifest made
+injection look useful while auth failed inside the agent. Shipped defaults and
+install behaviour now match that:
+
+- `etc/harnesses.d/kimi.conf` uses `backend = plainfile` and `manifest = empty.env`
+  (not a vault refs file). The old `alias = OPENAI_API_KEY = …` hint is removed.
+- `install.sh` still auto-detects `kimi` and writes a day-one harness, but
+  `wire_day_one_harnesses` **skips** kimi when attaching vault backends so
+  vault setup does not silently rewire it to a real refs file.
+- `va doctor` warns if a harness whose command is `kimi` has a non-empty
+  manifest or any `alias=` lines, and does **not** treat empty.env as
+  “finish setup” for that agent.
+
+**What you should do:** put the provider key in `~/.kimi-code/config.toml`
+(`api_key = "…"`). Keep the harness on `empty.env` unless you have another
+reason to inject env vars kimi actually reads (`KIMI_API_KEY` for the built-in
+provider only).
+
+**Planned (not in this release):** a file-render path that writes resolved
+secrets into a private ephemeral config (e.g. under `KIMI_CODE_HOME`) and
+shreds on exit — the general form of the pattern that already works for tools
+that only accept credentials on disk. Track under issue #68 / a follow-up ADR.
+
 # Migration: harness `alias` renames an injected secret (unreleased)
 
 A harness could not hand an injected secret to the agent under a different

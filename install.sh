@@ -530,8 +530,10 @@ if (( ! NO_AUTO_HARNESS )); then
     printf '  %-8s not found (skipped)\n' grok
   fi
   # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
-  # --auto is Kimi's fully autonomous permission mode, the counterpart to
-  # claude's --permission-mode auto above.
+  # --auto matches unattended default. Credentials for custom OpenAI-compatible
+  # providers live in ~/.kimi-code/config.toml, not the process env (issue #68).
+  # Day-one harness stays on empty.env; wire_day_one_harnesses will not attach
+  # a vault manifest to kimi (injection would be a silent no-op).
   if p="$(find_user_bin kimi)"; then
     write_auto_harness kimi "$p" "kimi --auto"
     found_any=1
@@ -541,6 +543,7 @@ if (( ! NO_AUTO_HARNESS )); then
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
     printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi\n'
+    printf '  Note: kimi keeps empty.env after vault setup — put provider keys in ~/.kimi-code/config.toml\n'
   else
     printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
@@ -666,8 +669,12 @@ ensure_workdir_caller() {
 # Day-one auto-harnesses are plainfile + empty.env. Choosing a vault backend
 # at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
 # has no vault token). Never touch harnesses that already have a real backend.
+#
+# Exception: env-blind agents (kimi today). They ignore injected secrets for
+# custom providers; wiring them to a vault manifest makes inject look useful
+# while auth still fails in the agent (issue #68). Leave those on empty.env.
 wire_day_one_harnesses() {
-  local backend="$1" manifest_name="$2" conf tmp n=0 be man
+  local backend="$1" manifest_name="$2" conf tmp n=0 be man cmd base
   case "$backend" in
     onepassword|bitwarden|pass) ;;
     *) return 0 ;;
@@ -677,8 +684,18 @@ wire_day_one_harnesses() {
   for conf in "$CONFIG"/harnesses.d/*.conf; do
     be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
     man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    cmd="$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
     be="$(printf '%s' "$be" | sed 's/[[:space:]]*$//')"
     man="$(printf '%s' "$man" | sed 's/[[:space:]]*$//')"
+    cmd="$(printf '%s' "$cmd" | sed 's/[[:space:]]*$//')"
+    base="${cmd%% *}"
+    base="${base##*/}"
+    # Env-blind: do not attach a vault manifest (injection is a silent no-op).
+    if [[ "$base" == "kimi" || "${conf##*/}" == "kimi.conf" ]]; then
+      printf '  left %s  (kimi ignores injected env credentials for custom providers — keep empty.env; put the key in ~/.kimi-code/config.toml)\n' \
+        "${conf##*/}"
+      continue
+    fi
     # Only rewrite the installer's zero-secret starter config.
     if [[ "$be" != "plainfile" || "$man" != "empty.env" ]]; then
       printf '  left %s  (backend=%s manifest=%s — not day-one)\n' \
