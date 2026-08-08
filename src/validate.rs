@@ -171,6 +171,70 @@ pub fn comment_lines_with_op_refs(text: &str) -> Vec<usize> {
     lines
 }
 
+/// Name the variables whose reference mentions something in a resolver error.
+///
+/// `op inject` fails the whole file at the first reference it cannot read and
+/// reports the item, not the variable. The operator needs the variable: that is
+/// what they will grep the manifest for. Matching the item name back to the
+/// lines that use it turns "could not find item X" into the two or three
+/// entries actually at fault, without a round trip per reference.
+pub fn blame_manifest_lines(manifest: &Path, error: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let mut blamed = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.contains('=') {
+            continue;
+        }
+        let Some((var, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (var, value) = (var.trim(), value.trim());
+        // Quoted values are still references once the outer quotes are gone.
+        let value = value
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(value);
+        if !value.starts_with("op://") {
+            continue;
+        }
+        // The item component is what op names when it cannot resolve one.
+        let parts: Vec<&str> = value[5..].split('/').collect();
+        if parts.len() < 2 || parts[1].is_empty() {
+            continue;
+        }
+        let item = parts[1];
+        // Match "item <title>" as op phrases it, not a bare substring of the
+        // title: a short name must not hitch a ride on a longer title's error.
+        if error_names_op_item(error, item) {
+            blamed.push(format!("{var}\n      {value}"));
+        }
+    }
+    blamed
+}
+
+/// True when `error` names this 1Password item the way `op` does.
+fn error_names_op_item(error: &str, item: &str) -> bool {
+    let needle = format!("item {item}");
+    let bytes = error.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = error[start..].find(&needle) {
+        let after = start + rel + needle.len();
+        let boundary = match bytes.get(after) {
+            None => true,
+            Some(b) => !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_',
+        };
+        if boundary {
+            return true;
+        }
+        start += rel + 1;
+    }
+    false
+}
+
 /// Every problem in a manifest, each with its line number.
 ///
 /// `validate_manifest_text` stops at the first error, which is right for a
