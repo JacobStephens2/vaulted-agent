@@ -666,15 +666,30 @@ ensure_workdir_caller() {
   shopt -u nullglob
 }
 
+# Env-blind agent basenames (issue #68). Same list as etc/env-blind-agents,
+# which the Rust binary embeds for doctor — do not hardcode names here.
+is_env_blind_agent() {
+  local name="$1" list="$REPO/etc/env-blind-agents" line
+  [[ -n "$name" && -f "$list" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" == "$name" ]] && return 0
+  done < "$list"
+  return 1
+}
+
 # Day-one auto-harnesses are plainfile + empty.env. Choosing a vault backend
 # at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
 # has no vault token). Never touch harnesses that already have a real backend.
 #
-# Exception: env-blind agents (kimi today). They ignore injected secrets for
-# custom providers; wiring them to a vault manifest makes inject look useful
-# while auth still fails in the agent (issue #68). Leave those on empty.env.
+# Exception: env-blind agents (etc/env-blind-agents). They ignore injected
+# secrets for the usual provider path; wiring them to a vault manifest makes
+# inject look useful while auth still fails in the agent (issue #68).
 wire_day_one_harnesses() {
-  local backend="$1" manifest_name="$2" conf tmp n=0 be man cmd base
+  local backend="$1" manifest_name="$2" conf tmp n=0 be man cmd base stem
   case "$backend" in
     onepassword|bitwarden|pass) ;;
     *) return 0 ;;
@@ -690,10 +705,12 @@ wire_day_one_harnesses() {
     cmd="$(printf '%s' "$cmd" | sed 's/[[:space:]]*$//')"
     base="${cmd%% *}"
     base="${base##*/}"
+    stem="${conf##*/}"
+    stem="${stem%.conf}"
     # Env-blind: do not attach a vault manifest (injection is a silent no-op).
-    if [[ "$base" == "kimi" || "${conf##*/}" == "kimi.conf" ]]; then
-      printf '  left %s  (kimi ignores injected env credentials for custom providers — keep empty.env; put the key in ~/.kimi-code/config.toml)\n' \
-        "${conf##*/}"
+    if is_env_blind_agent "$base" || is_env_blind_agent "$stem"; then
+      printf '  left %s  (env-blind agent %s — keep empty.env; credentials go where the tool reads them, not vault inject; see etc/env-blind-agents / issue #68)\n' \
+        "${conf##*/}" "${base:-$stem}"
       continue
     fi
     # Only rewrite the installer's zero-secret starter config.

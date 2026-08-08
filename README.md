@@ -3,8 +3,11 @@
 [![CI](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent-launcher)](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/latest)
 
-Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
-**in-process** - without leaving a pile of `.env` files on disk.
+Give Claude Code, Codex, and Grok real vault credentials **in-process** -
+without leaving a pile of `.env` files on disk. Kimi Code is supported for
+launch and resume, but custom OpenAI-compatible provider keys live in
+`~/.kimi-code/config.toml` (not env inject; see [AGENTS.md](AGENTS.md) and
+issue #68).
 
 One launcher (`va`), one secrets backend (1Password, Bitwarden Secrets Manager,
 pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt

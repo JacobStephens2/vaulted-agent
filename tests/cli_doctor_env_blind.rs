@@ -23,17 +23,14 @@ fn doctor(seam: &CliSeam) -> String {
     )
 }
 
-#[test]
-fn doctor_warns_when_kimi_points_at_a_nonempty_manifest() {
+/// Kimi harness under plainfile, with the given manifest body and optional
+/// extra harness conf lines (e.g. alias=).
+fn seam_kimi(manifest_body: &str, harness_extra: &str) -> CliSeam {
     let seam = CliSeam::new();
-    fs::write(
-        seam.config_dir.join("manifests/full.env"),
-        "OPENAI_API_KEY=plain-not-used-by-kimi\n",
-    )
-    .unwrap();
+    fs::write(seam.config_dir.join("manifests/m.env"), manifest_body).unwrap();
     fs::write(
         seam.config_dir.join("harnesses.d/kimi.conf"),
-        "backend = plainfile\nmanifest = full.env\ncommand = kimi --auto\n",
+        format!("backend = plainfile\nmanifest = m.env\n{harness_extra}command = kimi --auto\n"),
     )
     .unwrap();
     fs::write(
@@ -41,7 +38,12 @@ fn doctor_warns_when_kimi_points_at_a_nonempty_manifest() {
         "auth_mode = file\ndefault_backend = plainfile\n",
     )
     .unwrap();
+    seam
+}
 
+#[test]
+fn doctor_warns_when_kimi_points_at_a_nonempty_manifest() {
+    let seam = seam_kimi("OPENAI_API_KEY=plain-not-used-by-kimi\n", "");
     let out = doctor(&seam);
     assert!(
         out.contains("WARN:") && out.contains("kimi"),
@@ -55,19 +57,7 @@ fn doctor_warns_when_kimi_points_at_a_nonempty_manifest() {
 
 #[test]
 fn doctor_accepts_empty_manifest_for_kimi() {
-    let seam = CliSeam::new();
-    fs::write(seam.config_dir.join("manifests/empty.env"), "# none\n").unwrap();
-    fs::write(
-        seam.config_dir.join("harnesses.d/kimi.conf"),
-        "backend = plainfile\nmanifest = empty.env\ncommand = kimi --auto\n",
-    )
-    .unwrap();
-    fs::write(
-        seam.config_dir.join("defaults.conf"),
-        "auth_mode = file\ndefault_backend = plainfile\n",
-    )
-    .unwrap();
-
+    let seam = seam_kimi("# none\n", "");
     let out = doctor(&seam);
     assert!(
         !out.contains("WARN: manifest defines no variables"),
@@ -81,26 +71,10 @@ fn doctor_accepts_empty_manifest_for_kimi() {
 
 #[test]
 fn doctor_warns_on_useless_alias_for_kimi() {
-    let seam = CliSeam::new();
-    fs::write(
-        seam.config_dir.join("manifests/full.env"),
+    let seam = seam_kimi(
         "OPENAI_API_KEY=a\nFIREWORKS_AI_API_KEY=b\n",
-    )
-    .unwrap();
-    fs::write(
-        seam.config_dir.join("harnesses.d/kimi.conf"),
-        "backend = plainfile\n\
-         manifest = full.env\n\
-         alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY\n\
-         command = kimi --auto\n",
-    )
-    .unwrap();
-    fs::write(
-        seam.config_dir.join("defaults.conf"),
-        "auth_mode = file\ndefault_backend = plainfile\n",
-    )
-    .unwrap();
-
+        "alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY\n",
+    );
     let out = doctor(&seam);
     assert!(
         out.contains("alias") && out.contains("WARN"),

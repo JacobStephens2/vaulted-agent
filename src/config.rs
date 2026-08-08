@@ -309,11 +309,32 @@ impl Harness {
     }
 }
 
+/// Shared list of env-blind agent basenames (`etc/env-blind-agents`).
+///
+/// Install (`wire_day_one_harnesses`) reads the same file from the tree so
+/// doctor and install cannot drift (PR #69 review).
+const ENV_BLIND_AGENTS_LIST: &str = include_str!("../etc/env-blind-agents");
+
+/// True when `name` is a command basename (or harness stem) listed in
+/// `etc/env-blind-agents`.
+pub fn is_env_blind_agent(name: &str) -> bool {
+    for raw in ENV_BLIND_AGENTS_LIST.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if !line.is_empty() && line == name {
+            return true;
+        }
+    }
+    false
+}
+
 /// Why a known agent ignores vault-injected env credentials (issue #68).
 ///
-/// Returns `None` when the launcher model matches the agent. Used by doctor
-/// and install guidance; keep in sync with `wire_day_one_harnesses` skips.
+/// Returns `None` when the launcher model matches the agent. Names come from
+/// `etc/env-blind-agents`; per-agent copy is below.
 pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
+    if !is_env_blind_agent(command_basename) {
+        return None;
+    }
     match command_basename {
         "kimi" => Some(
             "kimi does not read custom OpenAI-compatible provider credentials from the \
@@ -321,7 +342,16 @@ pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
              Injected manifest variables and alias= are a silent no-op for those providers. \
              KIMI_API_KEY is only for kimi's built-in provider. See issue #68.",
         ),
-        _ => None,
+        // Future list entries without a tailored sentence still get a clear warn.
+        other => {
+            let _ = other;
+            Some(
+                "this agent is listed as env-blind in etc/env-blind-agents: it does not \
+                 consume vault-injected process-env credentials for the usual provider path. \
+                 Keep an empty manifest or put secrets where the tool actually reads them. \
+                 See issue #68.",
+            )
+        }
     }
 }
 
@@ -556,6 +586,14 @@ mod tests {
         .unwrap();
         assert_eq!(h.manifest, "empty.env");
         assert_eq!(h.command, vec!["claude", "--permission-mode", "auto"]);
+    }
+
+    #[test]
+    fn env_blind_list_includes_kimi_from_shared_file() {
+        assert!(is_env_blind_agent("kimi"));
+        assert!(!is_env_blind_agent("claude"));
+        assert!(env_blind_agent_reason("kimi").is_some());
+        assert!(env_blind_agent_reason("claude").is_none());
     }
 
     #[test]

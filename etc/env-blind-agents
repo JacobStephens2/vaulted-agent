@@ -1,0 +1,11 @@
+# Command basenames that do not consume vault-injected process-env credentials
+# for the provider paths operators care about (issue #68).
+#
+# One name per line. Comments and blank lines ignored.
+# Shared source of truth for:
+#   - install.sh  wire_day_one_harnesses (skip vault rewire)
+#   - Rust doctor / env_blind_agent_reason (include_str! this file)
+#
+# Also match harness stem <name>.conf to the same token (install may leave
+# kimi.conf even if command is rewritten later).
+kimi
