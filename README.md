@@ -75,7 +75,8 @@ va -m readonly.env.tpl claude   # this launch only, against another manifest
 va claude --resume <id>   # agent args pass through; resume shape is normalized
 va doctor
 va secrets list           # Bitwarden SM (same auth as launches)
-va secrets validate
+va secrets validate           # resolves every ref against the vault
+va secrets validate --offline # syntax only, no token needed
 va refresh                # build/update a refs file (Bitwarden or 1Password)
 va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file

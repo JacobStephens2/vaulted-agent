@@ -357,6 +357,78 @@ fn ensure_workdir_for_setup(paths: &Paths, service_user: Option<&str>) -> Result
     Ok(())
 }
 
+/// Resolve every reference in a manifest, exactly as a launch would.
+///
+/// `validate` used to check reference *shape* and stop. A reference can be
+/// perfectly well-formed and name an item that no longer exists — after a
+/// rename in the vault, say — and the check passed while every launch died.
+/// CONTEXT.md calls this command the pre-flight gate that must not fail open,
+/// so it has to ask the vault.
+///
+/// The resolution goes through `backend::resolve`, the same call a launch
+/// makes, so this agrees with a launch by construction rather than by a second
+/// implementation that can drift from it.
+///
+/// The resolved values are counted and dropped. They are never printed, logged,
+/// or returned: the point is whether they resolve, and a validate command that
+/// wrote secrets to a terminal would be a worse bug than the one it fixes.
+fn resolve_for_validation(paths: &Paths, backend: Backend, manifest: &Path) -> Result<usize> {
+    let mode = auth_mode(paths);
+    let token = match backend {
+        Backend::Bitwarden => Some(auth::load_manager_token(
+            paths,
+            mode,
+            TokenKind::Bws,
+            force_prompt(),
+        )?),
+        Backend::OnePassword => Some(auth::load_manager_token(
+            paths,
+            mode,
+            TokenKind::Op,
+            force_prompt(),
+        )?),
+        Backend::Pass | Backend::Sops | Backend::Plainfile => None,
+    };
+    let resolved = backend::resolve(backend, manifest, paths, token.as_ref())?;
+    drop(token);
+    let n = resolved.len();
+    drop(resolved);
+    Ok(n)
+}
+
+/// Name the variables whose reference mentions something in a resolver error.
+///
+/// `op inject` fails the whole file at the first reference it cannot read and
+/// reports the item, not the variable. The operator needs the variable: that is
+/// what they will grep the manifest for. Matching the item name back to the
+/// lines that use it turns "could not find item X" into the two or three
+/// entries actually at fault, without a round trip per reference.
+fn blame_manifest_lines(manifest: &Path, error: &str) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let mut blamed = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.contains('=') {
+            continue;
+        }
+        let Some((var, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (var, value) = (var.trim(), value.trim());
+        if !value.starts_with("op://") {
+            continue;
+        }
+        // The item component is what op names when it cannot resolve one.
+        let parts: Vec<&str> = value[5..].split('/').collect();
+        if parts.len() >= 2 && !parts[1].is_empty() && error.contains(parts[1]) {
+            blamed.push(format!("{var}\n      {value}"));
+        }
+    }
+    blamed
+}
+
 pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
@@ -365,7 +437,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                 "usage: vaulted-agent secrets list\n\
                  \x20      vaulted-agent secrets get <ref>\n\
                  \x20      vaulted-agent secrets which\n\
-                 \x20      vaulted-agent secrets validate [manifest-or-harness]\n\
+                 \x20      vaulted-agent secrets validate [manifest-or-harness] [--offline]\n\
                  \x20      vaulted-agent secrets refresh [manifest] [--all]\n\
                  \nrefs: UUID | uuid:UUID | name:KEY | project:PROJECT/KEY\n\
                  list/get use Bitwarden Secrets Manager (bws) with the same auth as launches."
@@ -423,7 +495,12 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
             Ok(())
         }
         "validate" => {
-            let target = args.get(1).map(|s| s.as_str());
+            // Live by default: a gate that never asks the vault is not a gate.
+            // --offline keeps the old cheap check for somewhere without a token.
+            let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+            let offline = rest.contains(&"--offline");
+            let positional: Vec<&str> = rest.into_iter().filter(|s| !s.starts_with("--")).collect();
+            let target = positional.first().copied();
             match target {
                 None => {
                     let mut err = false;
@@ -434,10 +511,24 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         let be = h.backend.unwrap_or(be_default);
                         let man_path = h.resolve_manifest_path(paths);
                         print!("{name}: ");
-                        match validate_manifest_file(&man_path, be) {
-                            Ok(_) => println!("ok"),
+                        let checked =
+                            validate_manifest_file(&man_path, be)
+                                .map(|_| ())
+                                .and_then(|()| {
+                                    if offline {
+                                        Ok(None)
+                                    } else {
+                                        resolve_for_validation(paths, be, &man_path).map(Some)
+                                    }
+                                });
+                        match checked {
+                            Ok(None) => println!("ok (syntax only)"),
+                            Ok(Some(n)) => println!("ok ({n} reference(s) resolved)"),
                             Err(e) => {
                                 println!("FAIL ({e})");
+                                for b in blame_manifest_lines(&man_path, &format!("{e}")) {
+                                    println!("    {b}");
+                                }
                                 err = true;
                             }
                         }
@@ -461,15 +552,34 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         } else {
                             paths.manifest_dir.join(p)
                         };
-                        let be = match args.get(2) {
+                        // positional, not args[2]: --offline may sit anywhere.
+                        let be = match positional.get(1) {
                             Some(s) => s.parse()?,
                             None => default_backend(paths),
                         };
                         (man_path, be)
                     };
                     validate_manifest_file(&man_path, be)?;
-                    println!("ok: {}", man_path.display());
-                    Ok(())
+                    if offline {
+                        println!("ok: {} (syntax only; vault not probed)", man_path.display());
+                        return Ok(());
+                    }
+                    match resolve_for_validation(paths, be, &man_path) {
+                        Ok(n) => {
+                            println!("ok: {} ({n} reference(s) resolved)", man_path.display());
+                            Ok(())
+                        }
+                        Err(e) => {
+                            let blamed = blame_manifest_lines(&man_path, &format!("{e}"));
+                            if !blamed.is_empty() {
+                                eprintln!("{}: could not resolve:", man_path.display());
+                                for b in &blamed {
+                                    eprintln!("    {b}");
+                                }
+                            }
+                            Err(e)
+                        }
+                    }
                 }
             }
         }

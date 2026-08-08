@@ -179,6 +179,34 @@ case "${1-} ${2-}" in
 ]
 JSON
     ;;
+  "inject -i")
+    # Enough of `op inject` for validation tests: substitute each reference,
+    # and fail the whole file on the first item that does not exist -- which is
+    # exactly how the real one behaves, and the behaviour under test.
+    manifest="${3-}"
+    known=" anthropic github token bare item db.example.com flaky item "
+    out=""
+    while IFS= read -r line; do
+      case "$line" in
+        \#*|"") out="$out$line\n"; continue ;;
+      esac
+      case "$line" in
+        *=op://*)
+          ref="${line#*=}"
+          rest="${ref#op://}"
+          IFS=/ read -r _vault item _field <<< "$rest"
+          case "$known" in
+            *" $item "*) out="$out${line%%=*}=fake-value\n" ;;
+            *)
+              echo "[ERROR] could not resolve item UUID for item $item: could not find item $item in vault v1" >&2
+              exit 1 ;;
+          esac
+          ;;
+        *) out="$out$line\n" ;;
+      esac
+    done < "$manifest"
+    printf '%b' "$out"
+    ;;
   "item get")
     # Real `op` refuses `item get` without a vault query when the caller is a
     # service account, which is how this tool authenticates. Enforce it here so

@@ -1,3 +1,41 @@
+# Migration: `secrets validate` asks the vault (unreleased)
+
+`secrets validate` checked that each reference was well *formed* and stopped
+there. A reference can be perfectly well-formed and name an item that no longer
+exists — after a rename in the vault, say — so the command printed `ok`, exited
+0, and every launch then failed on the same file.
+
+`CONTEXT.md` lists this command as the pre-flight gate that must not fail open.
+It was failing open.
+
+It now resolves every reference through `backend::resolve`, the same call a
+launch makes, so validate agrees with a launch by construction rather than
+through a second implementation that can drift. Resolved values are counted and
+dropped — never printed, logged or returned.
+
+When a reference cannot be resolved, the failing item is matched back to the
+variables that use it, because the item is what the vault names and the variable
+is what you can act on:
+
+```
+$ va secrets validate orchestrator-all.env.tpl
+orchestrator-all.env.tpl: could not resolve:
+    TOURBOT_WEBHOOK_SHARED_SECRET_PASSWORD
+      op://Orchestrator/Tourbot Webhook Shared Secret/password
+```
+
+**This is a behaviour change.** Validation now needs a manager token and one
+vault round trip, so it fails on a host that has neither where it used to pass.
+That is the point — a gate that cannot reach the vault should say so rather than
+report ok. `--offline` keeps the old check:
+
+```bash
+va secrets validate orchestrator-all.env.tpl --offline   # syntax only
+```
+
+`doctor` is unchanged and remains offline by design; it already says "syntax
+checks only; live vault access not probed".
+
 # Migration: launching a harness against another manifest (unreleased)
 
 ## `-m` on the harness path
