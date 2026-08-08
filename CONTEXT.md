@@ -9,6 +9,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Launcher** | The `vaulted-agent` / `va` binary. Resolves secrets, scrubs the environment, and execs an agent. Not a long-running daemon. |
 | **Harness** | A named launch profile (`harnesses.d/<name>.conf`): backend, manifest, command, optional workdir/bin/labels/keep/**alias**. |
 | **Alias** | Per-harness child-env rename after inject: `alias = TARGET = SOURCE` copies the resolved source secret onto TARGET (fail closed if source missing). |
+| **Env-blind agent** | Tool that does not read injected secrets from the process env for the credential path operators care about (today: `kimi` custom providers). Manifest inject is a silent no-op; doctor warns. |
 | **Manifest** | The file a harness points at: either **refs** (references only) or dotenv-style secret material (plainfile/sops decrypt). |
 | **Backend** | Where secret values come from: `bitwarden`, `onepassword`, `pass`, `sops`, `plainfile`. Typed in the runtime; unknown names fail closed. |
 | **Refs file** | Bitwarden-oriented manifest of `VAR=reference` lines (uuid / name: / project:) — **no secret values** on disk. |

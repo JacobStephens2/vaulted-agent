@@ -90,22 +90,29 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 
 ### Kimi
 
-Shipped / auto harness defaults to `kimi --auto` (unattended). Edit the harness
-to drop `--auto` if you want manual approval.
+Shipped / auto harness defaults to `kimi --auto` (unattended) with
+`plainfile` + `empty.env`. Edit the harness to drop `--auto` if you want
+manual approval.
 
-If Kimi is configured as an OpenAI-compatible provider (e.g. Fireworks) but the
-shared manifest maps `OPENAI_API_KEY` to the real OpenAI key, rename for this
-harness only:
+**Credentials (issue #68).** Kimi Code does **not** read custom OpenAI-compatible
+provider keys from the process environment. Vault inject, `alias=`, and a full
+manifest are a **silent no-op** for those providers — `va doctor` warns if the
+manifest is non-empty. Put the key in `~/.kimi-code/config.toml`:
 
-```ini
-# harnesses.d/kimi.conf
-manifest = orchestrator-all.env.tpl
-alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
-command  = kimi --auto
+```toml
+[providers.fireworks]
+type = "openai"
+base_url = "https://api.fireworks.ai/inference/v1"
+api_key = "fw_…"   # literal; no env interpolation
 ```
 
-Source must already be in the resolved manifest. Missing source fails the launch
-(no silent wrong key).
+`KIMI_API_KEY` in the environment works only for kimi's **built-in** provider,
+not for a custom `type = "openai"` block. Install leaves kimi on `empty.env`
+even after vault setup; other harnesses still get the vault refs file.
+
+A future **file-render** backend may write an ephemeral config for tools in this
+class (kimi, AWS files, `.npmrc`, …). Until then, config-file keys stay outside
+the vault inject path.
 
 ## Recipes agents actually need
 
