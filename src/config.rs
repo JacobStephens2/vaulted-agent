@@ -335,24 +335,13 @@ pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
     if !is_env_blind_agent(command_basename) {
         return None;
     }
-    match command_basename {
-        "kimi" => Some(
-            "kimi does not read custom OpenAI-compatible provider credentials from the \
-             process environment; put the key in ~/.kimi-code/config.toml (api_key = \"…\"). \
-             Injected manifest variables and alias= are a silent no-op for those providers. \
-             KIMI_API_KEY is only for kimi's built-in provider. See issue #68.",
-        ),
-        // Future list entries without a tailored sentence still get a clear warn.
-        other => {
-            let _ = other;
-            Some(
-                "this agent is listed as env-blind in etc/env-blind-agents: it does not \
-                 consume vault-injected process-env credentials for the usual provider path. \
-                 Keep an empty manifest or put secrets where the tool actually reads them. \
-                 See issue #68.",
-            )
-        }
-    }
+    // Per-agent copy only for names that appear in etc/env-blind-agents.
+    // kimi must not get a tailored "structurally blind" sentence (issue #70).
+    Some(
+        "this agent is listed as env-blind in etc/env-blind-agents: it does not \
+         consume vault-injected process-env credentials for the usual provider path. \
+         Keep an empty manifest or put secrets where the tool actually reads them.",
+    )
 }
 
 /// Read a single `key = value` from defaults.conf (first match wins).
@@ -589,10 +578,11 @@ mod tests {
     }
 
     #[test]
-    fn env_blind_list_includes_kimi_from_shared_file() {
-        assert!(is_env_blind_agent("kimi"));
+    fn env_blind_list_does_not_classify_kimi_as_structurally_blind() {
+        // Issue #70: kimi reads process.env; 0.33–0.34 only fail on kimi-code#2745.
+        assert!(!is_env_blind_agent("kimi"));
         assert!(!is_env_blind_agent("claude"));
-        assert!(env_blind_agent_reason("kimi").is_some());
+        assert!(env_blind_agent_reason("kimi").is_none());
         assert!(env_blind_agent_reason("claude").is_none());
     }
 

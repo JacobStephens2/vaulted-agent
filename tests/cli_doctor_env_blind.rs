@@ -1,8 +1,7 @@
-//! Issue #68: doctor must not green-light a vault manifest for env-blind agents.
+//! Env-blind agent registry (etc/env-blind-agents) and doctor interaction.
 //!
-//! Kimi (and tools like it) do not read custom provider credentials from the
-//! process environment. A harness pointed at a real refs file looks healthy
-//! under syntax checks and fails later inside the agent.
+//! Issue #70: kimi is *not* structurally env-blind — do not warn on a non-empty
+//! manifest for kimi. The list may still gain real env-blind tools later.
 
 mod common;
 
@@ -23,8 +22,6 @@ fn doctor(seam: &CliSeam) -> String {
     )
 }
 
-/// Kimi harness under plainfile, with the given manifest body and optional
-/// extra harness conf lines (e.g. alias=).
 fn seam_kimi(manifest_body: &str, harness_extra: &str) -> CliSeam {
     let seam = CliSeam::new();
     fs::write(seam.config_dir.join("manifests/m.env"), manifest_body).unwrap();
@@ -42,42 +39,46 @@ fn seam_kimi(manifest_body: &str, harness_extra: &str) -> CliSeam {
 }
 
 #[test]
-fn doctor_warns_when_kimi_points_at_a_nonempty_manifest() {
-    let seam = seam_kimi("OPENAI_API_KEY=plain-not-used-by-kimi\n", "");
+fn doctor_does_not_treat_kimi_as_env_blind() {
+    // #70: non-empty manifest for kimi is a normal vault wiring, not a WARN.
+    let seam = seam_kimi("OPENAI_API_KEY=vault-injected-key\n", "");
     let out = doctor(&seam);
     assert!(
-        out.contains("WARN:") && out.contains("kimi"),
-        "env-blind agent with secrets in the manifest must warn:\n{out}"
+        out.contains("manifest syntax ok"),
+        "healthy non-empty kimi manifest:\n{out}"
     );
     assert!(
-        out.contains("config.toml") || out.contains("process environment"),
-        "message must say where the key actually belongs:\n{out}"
+        !out.contains("env-blind")
+            && !out.contains("silent no-op")
+            && !out.contains("empty manifest is expected"),
+        "kimi must not be classified env-blind:\n{out}"
     );
 }
 
 #[test]
-fn doctor_accepts_empty_manifest_for_kimi() {
+fn doctor_warns_empty_manifest_for_kimi_like_other_agents() {
+    // With env-blind removed, empty day-one is the same "finish setup" shape.
     let seam = seam_kimi("# none\n", "");
     let out = doctor(&seam);
     assert!(
-        !out.contains("WARN: manifest defines no variables"),
-        "empty.env for kimi is expected, not a finish-setup warning:\n{out}"
+        out.contains("WARN: manifest defines no variables"),
+        "empty manifest should warn for kimi like claude:\n{out}"
     );
     assert!(
-        out.contains("empty manifest is expected") || out.contains("note:"),
-        "should note empty is OK for kimi:\n{out}"
+        !out.contains("empty manifest is expected"),
+        "should not special-case kimi empty as expected:\n{out}"
     );
 }
 
 #[test]
-fn doctor_warns_on_useless_alias_for_kimi() {
+fn doctor_does_not_warn_alias_on_kimi_as_env_blind() {
     let seam = seam_kimi(
         "OPENAI_API_KEY=a\nFIREWORKS_AI_API_KEY=b\n",
         "alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY\n",
     );
     let out = doctor(&seam);
     assert!(
-        out.contains("alias") && out.contains("WARN"),
-        "alias on env-blind agent must warn:\n{out}"
+        !out.contains("alias= is set on an env-blind agent"),
+        "alias is valid for Fireworks-backed kimi (#66/#70):\n{out}"
     );
 }

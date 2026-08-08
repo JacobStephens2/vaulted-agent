@@ -530,10 +530,9 @@ if (( ! NO_AUTO_HARNESS )); then
     printf '  %-8s not found (skipped)\n' grok
   fi
   # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
-  # --auto matches unattended default. Credentials for custom OpenAI-compatible
-  # providers live in ~/.kimi-code/config.toml, not the process env (issue #68).
-  # Day-one harness stays on empty.env; wire_day_one_harnesses will not attach
-  # a vault manifest to kimi (injection would be a silent no-op).
+  # --auto matches unattended default. Vault inject works for OpenAI-compatible
+  # providers (OPENAI_API_KEY by type); see issue #70 / kimi-code#2745 for the
+  # 0.33–0.34 gate regression and the launcher LEGACY_FLAG workaround.
   if p="$(find_user_bin kimi)"; then
     write_auto_harness kimi "$p" "kimi --auto"
     found_any=1
@@ -543,7 +542,6 @@ if (( ! NO_AUTO_HARNESS )); then
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
     printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi\n'
-    printf '  Note: kimi keeps empty.env after vault setup — put provider keys in ~/.kimi-code/config.toml\n'
   else
     printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'

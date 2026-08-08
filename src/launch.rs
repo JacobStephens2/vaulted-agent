@@ -336,6 +336,16 @@ pub fn build_launch_plan(
         .and_then(|s| s.to_str())
         .unwrap_or(&program);
 
+    // kimi 0.33–0.34 default to agent-core-v2 print mode, whose auth gate
+    // ignores process.env (kimi-code#2745; fix #2746). Vault inject still works
+    // with KIMI_CODE_LEGACY_FLAG=1 or on 0.32 / post-fix. Do not set if the
+    // operator already put a value in keep/parent (or_insert). Issue #70.
+    if agent_base == "kimi" {
+        child_env
+            .entry(OsString::from("KIMI_CODE_LEGACY_FLAG"))
+            .or_insert_with(|| OsString::from("1"));
+    }
+
     let mut extra = opts.extra_args.clone();
     extra = resume::normalize_argv(agent_base, &extra, harness.labels)?;
 

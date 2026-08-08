@@ -90,29 +90,33 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 
 ### Kimi
 
-Shipped / auto harness defaults to `kimi --auto` (unattended) with
-`plainfile` + `empty.env`. Edit the harness to drop `--auto` if you want
-manual approval.
+Shipped / auto harness defaults to `kimi --auto` (unattended). Day-one is
+`plainfile` + `empty.env`; vault setup rewires kimi like claude/codex/grok.
 
-**Credentials (issue #68).** Kimi Code does **not** read custom OpenAI-compatible
-provider keys from the process environment. Vault inject, `alias=`, and a full
-manifest are a **silent no-op** for those providers — `va doctor` warns if the
-manifest is non-empty. Put the key in `~/.kimi-code/config.toml`:
+**Credentials (issue #70).** Kimi **does** read OpenAI-compatible provider keys
+from the process environment. Selection is by provider **type** (`openai` →
+`OPENAI_API_KEY`), not provider id. Vault inject works.
 
-```toml
-[providers.fireworks]
-type = "openai"
-base_url = "https://api.fireworks.ai/inference/v1"
-api_key = "fw_…"   # literal; no env interpolation
+For a Fireworks-backed kimi on a shared manifest that already maps
+`OPENAI_API_KEY` to the real OpenAI key, rename for this harness only (#66):
+
+```ini
+# harnesses.d/kimi.conf
+manifest = orchestrator-all.env.tpl
+alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
+command  = kimi --auto
 ```
 
-`KIMI_API_KEY` in the environment works only for kimi's **built-in** provider,
-not for a custom `type = "openai"` block. Install leaves kimi on `empty.env`
-even after vault setup; other harnesses still get the vault refs file.
+**Kimi Code 0.33–0.34 regression.** Print-mode auth gate ignores `process.env`
+([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745);
+fix [#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)). That looked
+like “env-blind” and shipped as such in v0.4.16 (#68/#69) — **retracted in
+#70**. The launcher sets `KIMI_CODE_LEGACY_FLAG=1` in the kimi child env so
+vault inject works on those versions (override by exporting another value into
+`keep` / parent if needed). 0.32 and post-#2746 work without the flag.
 
-A future **file-render** backend may write an ephemeral config for tools in this
-class (kimi, AWS files, `.npmrc`, …). Until then, config-file keys stay outside
-the vault inject path.
+`KIMI_API_KEY` is only for kimi’s **built-in** provider. Literal `api_key` in
+`~/.kimi-code/config.toml` still works if you prefer not to inject.
 
 ## Recipes agents actually need
 
