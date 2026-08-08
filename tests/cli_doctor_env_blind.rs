@@ -1,7 +1,4 @@
-//! Env-blind agent registry (etc/env-blind-agents) and doctor interaction.
-//!
-//! Issue #70: kimi is *not* structurally env-blind — do not warn on a non-empty
-//! manifest for kimi. The list may still gain real env-blind tools later.
+//! Env-blind registry + doctor. Issue #70: kimi is not structurally env-blind.
 
 mod common;
 
@@ -40,7 +37,6 @@ fn seam_kimi(manifest_body: &str, harness_extra: &str) -> CliSeam {
 
 #[test]
 fn doctor_does_not_treat_kimi_as_env_blind() {
-    // #70: non-empty manifest for kimi is a normal vault wiring, not a WARN.
     let seam = seam_kimi("OPENAI_API_KEY=vault-injected-key\n", "");
     let out = doctor(&seam);
     assert!(
@@ -50,14 +46,14 @@ fn doctor_does_not_treat_kimi_as_env_blind() {
     assert!(
         !out.contains("env-blind")
             && !out.contains("silent no-op")
-            && !out.contains("empty manifest is expected"),
+            && !out.contains("empty manifest is expected")
+            && !out.contains("listed in etc/env-blind-agents"),
         "kimi must not be classified env-blind:\n{out}"
     );
 }
 
 #[test]
 fn doctor_warns_empty_manifest_for_kimi_like_other_agents() {
-    // With env-blind removed, empty day-one is the same "finish setup" shape.
     let seam = seam_kimi("# none\n", "");
     let out = doctor(&seam);
     assert!(
@@ -71,14 +67,18 @@ fn doctor_warns_empty_manifest_for_kimi_like_other_agents() {
 }
 
 #[test]
-fn doctor_does_not_warn_alias_on_kimi_as_env_blind() {
+fn doctor_reports_kimi_alias_path_as_healthy() {
     let seam = seam_kimi(
         "OPENAI_API_KEY=a\nFIREWORKS_AI_API_KEY=b\n",
         "alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY\n",
     );
     let out = doctor(&seam);
     assert!(
+        out.contains("manifest syntax ok"),
+        "alias on kimi must still parse as a normal harness:\n{out}"
+    );
+    assert!(
         !out.contains("alias= is set on an env-blind agent"),
-        "alias is valid for Fireworks-backed kimi (#66/#70):\n{out}"
+        "alias is valid for type-based OPENAI_API_KEY remaps (#66/#70):\n{out}"
     );
 }

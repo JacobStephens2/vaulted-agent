@@ -664,8 +664,9 @@ ensure_workdir_caller() {
   shopt -u nullglob
 }
 
-# Env-blind agent basenames (issue #68). Same list as etc/env-blind-agents,
-# which the Rust binary embeds for doctor — do not hardcode names here.
+# Env-blind agent basenames (etc/env-blind-agents). Same file the Rust binary
+# embeds for doctor — do not hardcode names here. The list may be empty; kimi
+# was wrongly listed in v0.4.16 and removed in #70 (upstream kimi-code#2745).
 is_env_blind_agent() {
   local name="$1" list="$REPO/etc/env-blind-agents" line
   [[ -n "$name" && -f "$list" ]] || return 1
@@ -683,9 +684,9 @@ is_env_blind_agent() {
 # at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
 # has no vault token). Never touch harnesses that already have a real backend.
 #
-# Exception: env-blind agents (etc/env-blind-agents). They ignore injected
-# secrets for the usual provider path; wiring them to a vault manifest makes
-# inject look useful while auth still fails in the agent (issue #68).
+# Exception: names listed in etc/env-blind-agents (may be empty). Those tools
+# do not consume vault inject for the usual provider path; leave them on
+# empty.env. Do not re-add kimi without re-checking issue #70.
 wire_day_one_harnesses() {
   local backend="$1" manifest_name="$2" conf tmp n=0 be man cmd base stem
   case "$backend" in
@@ -705,9 +706,9 @@ wire_day_one_harnesses() {
     base="${base##*/}"
     stem="${conf##*/}"
     stem="${stem%.conf}"
-    # Env-blind: do not attach a vault manifest (injection is a silent no-op).
+    # Registry skip: only when etc/env-blind-agents lists this name.
     if is_env_blind_agent "$base" || is_env_blind_agent "$stem"; then
-      printf '  left %s  (env-blind agent %s — keep empty.env; credentials go where the tool reads them, not vault inject; see etc/env-blind-agents / issue #68)\n' \
+      printf '  left %s  (listed in etc/env-blind-agents as %s — not rewired to vault; see that file)\n' \
         "${conf##*/}" "${base:-$stem}"
       continue
     fi

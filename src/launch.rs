@@ -317,6 +317,17 @@ pub fn build_launch_plan(
 
     let mut child_env = build_child_env(&harness.keep, &secrets);
 
+    // Harness `env = NAME = value`: non-secret child vars (e.g. temporary
+    // KIMI_CODE_LEGACY_FLAG on kimi.conf until kimi-code#2746). Not for secrets.
+    for (k, v) in &harness.env_sets {
+        if MANAGER_TOKEN_VARS.contains(&k.as_str()) {
+            return Err(Error::Message(format!(
+                "harness env cannot set manager-token name '{k}'"
+            )));
+        }
+        child_env.insert(OsString::from(k.as_str()), OsString::from(v.as_str()));
+    }
+
     let mut cmdline = harness.command.clone();
     if let Some(bin) = &harness.bin_dir {
         let bin = expand_home(bin);
@@ -335,16 +346,6 @@ pub fn build_launch_plan(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&program);
-
-    // kimi 0.33–0.34 default to agent-core-v2 print mode, whose auth gate
-    // ignores process.env (kimi-code#2745; fix #2746). Vault inject still works
-    // with KIMI_CODE_LEGACY_FLAG=1 or on 0.32 / post-fix. Do not set if the
-    // operator already put a value in keep/parent (or_insert). Issue #70.
-    if agent_base == "kimi" {
-        child_env
-            .entry(OsString::from("KIMI_CODE_LEGACY_FLAG"))
-            .or_insert_with(|| OsString::from("1"));
-    }
 
     let mut extra = opts.extra_args.clone();
     extra = resume::normalize_argv(agent_base, &extra, harness.labels)?;
@@ -412,6 +413,7 @@ pub fn launch_run(
         labels: false,
         keep: vec![],
         aliases: vec![],
+        env_sets: vec![],
         command: command.to_vec(),
     };
     launch_harness(
@@ -461,6 +463,7 @@ mod tests {
             labels: false,
             keep: vec![],
             aliases: vec![],
+            env_sets: vec![],
             command: vec![agent.display().to_string()],
         };
         let plan = build_launch_plan(&paths, &h, &LaunchOpts::default()).unwrap();

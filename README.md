@@ -5,8 +5,9 @@
 
 Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
 **in-process** - without leaving a pile of `.env` files on disk.
-(Kimi Code 0.33–0.34 need a one-line legacy flag the launcher sets for you;
-see [AGENTS.md](AGENTS.md) and issue #70.)
+(Kimi Code 0.33+ currently needs `env = KIMI_CODE_LEGACY_FLAG = 1` on the
+harness until [kimi-code#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)
+ships; see [AGENTS.md](AGENTS.md) and issue #70.)
 
 One launcher (`va`), one secrets backend (1Password, Bitwarden Secrets Manager,
 pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt
@@ -479,6 +480,7 @@ command  = claude --permission-mode auto
 | `labels`   | map non-UUID `--resume`/`--session-id` values to a stable UUIDv5    |
 | `keep`     | extra variables surviving the environment scrub, comma separated    |
 | `alias`    | repeatable: `TARGET = SOURCE` — copy an injected secret onto another name in this harness's child env only (fail closed if SOURCE missing; see issue #66) |
+| `env`      | repeatable: `NAME = value` — non-secret child env (not vault material; e.g. temporary `KIMI_CODE_LEGACY_FLAG` on kimi.conf, issue #70) |
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 

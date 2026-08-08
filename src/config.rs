@@ -129,6 +129,9 @@ pub struct Harness {
     /// Child-env renames: `(target, source)`. Target gets a copy of source's
     /// resolved secret. Applied after inject, this harness only. See issue #66.
     pub aliases: Vec<(String, String)>,
+    /// Non-secret child-env pairs (`env = NAME = value`). Applied after inject
+    /// and aliases. Not for secrets (use the manifest). See issue #70 LEGACY flag.
+    pub env_sets: Vec<(String, String)>,
     pub command: Vec<String>,
 }
 
@@ -162,6 +165,7 @@ impl Harness {
         let mut labels = false;
         let mut keep = Vec::new();
         let mut aliases: Vec<(String, String)> = Vec::new();
+        let mut env_sets: Vec<(String, String)> = Vec::new();
         let mut command = Vec::new();
         let mut extra_args = Vec::new();
 
@@ -238,6 +242,43 @@ impl Harness {
                     }
                     aliases.push((target.to_string(), source.to_string()));
                 }
+                "env" => {
+                    // `env = NAME = value` — non-secret child env (not vault material).
+                    // Used e.g. for KIMI_CODE_LEGACY_FLAG until kimi-code#2746 ships.
+                    let Some((name, value)) = val.split_once('=') else {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: "env expects NAME = value (e.g. env = KIMI_CODE_LEGACY_FLAG = 1)"
+                                .into(),
+                        });
+                    };
+                    let (ename, evalue) = (name.trim(), value.trim());
+                    if ename.is_empty() {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: "env needs a variable name".into(),
+                        });
+                    }
+                    if !crate::validate::validate_var_name(ename) {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: format!(
+                                "env name must be a shell-safe identifier (got '{ename}')"
+                            ),
+                        });
+                    }
+                    if crate::env_scrub::MANAGER_TOKEN_VARS.contains(&ename) {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: format!("env cannot set manager-token name '{ename}'"),
+                        });
+                    }
+                    env_sets.push((ename.to_string(), evalue.to_string()));
+                }
                 "command" => {
                     command = val.split_whitespace().map(|s| s.to_string()).collect();
                 }
@@ -289,6 +330,7 @@ impl Harness {
             labels,
             keep,
             aliases,
+            env_sets,
             command,
         })
     }
@@ -327,19 +369,11 @@ pub fn is_env_blind_agent(name: &str) -> bool {
     false
 }
 
-/// Why a known agent ignores vault-injected env credentials (issue #68).
-///
-/// Returns `None` when the launcher model matches the agent. Names come from
-/// `etc/env-blind-agents`; per-agent copy is below.
+/// Doctor copy when `command_basename` is listed in `etc/env-blind-agents`.
 pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
-    if !is_env_blind_agent(command_basename) {
-        return None;
-    }
-    // Per-agent copy only for names that appear in etc/env-blind-agents.
-    // kimi must not get a tailored "structurally blind" sentence (issue #70).
-    Some(
-        "this agent is listed as env-blind in etc/env-blind-agents: it does not \
-         consume vault-injected process-env credentials for the usual provider path. \
+    is_env_blind_agent(command_basename).then_some(
+        "this agent is listed in etc/env-blind-agents: it does not consume \
+         vault-injected process-env credentials for the usual provider path. \
          Keep an empty manifest or put secrets where the tool actually reads them.",
     )
 }
@@ -609,6 +643,31 @@ mod tests {
                 ("ANTHROPIC_API_KEY".into(), "OTHER_KEY".into()),
             ]
         );
+    }
+
+    #[test]
+    fn parse_harness_env_sets_non_secret_child_vars() {
+        let h = Harness::parse(
+            "kimi",
+            "manifest = empty.env\n\
+             env = KIMI_CODE_LEGACY_FLAG = 1\n\
+             command = kimi --auto\n",
+        )
+        .unwrap();
+        assert_eq!(
+            h.env_sets,
+            vec![("KIMI_CODE_LEGACY_FLAG".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn parse_harness_env_refuses_manager_token_names() {
+        let err = Harness::parse(
+            "x",
+            "manifest = m\ncommand = true\nenv = OP_SERVICE_ACCOUNT_TOKEN = x\n",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("manager-token"), "{err}");
     }
 
     #[test]

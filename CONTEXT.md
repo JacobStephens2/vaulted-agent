@@ -20,7 +20,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Conductor link** | Symlink `*-conductor` → fixed harness name; `-H` must not override (narrow entitlement). |
 | **Launch path** | scrub → resolve → drop manager token → exec (story #44: keep small and auditable). |
 | **Launch plan** | Pure result of the launch path before handoff: program, agent argv, workdir, child env. Tests assert the plan without process exec. |
-| **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets (after aliases) only. |
+| **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets (after aliases), then harness `env=` non-secret pairs and optional `bin`→PATH. |
 | **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |
 | **Caller cwd** | Invocation directory preserved across sudo re-exec (`VAULTED_AGENT_CALLER_CWD`) for `workdir = caller`. |
 | **Manifest override** | Launcher flag `-m` / `--manifest` before the harness name: this launch uses another refs file (replace, no merge). Refused under conductor links. |

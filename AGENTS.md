@@ -95,10 +95,12 @@ Shipped / auto harness defaults to `kimi --auto` (unattended). Day-one is
 
 **Credentials (issue #70).** Kimi **does** read OpenAI-compatible provider keys
 from the process environment. Selection is by provider **type** (`openai` →
-`OPENAI_API_KEY`), not provider id. Vault inject works.
+`OPENAI_API_KEY`), not provider id. Vault inject works (verified in print mode
+with a custom `type = "openai"` provider).
 
-For a Fireworks-backed kimi on a shared manifest that already maps
-`OPENAI_API_KEY` to the real OpenAI key, rename for this harness only (#66):
+If a shared manifest maps `OPENAI_API_KEY` to a different vault item than this
+harness needs (e.g. real OpenAI vs Fireworks), rename for this harness only
+(#66). Provider **type** still drives the env var name kimi reads:
 
 ```ini
 # harnesses.d/kimi.conf
@@ -107,13 +109,19 @@ alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
 command  = kimi --auto
 ```
 
-**Kimi Code 0.33–0.34 regression.** Print-mode auth gate ignores `process.env`
+**Upstream gate bug (not env-blind).** Kimi Code 0.33+ default print mode has an
+auth-gate regression
 ([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745);
-fix [#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)). That looked
-like “env-blind” and shipped as such in v0.4.16 (#68/#69) — **retracted in
-#70**. The launcher sets `KIMI_CODE_LEGACY_FLAG=1` in the kimi child env so
-vault inject works on those versions (override by exporting another value into
-`keep` / parent if needed). 0.32 and post-#2746 work without the flag.
+fix [#2746](https://github.com/MoonshotAI/kimi-code/pull/2746), not yet in a
+kimi release when this was written). v0.4.16 wrongly called that “env-blind”
+(#68/#69); **retracted**. Shipped `kimi.conf` carries:
+
+```ini
+env = KIMI_CODE_LEGACY_FLAG = 1
+```
+
+Delete that line once your kimi includes #2746 (0.32 never needed it). Opt-out
+is deleting the harness line — not a keep/export dance.
 
 `KIMI_API_KEY` is only for kimi’s **built-in** provider. Literal `api_key` in
 `~/.kimi-code/config.toml` still works if you prefer not to inject.
@@ -189,6 +197,8 @@ optional sudo -u <service_user>
 → load manager token (file / prompt / env)
 → resolve manifest refs into process env
 → drop manager token
+→ apply harness alias= (secret renames) and env= (non-secret child vars)
+→ prepend bin= to PATH if set
 → exec agent …
 ```
 
@@ -208,6 +218,7 @@ can still read its own env (and so can anything as that user). Manifests are
 | `VAULTED_AGENT_NO_REEXEC=1` | Skip sudo hop (debug / doctor as caller) |
 | `VAULTED_AGENT_HANDOFF=spawn` | Tests only: spawn instead of exec |
 | `BWS_ACCESS_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN` | Manager token if already in env (wins over file) |
+| `KIMI_CODE_LEGACY_FLAG` | Optional; shipped on `kimi.conf` via `env=` until kimi-code#2746 is in a release (issue #70). Delete the harness line to drop it. |
 
 ## Developing this repo (contributors / coding agents)
 
