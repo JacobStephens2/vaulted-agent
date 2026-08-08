@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use crate::auth::{self, TokenKind};
 use crate::backend;
 use crate::config::{load_default_backend, load_service_user, AuthMode, Backend, Harness, Paths};
-use crate::env_scrub::{build_child_env, MANAGER_TOKEN_VARS};
+use crate::env_scrub::{apply_aliases, build_child_env, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
 use crate::privilege;
 use crate::resume;
@@ -269,7 +269,7 @@ pub fn build_launch_plan(
     // The common cause is an item renamed in the vault since the manifest was
     // written: the reference stays well-formed and stops resolving, so nothing
     // offline can catch it.
-    let secrets: HashMap<String, SecretValue> =
+    let mut secrets: HashMap<String, SecretValue> =
         match backend::resolve(backend_name, &manifest, paths, token.as_ref()) {
             Ok(s) => s,
             Err(e) => {
@@ -310,6 +310,10 @@ pub fn build_launch_plan(
         harness.workdir.as_deref(),
         load_service_user(paths).as_deref(),
     )?;
+
+    // Per-harness renames after inject (issue #66). Mutates the secrets map
+    // only; values are still never logged. Fail closed if a source is missing.
+    apply_aliases(&mut secrets, &harness.aliases)?;
 
     let mut child_env = build_child_env(&harness.keep, &secrets);
 
@@ -397,6 +401,7 @@ pub fn launch_run(
         workdir: workdir.map(|s| s.to_string()),
         labels: false,
         keep: vec![],
+        aliases: vec![],
         command: command.to_vec(),
     };
     launch_harness(
@@ -445,6 +450,7 @@ mod tests {
             workdir: None,
             labels: false,
             keep: vec![],
+            aliases: vec![],
             command: vec![agent.display().to_string()],
         };
         let plan = build_launch_plan(&paths, &h, &LaunchOpts::default()).unwrap();

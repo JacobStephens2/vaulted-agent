@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 
+use crate::error::{Error, Result};
 use crate::secret::SecretValue;
 
 /// Variables that may pass through from the parent when present.
@@ -26,6 +27,45 @@ pub const MANAGER_TOKEN_VARS: &[&str] = &[
     "OP_SERVICE_ACCOUNT_TOKEN",
     "SOPS_AGE_KEY_FILE",
 ];
+
+/// Copy resolved secret values under new names for one harness's child env.
+///
+/// `aliases` is `(target, source)`: TARGET gets a copy of SOURCE. Source stays.
+/// Fail closed when source is missing or empty (invariant 4) — a silent no-op
+/// would leave the agent holding the wrong credential (issue #66).
+/// Source must be an injected secret, not a parent-env name (`keep` covers that).
+/// Manager-token names are refused as both source and target.
+pub fn apply_aliases(
+    secrets: &mut HashMap<String, SecretValue>,
+    aliases: &[(String, String)],
+) -> Result<()> {
+    for (target, source) in aliases {
+        if MANAGER_TOKEN_VARS.contains(&target.as_str())
+            || MANAGER_TOKEN_VARS.contains(&source.as_str())
+        {
+            return Err(Error::Message(format!(
+                "alias {target} = {source}: manager-token names cannot be alias source or target"
+            )));
+        }
+        let Some(val) = secrets.get(source) else {
+            return Err(Error::Message(format!(
+                "alias {target} = {source}: source is not in the resolved manifest. \
+                 Aliases only copy injected secrets (not parent env; use keep= for passthrough). \
+                 Add {source} to the refs file, or fix the name."
+            )));
+        };
+        if val.expose().is_empty() {
+            return Err(Error::Message(format!(
+                "alias {target} = {source}: source resolved to an empty value"
+            )));
+        }
+        // Copy, not move: source remains. A target that also appears in the
+        // manifest is overwritten for this harness only.
+        let copy = SecretValue::new(val.expose().to_string());
+        secrets.insert(target.clone(), copy);
+    }
+    Ok(())
+}
 
 /// Construct environment for the agent: passthrough + keep + secrets.
 /// Explicit construction — not "inherit then subtract" — so nothing ambient rides along.
@@ -111,5 +151,45 @@ mod tests {
         )]);
         let child = build_child_env(&[], &secrets);
         assert!(!child.contains_key(OsStr::new("BWS_ACCESS_TOKEN")));
+    }
+
+    #[test]
+    fn alias_copies_source_onto_target_and_keeps_source() {
+        let mut secrets = HashMap::from([(
+            "FIREWORKS_AI_API_KEY".to_string(),
+            SecretValue::new("fw-secret"),
+        )]);
+        apply_aliases(
+            &mut secrets,
+            &[("OPENAI_API_KEY".into(), "FIREWORKS_AI_API_KEY".into())],
+        )
+        .unwrap();
+        assert_eq!(secrets.get("OPENAI_API_KEY").unwrap().expose(), "fw-secret");
+        assert_eq!(
+            secrets.get("FIREWORKS_AI_API_KEY").unwrap().expose(),
+            "fw-secret"
+        );
+    }
+
+    #[test]
+    fn alias_missing_source_fails_closed() {
+        let mut secrets = HashMap::from([("OPENAI_API_KEY".to_string(), SecretValue::new("oai"))]);
+        let err = apply_aliases(
+            &mut secrets,
+            &[("OPENAI_API_KEY".into(), "FIREWORKS_AI_API_KEY".into())],
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not in the resolved manifest"), "{msg}");
+        // Target must not be left holding the wrong credential.
+        assert_eq!(secrets.get("OPENAI_API_KEY").unwrap().expose(), "oai");
+    }
+
+    #[test]
+    fn alias_refuses_manager_token_names() {
+        let mut secrets = HashMap::from([("X".to_string(), SecretValue::new("v"))]);
+        let err =
+            apply_aliases(&mut secrets, &[("BWS_ACCESS_TOKEN".into(), "X".into())]).unwrap_err();
+        assert!(format!("{err}").contains("manager-token"), "{err}");
     }
 }

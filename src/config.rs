@@ -126,6 +126,9 @@ pub struct Harness {
     pub workdir: Option<String>,
     pub labels: bool,
     pub keep: Vec<String>,
+    /// Child-env renames: `(target, source)`. Target gets a copy of source's
+    /// resolved secret. Applied after inject, this harness only. See issue #66.
+    pub aliases: Vec<(String, String)>,
     pub command: Vec<String>,
 }
 
@@ -158,6 +161,7 @@ impl Harness {
         let mut workdir = None;
         let mut labels = false;
         let mut keep = Vec::new();
+        let mut aliases: Vec<(String, String)> = Vec::new();
         let mut command = Vec::new();
         let mut extra_args = Vec::new();
 
@@ -193,6 +197,46 @@ impl Harness {
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty()),
                     );
+                }
+                "alias" => {
+                    // `alias = TARGET = SOURCE` — same shape as a shell assignment:
+                    // TARGET takes the value of SOURCE in this harness's child env.
+                    let Some((target, source)) = val.split_once('=') else {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: "alias expects TARGET = SOURCE (e.g. alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY)".into(),
+                        });
+                    };
+                    let (target, source) = (target.trim(), source.trim());
+                    if target.is_empty() || source.is_empty() {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: "alias needs both TARGET and SOURCE names".into(),
+                        });
+                    }
+                    if !crate::validate::validate_var_name(target)
+                        || !crate::validate::validate_var_name(source)
+                    {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: format!(
+                                "alias names must be shell-safe identifiers (got '{target}' / '{source}')"
+                            ),
+                        });
+                    }
+                    if target == source {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: format!(
+                                "alias {target} = {source}: target and source are the same"
+                            ),
+                        });
+                    }
+                    aliases.push((target.to_string(), source.to_string()));
                 }
                 "command" => {
                     command = val.split_whitespace().map(|s| s.to_string()).collect();
@@ -244,6 +288,7 @@ impl Harness {
             workdir,
             labels,
             keep,
+            aliases,
             command,
         })
     }
@@ -495,6 +540,35 @@ mod tests {
     fn parse_harness_rejects_unknown_key() {
         let err = Harness::parse("x", "manifest = a\ncommand = true\nfoo = bar\n").unwrap_err();
         assert!(format!("{err}").contains("unknown key"));
+    }
+
+    #[test]
+    fn parse_harness_alias_lines() {
+        let h = Harness::parse(
+            "kimi",
+            "manifest = full.env.tpl\n\
+             alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY\n\
+             alias = ANTHROPIC_API_KEY = OTHER_KEY\n\
+             command = kimi --auto\n",
+        )
+        .unwrap();
+        assert_eq!(
+            h.aliases,
+            vec![
+                ("OPENAI_API_KEY".into(), "FIREWORKS_AI_API_KEY".into()),
+                ("ANTHROPIC_API_KEY".into(), "OTHER_KEY".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_harness_alias_requires_target_and_source() {
+        let err = Harness::parse(
+            "kimi",
+            "manifest = m\ncommand = true\nalias = OPENAI_API_KEY\n",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("TARGET = SOURCE"), "{err}");
     }
 
     #[test]
