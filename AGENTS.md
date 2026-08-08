@@ -149,7 +149,7 @@ Interpret carefully:
 | `op.env: unreadable (… as user)` | Present but EACCES - often need `service_user` or group/ACL, **not** a paste of the vault SA token |
 | `cannot enter /home/…` | `workdir=caller` + service account cannot traverse (often `setfacl -m u:<svc>:x /home/<op>`) |
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |
-| `could not resolve` / item named on validate | Well-formed ref, vault item missing or renamed - fix the refs file or vault |
+| `could not resolve` / item named on validate or launch | Well-formed ref, vault item missing or renamed - fix the refs file or vault. Launch lists the variables implicated and suggests `secrets validate` |
 | `secrets validate` needs token / fails without | Live gate by design; use `--offline` only for shape |
 | Legacy `*_ADD_MORE_*` names | Old 1Password refresh naming; still works; next refresh renames - see MIGRATION.md |
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
