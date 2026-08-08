@@ -83,9 +83,12 @@ fn secrets_validate_accepts_name_ref() {
         "claude",
         "backend = bitwarden\nmanifest = ok.env.refs\ncommand = true\n",
     );
+    // --offline: this asserts that a `name:` ref is accepted as a valid *shape*.
+    // Validate resolves against the vault by default now, which would need a
+    // manager token this seam deliberately does not have.
     let out = seam
         .vaulted_agent()
-        .args(["secrets", "validate", "claude"])
+        .args(["secrets", "validate", "claude", "--offline"])
         .output()
         .expect("run");
     assert!(
@@ -93,6 +96,32 @@ fn secrets_validate_accepts_name_ref() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn secrets_validate_without_a_token_fails_rather_than_passing_blind() {
+    // The behaviour change that matters: a gate that cannot reach the vault
+    // must say so, not report ok. Before this, no token meant a syntax check
+    // and a cheerful exit 0.
+    let seam = CliSeam::new();
+    fs::write(
+        seam.config_dir.join("manifests/ok.env.refs"),
+        "OPENAI_API_KEY=name:openai-api-key\n",
+    )
+    .unwrap();
+    write_plain_harness(
+        &seam,
+        "claude",
+        "backend = bitwarden\nmanifest = ok.env.refs\ncommand = true\n",
+    );
+    let out = seam
+        .vaulted_agent()
+        .args(["secrets", "validate", "claude"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bws.env") || err.contains("token"), "{err}");
 }
 
 #[test]
