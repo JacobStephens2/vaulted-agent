@@ -113,8 +113,8 @@ command  = kimi --auto
 auth-gate regression
 ([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745);
 fix [#2746](https://github.com/MoonshotAI/kimi-code/pull/2746), not yet in a
-kimi release when this was written). v0.4.17 wrongly called that “env-blind”
-(#68/#69); **retracted**. Shipped `kimi.conf` carries:
+kimi release when this was written). v0.4.16 wrongly called that “env-blind”
+(#68/#69); **retracted** in v0.4.17. Shipped `kimi.conf` carries:
 
 ```ini
 env = KIMI_CODE_LEGACY_FLAG = 1
