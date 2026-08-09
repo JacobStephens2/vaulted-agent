@@ -899,8 +899,8 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             // wired: a comments-only refs file. The harness then launches
             // perfectly, with nothing in its environment, and the agent fails
             // later for reasons that look nothing like a launcher problem.
-            // Say it here instead — unless the agent is known to ignore inject
-            // (kimi and the env-blind set), where empty.env is the right shape.
+            // Say it here instead — unless listed in etc/env-blind-agents,
+            // where empty.env is the expected shape (inject is a no-op).
             let defined = fs::read_to_string(&man_path)
                 .ok()
                 .and_then(|t| parse_dotenv_keys(&t).ok())

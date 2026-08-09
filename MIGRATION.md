@@ -1,28 +1,32 @@
-# Migration: kimi is env-blind for custom providers (unreleased)
+# Migration: kimi is not env-blind (retracts v0.4.16 / #69) (unreleased)
 
-Kimi Code does not read custom OpenAI-compatible provider credentials from the
-process environment (issue #68). Pointing `kimi` at a vault manifest made
-injection look useful while auth failed inside the agent. Shipped defaults and
-install behaviour now match that:
+v0.4.16 classified kimi as env-blind and stopped vault wiring (#68 / #69).
+End-to-end probes (issue #70) show kimi **does** read OpenAI-compatible
+provider keys from `process.env` (print mode verified). Failures on Kimi Code
+0.33+ come from an upstream auth-gate regression
+([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745),
+fix [PR #2746](https://github.com/MoonshotAI/kimi-code/pull/2746) — not yet
+in a kimi release when this was written), not from a design that ignores the
+environment.
 
-- `etc/harnesses.d/kimi.conf` uses `backend = plainfile` and `manifest = empty.env`
-  (not a vault refs file). The old `alias = OPENAI_API_KEY = …` hint is removed.
-- `install.sh` still auto-detects `kimi` and writes a day-one harness, but
-  `wire_day_one_harnesses` **skips** kimi when attaching vault backends so
-  vault setup does not silently rewire it to a real refs file.
-- `va doctor` warns if a harness whose command is `kimi` has a non-empty
-  manifest or any `alias=` lines, and does **not** treat empty.env as
-  “finish setup” for that agent.
+**This release:**
 
-**What you should do:** put the provider key in `~/.kimi-code/config.toml`
-(`api_key = "…"`). Keep the harness on `empty.env` unless you have another
-reason to inject env vars kimi actually reads (`KIMI_API_KEY` for the built-in
-provider only).
+- Removes `kimi` from `etc/env-blind-agents` (registry may stay empty).
+- Install wires day-one kimi harnesses to the vault refs file again.
+- `va doctor` no longer warns that inject/alias are useless for kimi.
+- Restores harness `alias = OPENAI_API_KEY = …` guidance for type-based env
+  selection (#66); Fireworks is the motivating example, not a second probe.
+- Adds harness `env = NAME = value` for non-secret child vars. Shipped
+  `kimi.conf` sets `env = KIMI_CODE_LEGACY_FLAG = 1` so vault inject works on
+  the broken gate; **delete that line** once your kimi includes #2746.
 
-**Planned (not in this release):** a file-render path that writes resolved
-secrets into a private ephemeral config (e.g. under `KIMI_CODE_HOME`) and
-shreds on exit — the general form of the pattern that already works for tools
-that only accept credentials on disk. Track under issue #68 / a follow-up ADR.
+**If you already applied v0.4.16:** re-run setup / wire so kimi is not stuck on
+`empty.env`, or set `backend` + `manifest` on `kimi.conf` by hand.
+
+File-render backends remain useful for tools that truly need secrets on disk
+(`.aws/credentials`, `.npmrc`, …) but are **not** justified by the kimi case.
+Follow-up: drop the shipped LEGACY `env=` line when #2746 is in a kimi release
+(track: issue #72).
 
 # Migration: harness `alias` renames an injected secret (unreleased)
 

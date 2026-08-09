@@ -71,3 +71,11 @@ bash -n install.sh
 | Duplicated env-blind policy | Single source `etc/env-blind-agents`; Rust `include_str!` + install `is_env_blind_agent` |
 | Doctor test setup repeated | Shared `seam_kimi` fixture |
 | README unqualified claim | Headline limited to Claude/Codex/Grok; Kimi called out for config.toml / #68 |
+
+## Retracted (issue #70 / PR #71)
+
+Issue #70 showed kimi is **not** structurally env-blind; v0.4.16’s
+classification came from kimi-code#2745. The README “config.toml only” claim
+and the planned file-render justification **from this kimi case** are
+superseded by PR #71. Keep `etc/env-blind-agents` for genuine env-blind tools;
+do not re-list kimi without re-checking #70.

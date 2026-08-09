@@ -3,11 +3,11 @@
 [![CI](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent-launcher)](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/latest)
 
-Give Claude Code, Codex, and Grok real vault credentials **in-process** -
-without leaving a pile of `.env` files on disk. Kimi Code is supported for
-launch and resume, but custom OpenAI-compatible provider keys live in
-`~/.kimi-code/config.toml` (not env inject; see [AGENTS.md](AGENTS.md) and
-issue #68).
+Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
+**in-process** - without leaving a pile of `.env` files on disk.
+(Kimi Code 0.33+ currently needs `env = KIMI_CODE_LEGACY_FLAG = 1` on the
+harness until [kimi-code#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)
+ships; see [AGENTS.md](AGENTS.md) and issue #70.)
 
 One launcher (`va`), one secrets backend (1Password, Bitwarden Secrets Manager,
 pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt
@@ -61,7 +61,7 @@ only). Point harnesses at it, or use `va run -m …`.
 va claude
 va codex
 va grok
-va kimi           # --auto; credentials for custom providers go in ~/.kimi-code/config.toml (not env inject)
+va kimi           # --auto; vault inject OPENAI_API_KEY (by provider type); see AGENTS.md
 ```
 
 With `auth_mode=prompt`, paste the vault manager token when asked (not written
@@ -480,6 +480,7 @@ command  = claude --permission-mode auto
 | `labels`   | map non-UUID `--resume`/`--session-id` values to a stable UUIDv5    |
 | `keep`     | extra variables surviving the environment scrub, comma separated    |
 | `alias`    | repeatable: `TARGET = SOURCE` — copy an injected secret onto another name in this harness's child env only (fail closed if SOURCE missing; see issue #66) |
+| `env`      | repeatable: `NAME = value` — non-secret child env (not vault material; e.g. temporary `KIMI_CODE_LEGACY_FLAG` on kimi.conf, issue #70) |
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 

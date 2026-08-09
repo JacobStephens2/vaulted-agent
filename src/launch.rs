@@ -317,6 +317,17 @@ pub fn build_launch_plan(
 
     let mut child_env = build_child_env(&harness.keep, &secrets);
 
+    // Harness `env = NAME = value`: non-secret child vars (e.g. temporary
+    // KIMI_CODE_LEGACY_FLAG on kimi.conf until kimi-code#2746). Not for secrets.
+    for (k, v) in &harness.env_sets {
+        if MANAGER_TOKEN_VARS.contains(&k.as_str()) {
+            return Err(Error::Message(format!(
+                "harness env cannot set manager-token name '{k}'"
+            )));
+        }
+        child_env.insert(OsString::from(k.as_str()), OsString::from(v.as_str()));
+    }
+
     let mut cmdline = harness.command.clone();
     if let Some(bin) = &harness.bin_dir {
         let bin = expand_home(bin);
@@ -402,6 +413,7 @@ pub fn launch_run(
         labels: false,
         keep: vec![],
         aliases: vec![],
+        env_sets: vec![],
         command: command.to_vec(),
     };
     launch_harness(
@@ -451,6 +463,7 @@ mod tests {
             labels: false,
             keep: vec![],
             aliases: vec![],
+            env_sets: vec![],
             command: vec![agent.display().to_string()],
         };
         let plan = build_launch_plan(&paths, &h, &LaunchOpts::default()).unwrap();

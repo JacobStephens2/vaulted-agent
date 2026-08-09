@@ -530,10 +530,9 @@ if (( ! NO_AUTO_HARNESS )); then
     printf '  %-8s not found (skipped)\n' grok
   fi
   # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
-  # --auto matches unattended default. Credentials for custom OpenAI-compatible
-  # providers live in ~/.kimi-code/config.toml, not the process env (issue #68).
-  # Day-one harness stays on empty.env; wire_day_one_harnesses will not attach
-  # a vault manifest to kimi (injection would be a silent no-op).
+  # --auto matches unattended default. Vault inject works for OpenAI-compatible
+  # providers (OPENAI_API_KEY by type); see issue #70 / kimi-code#2745 for the
+  # 0.33–0.34 gate regression and the launcher LEGACY_FLAG workaround.
   if p="$(find_user_bin kimi)"; then
     write_auto_harness kimi "$p" "kimi --auto"
     found_any=1
@@ -543,7 +542,6 @@ if (( ! NO_AUTO_HARNESS )); then
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
     printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi\n'
-    printf '  Note: kimi keeps empty.env after vault setup — put provider keys in ~/.kimi-code/config.toml\n'
   else
     printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
@@ -666,8 +664,9 @@ ensure_workdir_caller() {
   shopt -u nullglob
 }
 
-# Env-blind agent basenames (issue #68). Same list as etc/env-blind-agents,
-# which the Rust binary embeds for doctor — do not hardcode names here.
+# Env-blind agent basenames (etc/env-blind-agents). Same file the Rust binary
+# embeds for doctor — do not hardcode names here. The list may be empty; kimi
+# was wrongly listed in v0.4.16 and removed in #70 (upstream kimi-code#2745).
 is_env_blind_agent() {
   local name="$1" list="$REPO/etc/env-blind-agents" line
   [[ -n "$name" && -f "$list" ]] || return 1
@@ -685,9 +684,9 @@ is_env_blind_agent() {
 # at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
 # has no vault token). Never touch harnesses that already have a real backend.
 #
-# Exception: env-blind agents (etc/env-blind-agents). They ignore injected
-# secrets for the usual provider path; wiring them to a vault manifest makes
-# inject look useful while auth still fails in the agent (issue #68).
+# Exception: names listed in etc/env-blind-agents (may be empty). Those tools
+# do not consume vault inject for the usual provider path; leave them on
+# empty.env. Do not re-add kimi without re-checking issue #70.
 wire_day_one_harnesses() {
   local backend="$1" manifest_name="$2" conf tmp n=0 be man cmd base stem
   case "$backend" in
@@ -707,9 +706,9 @@ wire_day_one_harnesses() {
     base="${base##*/}"
     stem="${conf##*/}"
     stem="${stem%.conf}"
-    # Env-blind: do not attach a vault manifest (injection is a silent no-op).
+    # Registry skip: only when etc/env-blind-agents lists this name.
     if is_env_blind_agent "$base" || is_env_blind_agent "$stem"; then
-      printf '  left %s  (env-blind agent %s — keep empty.env; credentials go where the tool reads them, not vault inject; see etc/env-blind-agents / issue #68)\n' \
+      printf '  left %s  (listed in etc/env-blind-agents as %s — not rewired to vault; see that file)\n' \
         "${conf##*/}" "${base:-$stem}"
       continue
     fi

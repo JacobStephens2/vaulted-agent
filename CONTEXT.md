@@ -9,7 +9,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Launcher** | The `vaulted-agent` / `va` binary. Resolves secrets, scrubs the environment, and execs an agent. Not a long-running daemon. |
 | **Harness** | A named launch profile (`harnesses.d/<name>.conf`): backend, manifest, command, optional workdir/bin/labels/keep/**alias**. |
 | **Alias** | Per-harness child-env rename after inject: `alias = TARGET = SOURCE` copies the resolved source secret onto TARGET (fail closed if source missing). |
-| **Env-blind agent** | Tool that does not read injected secrets from the process env for the credential path operators care about (today: `kimi` custom providers). Manifest inject is a silent no-op; doctor warns. |
+| **Env-blind agent** | Tool listed in `etc/env-blind-agents` that does not consume vault-injected process-env credentials for the usual provider path. Doctor warns; install skips vault rewire. (kimi is **not** in this list — issue #70.) |
 | **Manifest** | The file a harness points at: either **refs** (references only) or dotenv-style secret material (plainfile/sops decrypt). |
 | **Backend** | Where secret values come from: `bitwarden`, `onepassword`, `pass`, `sops`, `plainfile`. Typed in the runtime; unknown names fail closed. |
 | **Refs file** | Bitwarden-oriented manifest of `VAR=reference` lines (uuid / name: / project:) — **no secret values** on disk. |
@@ -20,7 +20,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Conductor link** | Symlink `*-conductor` → fixed harness name; `-H` must not override (narrow entitlement). |
 | **Launch path** | scrub → resolve → drop manager token → exec (story #44: keep small and auditable). |
 | **Launch plan** | Pure result of the launch path before handoff: program, agent argv, workdir, child env. Tests assert the plan without process exec. |
-| **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets (after aliases) only. |
+| **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets (after aliases), then harness `env=` non-secret pairs and optional `bin`→PATH. |
 | **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |
 | **Caller cwd** | Invocation directory preserved across sudo re-exec (`VAULTED_AGENT_CALLER_CWD`) for `workdir = caller`. |
 | **Manifest override** | Launcher flag `-m` / `--manifest` before the harness name: this launch uses another refs file (replace, no merge). Refused under conductor links. |
