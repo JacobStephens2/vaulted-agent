@@ -11,13 +11,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.16**
+Current release pin (product install): **v0.4.17**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.16 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.16 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.17 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.17 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
@@ -113,7 +113,7 @@ command  = kimi --auto
 auth-gate regression
 ([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745);
 fix [#2746](https://github.com/MoonshotAI/kimi-code/pull/2746), not yet in a
-kimi release when this was written). v0.4.16 wrongly called that “env-blind”
+kimi release when this was written). v0.4.17 wrongly called that “env-blind”
 (#68/#69); **retracted**. Shipped `kimi.conf` carries:
 
 ```ini
