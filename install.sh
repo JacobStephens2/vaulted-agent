@@ -663,6 +663,25 @@ ensure_workdir_caller() {
   shopt -u nullglob
 }
 
+# True when the harness runs an agent that does not read credentials from its
+# environment. Kimi Code takes a custom provider's key only from
+# ~/.kimi-code/config.toml: ${VAR} there is sent verbatim rather than expanded,
+# there is no api_key_env, and no sub-table reaches the process environment.
+# Wiring such a harness to a vault manifest resolves every secret and injects it
+# into a child that never looks -- nothing errors, and the agent fails later
+# with an auth error that looks nothing like a launcher problem (issue #68).
+# Keyed on the command's binary, not the filename, since harness names are free.
+harness_is_env_blind() {
+  local conf="$1" cmd
+  cmd="$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+  cmd="${cmd%% *}"    # command is split on whitespace; the binary is the first word
+  cmd="${cmd##*/}"    # and may be written as an absolute path
+  case "$cmd" in
+    kimi) return 0 ;;
+    *)    return 1 ;;
+  esac
+}
+
 # Day-one auto-harnesses are plainfile + empty.env. Choosing a vault backend
 # at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
 # has no vault token). Never touch harnesses that already have a real backend.
@@ -679,6 +698,13 @@ wire_day_one_harnesses() {
     man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
     be="$(printf '%s' "$be" | sed 's/[[:space:]]*$//')"
     man="$(printf '%s' "$man" | sed 's/[[:space:]]*$//')"
+    # Leave env-blind agents on empty.env. A manifest here would inject secrets
+    # the child never reads, which is worse than no manifest: it reports healthy.
+    if harness_is_env_blind "$conf"; then
+      printf '  left %s  (reads credentials from its own config file, not the environment — see issue #68)\n' \
+        "${conf##*/}"
+      continue
+    fi
     # Only rewrite the installer's zero-secret starter config.
     if [[ "$be" != "plainfile" || "$man" != "empty.env" ]]; then
       printf '  left %s  (backend=%s manifest=%s — not day-one)\n' \

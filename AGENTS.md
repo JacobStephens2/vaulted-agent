@@ -93,19 +93,40 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 Shipped / auto harness defaults to `kimi --auto` (unattended). Edit the harness
 to drop `--auto` if you want manual approval.
 
-If Kimi is configured as an OpenAI-compatible provider (e.g. Fireworks) but the
-shared manifest maps `OPENAI_API_KEY` to the real OpenAI key, rename for this
-harness only:
+**Kimi does not read provider credentials from its environment.** A manifest on
+this harness is a silent no-op: the launcher resolves every variable and injects
+it, and kimi reads none of them. Ship it with `manifest = empty.env`. `va doctor`
+warns if you point it at a manifest that defines variables (issue #68).
 
-```ini
-# harnesses.d/kimi.conf
-manifest = orchestrator-all.env.tpl
-alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
-command  = kimi --auto
+For a custom openai-compatible provider (Fireworks, Together, local vLLM), the
+key goes in `~/.kimi-code/config.toml`, literally:
+
+```toml
+[providers.fireworks]
+type    = "openai"
+api_key = "fw_…"          # read from here, never from the environment
 ```
 
-Source must already be in the resolved manifest. Missing source fails the launch
-(no silent wrong key).
+Verified against 0.34.0 — none of these reach kimi:
+
+| Attempt | Result |
+|---|---|
+| `FIREWORKS_API_KEY` in the child env | `no credential configured` |
+| `api_key = "${FIREWORKS_API_KEY}"` | `401` — sent verbatim, not expanded |
+| `api_key_env = "…"` | not a config key |
+| `[providers.<name>.env]` sub-table | does not reach the process env |
+
+`KIMI_API_KEY` *is* read from the environment, but only for kimi's own built-in
+provider — not for custom ones.
+
+So **`alias` does not help here.** It renames a variable in the child env, and
+the child never looks there. (Earlier revisions of this file recommended
+`alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY` for exactly this case; that
+advice was wrong and is withdrawn.)
+
+Getting kimi's key out of `config.toml` needs a launcher mechanism that renders
+resolved secrets to a private ephemeral file — see
+[docs/adr/0002-file-render-backend.md](docs/adr/0002-file-render-backend.md).
 
 ## Recipes agents actually need
 
@@ -219,3 +240,17 @@ cargo clippy --all-targets -- -D warnings
 - `va doctor` is clean or only expected warnings (and summary counts match)
 - Target harness launches; secrets present in the child (not in manager-token form)
 - If you used `-m`, stderr shows the override and the agent did not inherit the wider default manifest
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `JacobStephens2/vaulted-agent-launcher`, via the `gh` CLI. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context - `CONTEXT.md` + `docs/adr/` at the repo root. See [docs/agents/domain.md](docs/agents/domain.md).

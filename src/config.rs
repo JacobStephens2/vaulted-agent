@@ -132,6 +132,35 @@ pub struct Harness {
     pub command: Vec<String>,
 }
 
+/// Agents that take their credentials from their own config file and never look
+/// at the process environment.
+///
+/// For these, a manifest is not merely unhelpful, it is *invisible*: the
+/// launcher resolves every reference, injects the variables, and the child reads
+/// none of them. Nothing errors and every syntax check passes, so the report
+/// says healthy right up until the agent fails with an auth error that looks
+/// nothing like a launcher problem. Naming them is the only way doctor can tell
+/// the difference between "manifest is fine" and "manifest cannot possibly
+/// apply" (issue #68).
+///
+/// Kimi Code, verified against 0.34.0: `${VAR}` inside `api_key` is sent
+/// verbatim rather than expanded, `api_key_env` is not a config key, and a
+/// `[providers.<name>.env]` sub-table does not reach the process environment.
+/// (`KIMI_API_KEY` is read from the environment, but only for kimi's own
+/// built-in provider, never for a custom openai-compatible one.)
+///
+/// Keyed on the command's binary rather than the harness name, because harness
+/// names are free-form: `va k` may well run kimi.
+pub fn env_blind_agent(command: &[String]) -> Option<&'static str> {
+    // `command` is split on whitespace, so the binary is the first word, and it
+    // may be written as an absolute path.
+    let bin = command.first()?.rsplit('/').next()?;
+    match bin {
+        "kimi" => Some("kimi"),
+        _ => None,
+    }
+}
+
 impl Harness {
     pub fn load(paths: &Paths, name: &str) -> Result<Self> {
         if !name

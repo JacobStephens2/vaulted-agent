@@ -910,6 +910,17 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                     "  WARN: manifest defines no variables, so this harness launches with no secrets (finish `vaulted-agent setup`, or point it at a real manifest)"
                 );
                 warn += 1;
+            } else if let Some(agent) = crate::config::env_blind_agent(&h.command) {
+                // The inverse of the check above, and the more dangerous shape:
+                // a manifest that resolves perfectly into a child that never
+                // reads it. Everything upstream reports green, so without this
+                // the only symptom is the agent's own auth error (issue #68).
+                println!(
+                    "  WARN: {agent} does not read credentials from its environment, so these \
+                     {defined} variable(s) are resolved and injected but never read. Put the key \
+                     in {agent}'s own config file and set manifest = empty.env here."
+                );
+                warn += 1;
             }
         }
         match be {

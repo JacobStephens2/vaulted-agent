@@ -61,6 +61,13 @@ va grok
 va kimi           # --auto by default (matches claude's unattended posture)
 ```
 
+**Kimi is the exception to all of this.** It does not read provider credentials
+from its environment, so a manifest on that harness injects secrets nothing
+reads — the launch looks healthy and the agent fails with an auth error. Its key
+belongs in `~/.kimi-code/config.toml`; the shipped harness uses `empty.env` and
+`va doctor` warns if you wire it to a real manifest. See
+[AGENTS.md](AGENTS.md#kimi) and [issue #68](https://github.com/JacobStephens2/vaulted-agent-launcher/issues/68).
+
 With `auth_mode=prompt`, paste the vault manager token when asked (not written
 to disk). Force once on the `va` path: `va grok -p`. Under a `*-conductor`
 symlink, `-p` is the agent's flag; use `VAULTED_AGENT_PROMPT_AUTH=1` for prompt
