@@ -25,6 +25,17 @@ The served filename is `install.sh` while its content is `install-remote.sh`.
 That mismatch is intentional (the one-liner reads better) and is the easy
 mistake to make here.
 
+## If the GitHub repo is renamed
+
+Update `REPO` in `install-remote.sh` and redeploy. GitHub 301-redirects the old
+paths, so downloads keep working and the breakage hides: the tarball's top
+directory is named after the repo's **current** name, so anything matching that
+directory by name stops matching. That is exactly what broke every remote
+install when `vaulted-agent-launcher` became `vaulted-agent` - the bootstrap
+downloaded fine and then died with "unexpected layout". The script now finds
+the source tree by looking for the directory that contains `install.sh`, and
+`tests/install_remote_layout.rs` holds that line.
+
 ## Order of operations
 
 `install-remote.sh` pins `DEFAULT_VERSION`, and that pin must never point at a
@@ -50,7 +61,7 @@ Both must return `200` before you deploy anything:
 
 ```bash
 VERSION=v0.4.1   # the release you are publishing
-base=https://github.com/JacobStephens2/vaulted-agent-launcher
+base=https://github.com/JacobStephens2/vaulted-agent
 curl -sIL -o /dev/null -w 'musl asset: %{http_code}\n' \
   "$base/releases/download/$VERSION/vaulted-agent-x86_64-unknown-linux-musl.tar.gz"
 curl -sIL -o /dev/null -w 'source tar: %{http_code}\n' \
@@ -85,7 +96,7 @@ cp -a /path/to/install.sh /path/to/install.sh.bak
 
 tmp=$(mktemp)
 curl -fsSL -o "$tmp" \
-  https://raw.githubusercontent.com/JacobStephens2/vaulted-agent-launcher/main/install-remote.sh
+  https://raw.githubusercontent.com/JacobStephens2/vaulted-agent/main/install-remote.sh
 
 bash -n "$tmp"                              # syntax
 grep -n 'DEFAULT_VERSION=' "$tmp"           # must equal the release you just cut
@@ -111,7 +122,7 @@ Then smoke-test the asset the script would actually select:
 
 ```bash
 cd "$(mktemp -d)"
-curl -fsSL -O "https://github.com/JacobStephens2/vaulted-agent-launcher/releases/download/$VERSION/vaulted-agent-x86_64-unknown-linux-musl.tar.gz"
+curl -fsSL -O "https://github.com/JacobStephens2/vaulted-agent/releases/download/$VERSION/vaulted-agent-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf vaulted-agent-x86_64-unknown-linux-musl.tar.gz
 mv vaulted-agent-x86_64-unknown-linux-musl vaulted-agent    # required, see below
 chmod +x vaulted-agent

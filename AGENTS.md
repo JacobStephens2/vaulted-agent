@@ -224,7 +224,7 @@ can still read its own env (and so can anything as that user). Manifests are
 
 - Domain vocabulary: [CONTEXT.md](CONTEXT.md)
 - How to use domain docs: [docs/agents/domain.md](docs/agents/domain.md)
-- Issues: `gh` against `JacobStephens2/vaulted-agent-launcher` - [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)
+- Issues: `gh` against `JacobStephens2/vaulted-agent` - [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)
 - Bash→Rust and later behavior breaks: [MIGRATION.md](MIGRATION.md)
 - Installer hosting: [docs/hosting-the-installer.md](docs/hosting-the-installer.md)
 - ADRs: [docs/adr/](docs/adr/)

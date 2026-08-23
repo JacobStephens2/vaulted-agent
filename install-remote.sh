@@ -31,7 +31,9 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent-launcher}"
+# Current repo name. GitHub redirects the former vaulted-agent-launcher paths,
+# but a redirect is a courtesy, not a contract - name the repo as it is today.
+REPO="${VAULTED_AGENT_REPO:-JacobStephens2/vaulted-agent}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # Bump this when cutting a release so unpinned one-liners stay intentional.
 # Must match a published GitHub release tag (and Cargo.toml version).
@@ -189,14 +191,22 @@ try_asset() {
   return 0
 }
 
-# Process substitution (not a pipe) so the export lands in this shell.
-while read -r candidate; do
-  [[ -n "$candidate" ]] || continue
-  try_asset "$candidate" && break
-done < <(detect_assets || true)
+# A caller who already exported VAULTED_AGENT_BIN has answered the question the
+# asset probe asks, so do not ask it again. try_asset's own error text tells
+# operators to set this when downloads fail; downloading anyway made that hint
+# a lie, and left the offline/air-gapped path with no way through.
+if [[ -n "${VAULTED_AGENT_BIN:-}" ]]; then
+  printf 'using VAULTED_AGENT_BIN %s (skipping release assets)\n' "$VAULTED_AGENT_BIN"
+else
+  # Process substitution (not a pipe) so the export lands in this shell.
+  while read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    try_asset "$candidate" && break
+  done < <(detect_assets || true)
 
-if [[ -z "${VAULTED_AGENT_BIN:-}" ]]; then
-  printf '  (no usable binary asset; will build from source if cargo is available)\n'
+  if [[ -z "${VAULTED_AGENT_BIN:-}" ]]; then
+    printf '  (no usable binary asset; will build from source if cargo is available)\n'
+  fi
 fi
 
 tarball="$workdir/src.tar.gz"
@@ -207,11 +217,19 @@ curl -fsSL -o "$tarball" "$ARCHIVE_URL" \
 
 printf 'extracting…\n'
 tar -xzf "$tarball" -C "$workdir"
-# archive-refs/tags/v0.1.0 → vaulted-agent-launcher-0.1.0 (GitHub strips a
-# leading "v" from the directory name inside the tarball).
-src="$(find "$workdir" -mindepth 1 -maxdepth 1 -type d -name 'vaulted-agent-launcher-*' | head -n1)"
-[[ -n "$src" && -f "$src/install.sh" ]] \
-  || die "tarball did not contain install.sh (unexpected layout)"
+# GitHub names the top directory after the repo's *current* name plus the tag
+# with any leading "v" stripped: archive/refs/tags/v0.1.0 → vaulted-agent-0.1.0.
+# Do not match on that name. A rename keeps the old URL working by redirect
+# while silently changing the directory inside the tarball, and matching a
+# hardcoded 'vaulted-agent-launcher-*' is what broke every remote install when
+# this repo became vaulted-agent. Identify the tree by what it contains.
+src=""
+for d in "$workdir"/*/; do
+  [[ -f "${d}install.sh" ]] || continue
+  src="${d%/}"
+  break
+done
+[[ -n "$src" ]] || die "tarball did not contain install.sh (unexpected layout)"
 
 printf 'running install.sh from %s\n\n' "$VERSION"
 
