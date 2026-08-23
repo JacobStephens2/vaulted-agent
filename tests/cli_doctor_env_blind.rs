@@ -37,7 +37,9 @@ fn seam_kimi(manifest_body: &str, harness_extra: &str) -> CliSeam {
 
 #[test]
 fn doctor_does_not_treat_kimi_as_env_blind() {
-    let seam = seam_kimi("OPENAI_API_KEY=vault-injected-key\n", "");
+    // workdir=caller so the harness is warning-free on every other axis, which
+    // lets the warning count below carry the whole assertion.
+    let seam = seam_kimi("OPENAI_API_KEY=vault-injected-key\n", "workdir = caller\n");
     let out = doctor(&seam);
     assert!(
         out.contains("manifest syntax ok"),
@@ -49,6 +51,13 @@ fn doctor_does_not_treat_kimi_as_env_blind() {
             && !out.contains("empty manifest is expected")
             && !out.contains("listed in etc/env-blind-agents"),
         "kimi must not be classified env-blind:\n{out}"
+    );
+    // Phrasing alone is too weak a guard: a revived env-blind check worded any
+    // other way passed every assertion above. Count warnings instead — any
+    // revival makes this 1, whatever words it chooses.
+    assert!(
+        out.contains("Summary: 0 error(s), 0 warning(s)"),
+        "a healthy kimi harness must draw no warning at all:\n{out}"
     );
 }
 

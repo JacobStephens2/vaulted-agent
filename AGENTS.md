@@ -102,11 +102,13 @@ If a shared manifest maps `OPENAI_API_KEY` to a different vault item than this
 harness needs (e.g. real OpenAI vs Fireworks), rename for this harness only
 (#66). Provider **type** still drives the env var name kimi reads:
 
-```ini
-# harnesses.d/kimi.conf
-manifest = orchestrator-all.env.tpl
-alias    = OPENAI_API_KEY = FIREWORKS_AI_API_KEY
-command  = kimi --auto
+For a custom openai-compatible provider (Fireworks, Together, local vLLM), the
+key goes in `~/.kimi-code/config.toml`, literally:
+
+```toml
+[providers.fireworks]
+type    = "openai"
+api_key = "fw_…"          # read from here, never from the environment
 ```
 
 **Upstream gate bug (not env-blind).** Kimi Code 0.33+ default print mode has an
@@ -241,3 +243,17 @@ cargo clippy --all-targets -- -D warnings
 - `va doctor` is clean or only expected warnings (and summary counts match)
 - Target harness launches; secrets present in the child (not in manager-token form)
 - If you used `-m`, stderr shows the override and the agent did not inherit the wider default manifest
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `JacobStephens2/vaulted-agent`, via the `gh` CLI. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See [docs/agents/triage-labels.md](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context - `CONTEXT.md` + `docs/adr/` at the repo root. See [docs/agents/domain.md](docs/agents/domain.md).
