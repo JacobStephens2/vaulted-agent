@@ -622,8 +622,12 @@ printf %s "$TOKEN" | sudo vaulted-agent setup onepassword --set-token
 `--set-token` is also how you **rotate**: stdin outranks an exported token, so a
 rotation cannot silently re-store the stale value that is still in your shell. A
 leading `BWS_ACCESS_TOKEN=` / `OP_SERVICE_ACCOUNT_TOKEN=` is stripped, so a line
-copied out of a token file works. Empty stdin is an error here, not a skip, and
-verification failure exits non-zero with nothing written.
+copied out of a token file works; embedded newlines, a stray `=`, and empty
+input are refused rather than stored. The piped value is **not** shape-checked -
+a pipe is deliberate, and the live verify is the authority on whether the token
+works. Verification failure exits non-zero with nothing written. Running
+`--set-token` with stdin still attached to a terminal is an error, not a wait:
+it tells you to pipe it, or to drop the flag and paste interactively.
 
 Capture never fires for a token file that exists but **cannot be read** - that is
 a permissions fault, and overwriting it would clobber a working credential and

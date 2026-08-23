@@ -68,6 +68,73 @@ impl TokenKind {
             Self::Op => "1Password service-account token (OP_SERVICE_ACCOUNT_TOKEN)",
         }
     }
+
+    /// The `setup` subcommand that configures this token's backend.
+    pub fn backend_name(self) -> &'static str {
+        match self {
+            Self::Bws => "bitwarden",
+            Self::Op => "onepassword",
+        }
+    }
+
+    /// Vault console the operator gets the token from. Printed, never opened:
+    /// setup runs under sudo on servers, where a browser is the wrong move.
+    pub fn console_url(self) -> &'static str {
+        match self {
+            // Self-hosted and regional tenants have their own host; the path
+            // after it is the same everywhere.
+            Self::Bws => {
+                "https://vault.bitwarden.com/#/sm (or your region's vault host) \
+                          → Machine accounts → Access tokens"
+            }
+            Self::Op => {
+                "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount"
+            }
+        }
+    }
+
+    /// Catch a master-password / login-API-key paste before it reaches the
+    /// vault. `None` means the shape is plausible — not that the token is valid.
+    pub(crate) fn shape_problem(self, token: &str) -> Option<String> {
+        if token.chars().any(char::is_whitespace) {
+            return Some("contains whitespace — vault tokens do not".to_string());
+        }
+        match self {
+            Self::Bws => {
+                if token.starts_with("user.") || token.starts_with("organization.") {
+                    return Some(
+                        "that is a Bitwarden login API key client_id, not a Secrets Manager \
+                         access token"
+                            .to_string(),
+                    );
+                }
+                if !token.starts_with("0.") {
+                    return Some(
+                        "Secrets Manager access tokens start with `0.` — this looks like a master \
+                         password or a login API key"
+                            .to_string(),
+                    );
+                }
+                if !token.contains(':') {
+                    return Some(
+                        "missing the `:` separator — expected 0.<client-id>.<client-secret>:<key>"
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            Self::Op => {
+                if !token.starts_with("ops_") {
+                    return Some(
+                        "service-account tokens start with `ops_` — this looks like an account \
+                         password or a session token"
+                            .to_string(),
+                    );
+                }
+                None
+            }
+        }
+    }
 }
 
 fn read_token_file(path: &Path, key: &str) -> Result<Option<ManagerToken>> {
@@ -184,7 +251,7 @@ fn prompt_token(kind: TokenKind) -> Result<ManagerToken> {
 
 /// Token-file state as the capture decision sees it: comparable, no io::Error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenFile {
+pub(crate) enum TokenFile {
     /// Readable and carries a value for this key.
     Present,
     /// Absent, or readable but carrying no value for this key.
@@ -195,7 +262,7 @@ pub enum TokenFile {
 
 /// What `setup` should do about the manager token. Pure decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CaptureDecision {
+pub(crate) enum CaptureDecision {
     /// Ask on the terminal (no echo) and store what is pasted.
     Prompt,
     /// Read the token from stdin (`--set-token`).
@@ -209,7 +276,7 @@ pub enum CaptureDecision {
 
 /// Facts the capture decision is made from. All injectable; no IO in the plan.
 #[derive(Debug, Clone)]
-pub struct CaptureFacts {
+pub(crate) struct CaptureFacts {
     pub kind: TokenKind,
     pub file: TokenFile,
     /// The token's env var is exported and non-empty.
@@ -228,7 +295,12 @@ pub struct CaptureFacts {
 impl CaptureFacts {
     /// Gather the facts from the running process. The only IO in capture
     /// planning; `plan_token_capture` itself stays pure.
-    pub fn from_runtime(paths: &Paths, kind: TokenKind, mode: AuthMode, set_token: bool) -> Self {
+    pub(crate) fn from_runtime(
+        paths: &Paths,
+        kind: TokenKind,
+        mode: AuthMode,
+        set_token: bool,
+    ) -> Self {
         let path = kind.file(paths);
         let file = match token_file_status(path) {
             TokenFileStatus::Missing => TokenFile::Missing,
@@ -258,7 +330,7 @@ impl CaptureFacts {
 }
 
 /// Pure planning: no IO, no prompts, no process spawn.
-pub fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
+pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
     let key = facts.kind.env_var();
 
     // auth_mode=prompt stores nothing on disk, so there is nothing to capture.
@@ -294,6 +366,16 @@ pub fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
     // The rotation door. An explicit argument beats ambient env: without this,
     // rotating while an old token is still exported would store the stale value.
     if facts.set_token {
+        // Reading stdin here would block on a terminal until the operator
+        // found ^D, looking like a hang. Say what to do instead.
+        if facts.tty {
+            return CaptureDecision::Fail(format!(
+                "--set-token reads the token from stdin, but stdin is a terminal\n  \
+                 pipe it:  printf %s \"$TOKEN\" | vaulted-agent setup {backend} --set-token\n  \
+                 or drop --set-token to paste it interactively",
+                backend = facts.kind.backend_name(),
+            ));
+        }
         return CaptureDecision::Stdin;
     }
 
@@ -310,10 +392,7 @@ pub fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
          pipe it:   printf %s \"$TOKEN\" | vaulted-agent setup {backend} --set-token\n  \
          or export: {key}\n  \
          or paste each launch: vaulted-agent auth-mode prompt",
-        backend = match facts.kind {
-            TokenKind::Bws => "bitwarden",
-            TokenKind::Op => "onepassword",
-        },
+        backend = facts.kind.backend_name(),
     ))
 }
 
@@ -346,71 +425,18 @@ pub(crate) fn normalize_piped_token(kind: TokenKind, raw: &str) -> Result<String
     Ok(body.to_string())
 }
 
-/// Catch a master-password / login-API-key paste before it reaches the vault.
-/// `None` means the shape is plausible — not that the token is valid.
-pub(crate) fn token_shape_problem(kind: TokenKind, token: &str) -> Option<String> {
-    if token.chars().any(char::is_whitespace) {
-        return Some("contains whitespace — vault tokens do not".to_string());
-    }
-    match kind {
-        TokenKind::Bws => {
-            if token.starts_with("user.") || token.starts_with("organization.") {
-                return Some(
-                    "that is a Bitwarden login API key client_id, not a Secrets Manager access token"
-                        .to_string(),
-                );
-            }
-            if !token.starts_with("0.") {
-                return Some(
-                    "Secrets Manager access tokens start with `0.` — this looks like a master \
-                     password or a login API key"
-                        .to_string(),
-                );
-            }
-            if !token.contains(':') {
-                return Some(
-                    "missing the `:` separator — expected 0.<client-id>.<client-secret>:<key>"
-                        .to_string(),
-                );
-            }
-            None
-        }
-        TokenKind::Op => {
-            if !token.starts_with("ops_") {
-                return Some(
-                    "service-account tokens start with `ops_` — this looks like an account \
-                     password or a session token"
-                        .to_string(),
-                );
-            }
-            None
-        }
-    }
-}
-
 /// Outcome of `capture_token`.
 ///
 /// Three-way rather than `Option`: a declined prompt ("write it later") must
 /// not be confused with "a token already exists", or the caller would fall
 /// through and prompt the operator a second time.
-pub enum Capture {
+pub(crate) enum Capture {
     /// Captured, verified against the backend, and written to the token file.
     Token(ManagerToken),
     /// No capture: the caller loads the token the usual way.
     UseExisting,
     /// Operator declined at the prompt; nothing was written.
     Skipped,
-}
-
-/// Vault console the operator gets the token from. Printed, never opened:
-/// setup runs under sudo on servers, where a browser is the wrong move.
-fn console_url(kind: TokenKind) -> &'static str {
-    match kind {
-        TokenKind::Bws => "https://vault.bitwarden.com/#/sm  (Machine accounts → Access tokens)",
-        TokenKind::Op => {
-            "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount"
-        }
-    }
 }
 
 fn tty_write(line: &str) {
@@ -432,7 +458,7 @@ fn store_captured(paths: &Paths, kind: TokenKind, token: &ManagerToken) -> Resul
 ///
 /// `verify` is the backend liveness check (`bws secret list` / `op whoami`);
 /// an invalid token never lands on disk.
-pub fn capture_token(
+pub(crate) fn capture_token(
     paths: &Paths,
     kind: TokenKind,
     mode: AuthMode,
@@ -448,6 +474,21 @@ pub fn capture_token(
     }
 }
 
+/// Verify a candidate against the backend, then store it. Shared by both
+/// capture doors so "an invalid token never lands on disk" has one home.
+/// `Err` carries why the vault refused it; nothing is written in that case.
+fn verify_and_store(
+    paths: &Paths,
+    kind: TokenKind,
+    value: String,
+    verify: &dyn Fn(&ManagerToken) -> Result<()>,
+) -> Result<ManagerToken> {
+    let token = ManagerToken::new(value);
+    verify(&token)?;
+    store_captured(paths, kind, &token)?;
+    Ok(token)
+}
+
 fn capture_from_stdin(
     paths: &Paths,
     kind: TokenKind,
@@ -459,20 +500,16 @@ fn capture_from_stdin(
         .read_to_string(&mut raw)
         .map_err(|e| Error::Message(format!("--set-token: reading stdin: {e}")))?;
     let value = normalize_piped_token(kind, &raw)?;
-    if let Some(problem) = token_shape_problem(kind, &value) {
-        return Err(Error::Message(format!(
-            "--set-token: {problem} (nothing written)"
-        )));
-    }
-    let token = ManagerToken::new(value);
-    // Verify before write: no re-prompt on the piped path, just a non-zero exit.
-    verify(&token).map_err(|e| {
+    // No shape check here. A pipe is deliberate and often a rotation, and the
+    // live verify below is the authority on whether the token works — a
+    // heuristic that has not caught up with a new token format must not be
+    // what blocks it. Verify before write: no re-prompt, just a non-zero exit.
+    let token = verify_and_store(paths, kind, value, verify).map_err(|e| {
         Error::Message(format!(
             "--set-token: {} rejected by the vault (nothing written)\n  {e}",
             kind.env_var()
         ))
     })?;
-    store_captured(paths, kind, &token)?;
     Ok(Capture::Token(token))
 }
 
@@ -481,7 +518,7 @@ fn capture_from_prompt(
     kind: TokenKind,
     verify: &dyn Fn(&ManagerToken) -> Result<()>,
 ) -> Result<Capture> {
-    tty_write(&format!("\nGet it at: {}", console_url(kind)));
+    tty_write(&format!("\nGet it at: {}", kind.console_url()));
     // Two attempts: one paste, one correction.
     for attempt in 0..2 {
         tty_write(&format!(
@@ -505,20 +542,15 @@ fn capture_from_prompt(
             );
             return Ok(Capture::Skipped);
         }
-        let rejected = match token_shape_problem(kind, &value) {
-            Some(problem) => Some(problem),
-            None => {
-                let token = ManagerToken::new(value);
-                match verify(&token) {
-                    Ok(()) => {
-                        store_captured(paths, kind, &token)?;
-                        return Ok(Capture::Token(token));
-                    }
-                    Err(e) => Some(format!("the vault rejected it ({e})")),
-                }
-            }
+        // Shape first, so a master password or a login API key is named for
+        // what it is instead of coming back as an opaque vault rejection.
+        let problem = match kind.shape_problem(&value) {
+            Some(problem) => problem,
+            None => match verify_and_store(paths, kind, value, verify) {
+                Ok(token) => return Ok(Capture::Token(token)),
+                Err(e) => format!("the vault rejected it ({e})"),
+            },
         };
-        let problem = rejected.unwrap_or_default();
         if attempt == 0 {
             eprintln!("vaulted-agent: {problem} — try again (nothing written).");
         } else {
@@ -692,20 +724,16 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn facts(
-        mode: AuthMode,
-        file: TokenFile,
-        env_token: bool,
-        tty: bool,
-        set_token: bool,
-    ) -> CaptureFacts {
+    /// A host with nothing configured yet: file mode, no token anywhere, at a
+    /// terminal. Each test overrides only the fact it is about.
+    fn facts() -> CaptureFacts {
         CaptureFacts {
             kind: TokenKind::Bws,
-            file,
-            env_token,
-            mode,
-            tty,
-            set_token,
+            file: TokenFile::Missing,
+            env_token: false,
+            mode: AuthMode::File,
+            tty: true,
+            set_token: false,
             token_path: "/etc/vaulted-agent/bws.env".into(),
             current_user: "root".into(),
         }
@@ -713,28 +741,16 @@ mod tests {
 
     #[test]
     fn capture_prompts_only_when_file_missing_no_env_and_mode_file() {
-        assert_eq!(
-            plan_token_capture(&facts(
-                AuthMode::File,
-                TokenFile::Missing,
-                false,
-                true,
-                false
-            )),
-            CaptureDecision::Prompt
-        );
+        assert_eq!(plan_token_capture(&facts()), CaptureDecision::Prompt);
     }
 
     #[test]
     fn capture_defers_to_existing_token_file() {
         assert_eq!(
-            plan_token_capture(&facts(
-                AuthMode::File,
-                TokenFile::Present,
-                false,
-                true,
-                false
-            )),
+            plan_token_capture(&CaptureFacts {
+                file: TokenFile::Present,
+                ..facts()
+            }),
             CaptureDecision::UseExisting
         );
     }
@@ -742,13 +758,10 @@ mod tests {
     #[test]
     fn capture_defers_to_exported_token() {
         assert_eq!(
-            plan_token_capture(&facts(
-                AuthMode::File,
-                TokenFile::Missing,
-                true,
-                true,
-                false
-            )),
+            plan_token_capture(&CaptureFacts {
+                env_token: true,
+                ..facts()
+            }),
             CaptureDecision::UseExisting
         );
     }
@@ -757,7 +770,11 @@ mod tests {
     fn capture_never_fires_in_prompt_mode() {
         for file in [TokenFile::Missing, TokenFile::Present] {
             assert_eq!(
-                plan_token_capture(&facts(AuthMode::Prompt, file, false, true, false)),
+                plan_token_capture(&CaptureFacts {
+                    mode: AuthMode::Prompt,
+                    file,
+                    ..facts()
+                }),
                 CaptureDecision::UseExisting
             );
         }
@@ -765,13 +782,12 @@ mod tests {
 
     #[test]
     fn set_token_in_prompt_mode_is_a_contradiction() {
-        match plan_token_capture(&facts(
-            AuthMode::Prompt,
-            TokenFile::Missing,
-            false,
-            false,
-            true,
-        )) {
+        match plan_token_capture(&CaptureFacts {
+            mode: AuthMode::Prompt,
+            tty: false,
+            set_token: true,
+            ..facts()
+        }) {
             CaptureDecision::Fail(msg) => assert!(msg.contains("auth-mode file"), "{msg}"),
             other => panic!("expected Fail, got {other:?}"),
         }
@@ -782,19 +798,39 @@ mod tests {
         // Rotation door: an explicit argument beats ambient env, so a rotation
         // never silently stores the stale exported value.
         assert_eq!(
-            plan_token_capture(&facts(
-                AuthMode::File,
-                TokenFile::Present,
-                true,
-                false,
-                true
-            )),
+            plan_token_capture(&CaptureFacts {
+                file: TokenFile::Present,
+                env_token: true,
+                tty: false,
+                set_token: true,
+                ..facts()
+            }),
             CaptureDecision::Stdin
         );
         assert_eq!(
-            plan_token_capture(&facts(AuthMode::File, TokenFile::Missing, true, true, true)),
+            plan_token_capture(&CaptureFacts {
+                env_token: true,
+                tty: false,
+                set_token: true,
+                ..facts()
+            }),
             CaptureDecision::Stdin
         );
+    }
+
+    #[test]
+    fn set_token_at_a_terminal_says_to_pipe_instead_of_blocking() {
+        // Reading stdin from a terminal waits for ^D and reads like a hang.
+        match plan_token_capture(&CaptureFacts {
+            set_token: true,
+            ..facts()
+        }) {
+            CaptureDecision::Fail(msg) => {
+                assert!(msg.contains("stdin is a terminal"), "{msg}");
+                assert!(msg.contains("printf"), "{msg}");
+            }
+            other => panic!("expected Fail, got {other:?}"),
+        }
     }
 
     #[test]
@@ -805,15 +841,15 @@ mod tests {
             (false, true, false),
             (true, true, false),
             (false, false, true),
-            (true, true, true),
+            (true, false, true),
         ] {
-            match plan_token_capture(&facts(
-                AuthMode::File,
-                TokenFile::Unreadable,
+            match plan_token_capture(&CaptureFacts {
+                file: TokenFile::Unreadable,
                 env_token,
                 tty,
                 set_token,
-            )) {
+                ..facts()
+            }) {
                 CaptureDecision::Fail(msg) => {
                     assert!(msg.contains("cannot be read"), "{msg}");
                     assert!(msg.contains("bws.env"), "{msg}");
@@ -825,13 +861,10 @@ mod tests {
 
     #[test]
     fn no_tty_and_no_token_names_set_token() {
-        match plan_token_capture(&facts(
-            AuthMode::File,
-            TokenFile::Missing,
-            false,
-            false,
-            false,
-        )) {
+        match plan_token_capture(&CaptureFacts {
+            tty: false,
+            ..facts()
+        }) {
             CaptureDecision::Fail(msg) => {
                 assert!(msg.contains("--set-token"), "{msg}");
                 assert!(msg.contains("BWS_ACCESS_TOKEN"), "{msg}");
@@ -870,21 +903,25 @@ mod tests {
 
     #[test]
     fn shape_check_catches_wrong_bitwarden_credential() {
-        assert!(token_shape_problem(TokenKind::Bws, "0.uuid.client:enc").is_none());
+        assert!(TokenKind::Bws.shape_problem("0.uuid.client:enc").is_none());
         // Login API key client id, not a Secrets Manager access token.
-        assert!(token_shape_problem(TokenKind::Bws, "user.1234").is_some());
+        assert!(TokenKind::Bws.shape_problem("user.1234").is_some());
         // Master password.
-        assert!(token_shape_problem(TokenKind::Bws, "correct horse battery").is_some());
-        assert!(token_shape_problem(TokenKind::Bws, "hunter2").is_some());
+        assert!(TokenKind::Bws
+            .shape_problem("correct horse battery")
+            .is_some());
+        assert!(TokenKind::Bws.shape_problem("hunter2").is_some());
         // Right prefix, missing the key separator.
-        assert!(token_shape_problem(TokenKind::Bws, "0.uuid.client").is_some());
+        assert!(TokenKind::Bws.shape_problem("0.uuid.client").is_some());
     }
 
     #[test]
     fn shape_check_catches_wrong_onepassword_credential() {
-        assert!(token_shape_problem(TokenKind::Op, "ops_eyJhbGci").is_none());
-        assert!(token_shape_problem(TokenKind::Op, "my personal password").is_some());
-        assert!(token_shape_problem(TokenKind::Op, "eyJhbGci").is_some());
+        assert!(TokenKind::Op.shape_problem("ops_eyJhbGci").is_none());
+        assert!(TokenKind::Op
+            .shape_problem("my personal password")
+            .is_some());
+        assert!(TokenKind::Op.shape_problem("eyJhbGci").is_some());
     }
 
     #[test]

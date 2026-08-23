@@ -146,28 +146,23 @@ fn set_token_outranks_an_exported_token() {
 }
 
 #[test]
-fn set_token_rejects_a_master_password_before_the_vault_sees_it() {
+fn set_token_does_not_shape_check_the_pipe() {
+    // A pipe is deliberate and usually a rotation: the live verify is the
+    // authority on whether a token works, so a shape heuristic that has not
+    // caught up with a new token format must not be what blocks it.
     let seam = file_mode_seam("file");
-    // No `bws` on PATH at all: the shape check must reject before any vault call.
-    seam.write_executable("bws", "#!/bin/sh\necho 'bws must not run' >&2\nexit 3\n");
+    let secrets = seam.write_secrets_json("secrets.json", r#"{"OPENAI_API_KEY":"sk-x"}"#);
+    seam.install_fake_bws(&secrets);
 
+    let unusual = "9.deadbeef-0000-0000-0000-000000000000.client!key";
     let out = run_with_stdin(
         seam.vaulted_agent()
             .args(["setup", "bitwarden", "--set-token"]),
-        "correcthorsebatterystaple\n",
+        &format!("{unusual}\n"),
     );
-    assert!(!out.status.success(), "{}", combined(&out));
-    assert!(
-        combined(&out).contains("start with `0.`"),
-        "{}",
-        combined(&out)
-    );
-    assert!(
-        !combined(&out).contains("bws must not run"),
-        "{}",
-        combined(&out)
-    );
-    assert!(!seam.config_dir.join("bws.env").exists());
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = fs::read_to_string(seam.config_dir.join("bws.env")).unwrap();
+    assert_eq!(text, format!("BWS_ACCESS_TOKEN={unusual}\n"), "{text}");
 }
 
 #[test]

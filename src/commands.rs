@@ -1,5 +1,6 @@
 //! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, pick, run.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -1526,36 +1527,53 @@ fn default_bitwarden_manifest(paths: &Paths) -> Result<PathBuf> {
     }
 }
 
+/// Legacy fallback for `Capture::UseExisting`: load the token the usual way
+/// (env var, existing file, or prompt) and, under `auth_mode=file`, persist it
+/// so rotating through an exported token still lands on disk.
+fn store_existing_token(paths: &Paths, kind: TokenKind, mode: AuthMode) -> Result<ManagerToken> {
+    let token = auth::load_manager_token(paths, mode, kind, force_prompt())?;
+    let path = kind.file(paths).to_path_buf();
+    if mode == AuthMode::File {
+        let svc = service_user_for_token(paths);
+        auth::write_token_file(&path, kind.env_var(), &token, svc.as_deref())?;
+        println!("wrote {} (0640)", path.display());
+    } else {
+        println!("auth_mode=prompt — token not written to disk (good).");
+        println!(
+            "  To store it: vaulted-agent auth-mode file, then re-run setup {}.",
+            kind.backend_name()
+        );
+    }
+    Ok(token)
+}
+
 fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()> {
     println!("\nBitwarden Secrets Manager");
     println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
     println!("  not your personal vault master password or login API key.\n");
     // Token capture: setup is the only place that may obtain and store a
-    // manager token (issue #77). `bws secret list` doubles as the liveness
-    // check, so an invalid token never lands on disk.
-    let verify = |t: &ManagerToken| backend::bws_list_secrets(t).map(|_| ());
+    // manager token (issue #77). `bws secret list` is both the liveness check
+    // that keeps an invalid token off disk and the data the rest of setup
+    // needs, so keep the result instead of paying for a second round trip.
+    let listed: RefCell<Option<Vec<(String, String, String)>>> = RefCell::new(None);
+    let verify = |t: &ManagerToken| {
+        *listed.borrow_mut() = Some(backend::bws_list_secrets(t)?);
+        Ok(())
+    };
     let token = match auth::capture_token(paths, TokenKind::Bws, mode, set_token, &verify)? {
         auth::Capture::Token(t) => t,
-        auth::Capture::Skipped => return Ok(()),
-        auth::Capture::UseExisting => {
-            let token = load_bws_with(paths, mode)?;
-            if mode == AuthMode::File {
-                // Always write so token rotation works (parity with setup onepassword).
-                let svc = service_user_for_token(paths);
-                auth::write_token_file(
-                    &paths.bws_env_file,
-                    "BWS_ACCESS_TOKEN",
-                    &token,
-                    svc.as_deref(),
-                )?;
-                println!("wrote {}", paths.bws_env_file.display());
-            } else {
-                println!("auth_mode=prompt — token not written to disk.");
-            }
-            token
+        auth::Capture::UseExisting => store_existing_token(paths, TokenKind::Bws, mode)?,
+        auth::Capture::Skipped => {
+            // Everything left here needs the token to talk to the vault.
+            println!("Skipping vault work. When you have a token:");
+            println!("  vaulted-agent setup bitwarden");
+            return Ok(());
         }
     };
-    let secrets = backend::bws_list_secrets(&token)?;
+    let secrets = match listed.borrow_mut().take() {
+        Some(secrets) => secrets,
+        None => backend::bws_list_secrets(&token)?,
+    };
     drop(token);
     if secrets.is_empty() {
         println!("No secrets in this machine account yet. Create one in SM, then:");
@@ -1584,30 +1602,14 @@ fn setup_onepassword(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<(
     println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
     // Token capture (issue #77); `op whoami` verifies before anything is written.
     let verify = |t: &ManagerToken| backend::op_whoami(t);
-    let token = match auth::capture_token(paths, TokenKind::Op, mode, set_token, &verify)? {
-        auth::Capture::Token(t) => t,
-        auth::Capture::Skipped => return Ok(()),
-        auth::Capture::UseExisting => {
-            let token = load_op_with(paths, mode)?;
-            if mode == AuthMode::File {
-                let svc = service_user_for_token(paths);
-                auth::write_token_file(
-                    &paths.op_env_file,
-                    "OP_SERVICE_ACCOUNT_TOKEN",
-                    &token,
-                    svc.as_deref(),
-                )?;
-                println!("wrote {} (0640)", paths.op_env_file.display());
-            } else {
-                println!("auth_mode=prompt — token not written to disk (good).");
-                println!(
-                    "  To store it: vaulted-agent auth-mode file, then re-run setup onepassword."
-                );
-            }
-            token
-        }
-    };
-    drop(token);
+    match auth::capture_token(paths, TokenKind::Op, mode, set_token, &verify)? {
+        auth::Capture::Token(token) => drop(token),
+        auth::Capture::UseExisting => drop(store_existing_token(paths, TokenKind::Op, mode)?),
+        // A declined paste skips the token, not the rest of setup: the guidance
+        // below is what tells the operator how to wire a harness (install.sh
+        // parity — its skip is a skip of the token write only).
+        auth::Capture::Skipped => {}
+    }
     println!("Manifests use op:// references; op inject runs at launch.");
     println!("Example harness: backend = onepassword");
     Ok(())
@@ -1642,6 +1644,10 @@ pub fn cmd_setup(paths: &Paths, args: &[String]) -> Result<()> {
         match name {
             "bitwarden" | "bws" => setup_bitwarden(paths, mode, set_token),
             "onepassword" | "op" | "1password" => setup_onepassword(paths, mode, set_token),
+            "pass" | "sops" if set_token => Err(Error::Message(format!(
+                "setup --set-token: {name} has no manager token file \
+                 (pass uses GPG, sops uses an age key)"
+            ))),
             "pass" => {
                 println!("\npass backend uses the passwordstore.org store (GPG).");
                 println!("No token file. Ensure `pass` is on PATH for the service account.");
