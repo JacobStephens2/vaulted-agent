@@ -168,6 +168,10 @@ esac
 set -euo pipefail
 : "${OP_SERVICE_ACCOUNT_TOKEN:?fake-op: no token in env}"
 case "${1-} ${2-}" in
+  whoami*)
+    # Liveness check used by setup token capture.
+    echo '{"URL":"https://fake.1password.com","ServiceAccountType":"SERVICE_ACCOUNT"}'
+    ;;
   "item list")
     cat <<'JSON'
 [

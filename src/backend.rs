@@ -277,6 +277,19 @@ pub fn bws_list_secrets(token: &ManagerToken) -> Result<Vec<(String, String, Str
     parse_bws_list_json(&list)
 }
 
+/// Verify a 1Password service-account token without touching any item.
+///
+/// `op whoami` is the cheapest live check the token can pass, and unlike
+/// `item list` it does not depend on the account seeing any vault yet.
+pub fn op_whoami(token: &ManagerToken) -> Result<()> {
+    run_capture(
+        "op",
+        &["whoami", "--format", "json"],
+        &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())],
+    )?;
+    Ok(())
+}
+
 /// List 1Password items the token can see, as (id, title, vault name).
 ///
 /// Items only - fields are fetched per item in `op_item_field_labels`, because

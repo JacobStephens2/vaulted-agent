@@ -42,6 +42,7 @@ vaulted-agent version   # expect 0.4.17 (git stamp may appear in parentheses)
 | **Alias** | `alias = TARGET = SOURCE` in a harness conf: copy resolved SOURCE onto TARGET in that harness's child env only |
 | **Manifest / refs file** | Mapping file under `manifests/` - references only for vault backends |
 | **Manager token** | Vault SA token (`op.env` / `bws.env` or prompt) - used only to resolve, then dropped |
+| **Token capture** | `setup`-only: obtain a manager token (TTY paste, or piped stdin under `--set-token`), verify it live, then write the token file. Never on the launch path |
 | **Service user** | Optional OS account; launcher re-execs via `sudo -u` so the agent runs as that user |
 | **Conductor link** | `*-conductor` → fixed harness; no `-H` / `-m` override |
 
@@ -75,6 +76,7 @@ elevated launches always read the machine config dir).
 | Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
+| Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
 | Uninstall | `sudo va uninstall` |
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
@@ -189,6 +191,8 @@ Interpret carefully:
 | `secrets validate` needs token / fails without | Live gate by design; use `--offline` only for shape |
 | Legacy `*_ADD_MORE_*` names | Old 1Password refresh naming; still works; next refresh renames - see MIGRATION.md |
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
+| `no manager token yet and no terminal to paste one` | `setup` with `auth_mode=file` and nothing to capture; pipe it with `--set-token`, export the token, or `va auth-mode prompt` |
+| `--set-token: … rejected by the vault` | Token verified live before write; nothing was stored. Check you pasted a Machine Account access token / service-account token |
 
 ## Launch path (invariants)
 
