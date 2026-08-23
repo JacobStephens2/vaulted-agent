@@ -1,10 +1,13 @@
 # vaulted-agent
 
-[![CI](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent-launcher/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent-launcher)](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/latest)
+[![CI](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent)](https://github.com/JacobStephens2/vaulted-agent/releases/latest)
 
 Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
 **in-process** - without leaving a pile of `.env` files on disk.
+(Kimi Code 0.33+ currently needs `env = KIMI_CODE_LEGACY_FLAG = 1` on the
+harness until [kimi-code#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)
+ships; see [AGENTS.md](AGENTS.md) and issue #70.)
 
 One launcher (`va`), one secrets backend (1Password, Bitwarden Secrets Manager,
 pass, sops, …), **per-agent manifests** for blast radius. Optional **prompt
@@ -12,7 +15,7 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [vaultedagent.com](https://vaultedagent.com/) ·
-Latest: [v0.4.15](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.15)
+Latest: [v0.4.17](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.17)
 (Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
@@ -34,7 +37,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 `grok`, `kimi`), and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.15` (or `latest`).
+`VAULTED_AGENT_VERSION=v0.4.17` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -58,15 +61,8 @@ only). Point harnesses at it, or use `va run -m …`.
 va claude
 va codex
 va grok
-va kimi           # --auto by default (matches claude's unattended posture)
+va kimi           # --auto; vault inject OPENAI_API_KEY (by provider type); see AGENTS.md
 ```
-
-**Kimi is the exception to all of this.** It does not read provider credentials
-from its environment, so a manifest on that harness injects secrets nothing
-reads — the launch looks healthy and the agent fails with an auth error. Its key
-belongs in `~/.kimi-code/config.toml`; the shipped harness uses `empty.env` and
-`va doctor` warns if you wire it to a real manifest. See
-[AGENTS.md](AGENTS.md#kimi) and [issue #68](https://github.com/JacobStephens2/vaulted-agent-launcher/issues/68).
 
 With `auth_mode=prompt`, paste the vault manager token when asked (not written
 to disk). Force once on the `va` path: `va grok -p`. Under a `*-conductor`
@@ -197,7 +193,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.4.15](https://github.com/JacobStephens2/vaulted-agent-launcher/releases/tag/v0.4.15)
+Latest: [v0.4.17](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.17)
 
 ## The honest claim
 
@@ -484,6 +480,7 @@ command  = claude --permission-mode auto
 | `labels`   | map non-UUID `--resume`/`--session-id` values to a stable UUIDv5    |
 | `keep`     | extra variables surviving the environment scrub, comma separated    |
 | `alias`    | repeatable: `TARGET = SOURCE` — copy an injected secret onto another name in this harness's child env only (fail closed if SOURCE missing; see issue #66) |
+| `env`      | repeatable: `NAME = value` — non-secret child env (not vault material; e.g. temporary `KIMI_CODE_LEGACY_FLAG` on kimi.conf, issue #70) |
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 

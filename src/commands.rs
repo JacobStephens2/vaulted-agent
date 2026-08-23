@@ -10,8 +10,8 @@ use std::process::Command;
 use crate::auth::{self, TokenKind};
 use crate::backend;
 use crate::config::{
-    list_harness_names, load_allow_run, load_auth_mode, load_default_backend, load_service_user,
-    parse_dotenv_keys, AuthMode, Backend, Harness, Paths,
+    env_blind_agent_reason, list_harness_names, load_allow_run, load_auth_mode,
+    load_default_backend, load_service_user, parse_dotenv_keys, AuthMode, Backend, Harness, Paths,
 };
 use crate::error::{Error, Result};
 use crate::launch::{self, auth_mode_from_env_or_config, force_prompt_from_env, LaunchOpts};
@@ -899,26 +899,34 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             // wired: a comments-only refs file. The harness then launches
             // perfectly, with nothing in its environment, and the agent fails
             // later for reasons that look nothing like a launcher problem.
-            // Say it here instead.
+            // Say it here instead — unless listed in etc/env-blind-agents,
+            // where empty.env is the expected shape (inject is a no-op).
             let defined = fs::read_to_string(&man_path)
                 .ok()
                 .and_then(|t| parse_dotenv_keys(&t).ok())
                 .map(|m| m.len())
                 .unwrap_or(0);
-            if defined == 0 {
+            let env_blind = h.command_basename().and_then(env_blind_agent_reason);
+            if let Some(reason) = env_blind {
+                if defined > 0 {
+                    println!("  WARN: manifest defines {defined} variable(s), but {reason}");
+                    warn += 1;
+                } else {
+                    println!(
+                        "  note: empty manifest is expected for this agent ({})",
+                        h.command_basename().unwrap_or("?")
+                    );
+                }
+                if !h.aliases.is_empty() {
+                    println!(
+                        "  WARN: alias= is set on an env-blind agent; aliases only rename \
+                         child-env variables and do not reach this tool's config file"
+                    );
+                    warn += 1;
+                }
+            } else if defined == 0 {
                 println!(
                     "  WARN: manifest defines no variables, so this harness launches with no secrets (finish `vaulted-agent setup`, or point it at a real manifest)"
-                );
-                warn += 1;
-            } else if let Some(agent) = crate::config::env_blind_agent(&h.command) {
-                // The inverse of the check above, and the more dangerous shape:
-                // a manifest that resolves perfectly into a child that never
-                // reads it. Everything upstream reports green, so without this
-                // the only symptom is the agent's own auth error (issue #68).
-                println!(
-                    "  WARN: {agent} does not read credentials from its environment, so these \
-                     {defined} variable(s) are resolved and injected but never read. Put the key \
-                     in {agent}'s own config file and set manifest = empty.env here."
                 );
                 warn += 1;
             }

@@ -12,7 +12,6 @@ A large family of tools does not. They read credentials only from a config file:
 
 | Tool | Where it looks | How the path is overridden |
 |---|---|---|
-| Kimi Code | `~/.kimi-code/config.toml` | `KIMI_CODE_HOME` (a **directory**) |
 | AWS CLI / SDKs | `~/.aws/credentials` | `AWS_SHARED_CREDENTIALS_FILE` |
 | npm | `~/.npmrc` | `NPM_CONFIG_USERCONFIG` |
 | curl, ftp | `~/.netrc` | `NETRC` |
@@ -21,9 +20,17 @@ A large family of tools does not. They read credentials only from a config file:
 For these, a manifest is not merely unhelpful, it is **invisible**. Every
 variable resolves, injects, and is ignored. Nothing errors, every syntax check
 passes, and `va doctor` reports healthy — the only symptom is the agent's own
-auth failure, which looks nothing like a launcher problem. Issue #68 documents
-the kimi case in detail, including the tested proof that no environment
-mechanism reaches it.
+auth failure, which looks nothing like a launcher problem.
+
+**Kimi Code is not one of these tools.** This ADR was drafted (issue #68,
+v0.4.16) believing it was. Issue #70 disproved that with a live end-to-end
+test: kimi *does* read OpenAI-compatible provider keys from the process
+environment, selecting by provider **type**, and the 0.33–0.34 failures came
+from an upstream gate regression ([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745)).
+The classification was retracted in v0.4.17 and `etc/env-blind-agents` records
+that kimi must not be re-added. The motivating example is gone; the tools in
+the table above remain genuinely config-file-only, so the design question this
+ADR asks is still open — it just has no urgent case driving it.
 
 Today the only honest answer is "paste the key into the tool's config file,"
 which is precisely the pile of secrets on disk this project exists to remove.
@@ -34,8 +41,14 @@ A harness may declare one or more **renders**. A render substitutes resolved
 manifest variables into a template and writes the result into a private
 per-launch directory, then points the child at it with an environment variable.
 
+The examples below are written against kimi because that is the tool this was
+drafted for. They are now **hypothetical** — kimi reads the environment fine
+(see Problem). Re-basing them onto a tool that really is config-file-only (AWS
+CLI, rclone) is open work; the shape of the keys is what is being proposed, not
+the choice of agent.
+
 ```ini
-# harnesses.d/kimi.conf
+# harnesses.d/kimi.conf — hypothetical; kimi does not need this
 backend        = bitwarden
 manifest       = kimi.refs
 render         = config.toml = kimi.config.toml.tpl
@@ -85,7 +98,7 @@ Options considered:
 - **Fork and wait when (and only when) a harness declares a render.** The
   launcher stays as a thin parent, waits, then removes the directory. Costs an
   extra process, signal forwarding, and exit-status propagation — all of which
-  must be got exactly right or `va kimi` stops behaving like `kimi`. Harnesses
+  must be got exactly right or `va <agent>` stops behaving like the agent. Harnesses
   without renders keep the current `exec` path untouched.
 - **`exec` a shell wrapper that traps EXIT.** Cheap, but reintroduces a shell
   into the launch path, and `install.sh` deliberately writes no shell for the

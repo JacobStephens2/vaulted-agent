@@ -1,0 +1,14 @@
+# Command basenames that do not consume vault-injected process-env credentials
+# for the provider paths operators care about.
+#
+# One name per line. Comments and blank lines ignored.
+# Shared source of truth for:
+#   - install.sh  wire_day_one_harnesses (skip vault rewire)
+#   - Rust doctor / env_blind_agent_reason (include_str! this file)
+#
+# Also match harness stem <name>.conf to the same token.
+#
+# kimi was listed here after #68 / v0.4.16. Issue #70 showed that was wrong:
+# kimi *does* read process.env for OpenAI-compatible providers; 0.33–0.34 only
+# fail because of upstream kimi-code#2745 (fix in #2746). Do not re-add kimi
+# as structurally env-blind. Use KIMI_CODE_LEGACY_FLAG for the interim gate.

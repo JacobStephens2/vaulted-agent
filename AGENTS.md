@@ -11,13 +11,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.15**
+Current release pin (product install): **v0.4.17**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.15 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.15 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.17 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.17 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
@@ -90,13 +90,17 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 
 ### Kimi
 
-Shipped / auto harness defaults to `kimi --auto` (unattended). Edit the harness
-to drop `--auto` if you want manual approval.
+Shipped / auto harness defaults to `kimi --auto` (unattended). Day-one is
+`plainfile` + `empty.env`; vault setup rewires kimi like claude/codex/grok.
 
-**Kimi does not read provider credentials from its environment.** A manifest on
-this harness is a silent no-op: the launcher resolves every variable and injects
-it, and kimi reads none of them. Ship it with `manifest = empty.env`. `va doctor`
-warns if you point it at a manifest that defines variables (issue #68).
+**Credentials (issue #70).** Kimi **does** read OpenAI-compatible provider keys
+from the process environment. Selection is by provider **type** (`openai` →
+`OPENAI_API_KEY`), not provider id. Vault inject works (verified in print mode
+with a custom `type = "openai"` provider).
+
+If a shared manifest maps `OPENAI_API_KEY` to a different vault item than this
+harness needs (e.g. real OpenAI vs Fireworks), rename for this harness only
+(#66). Provider **type** still drives the env var name kimi reads:
 
 For a custom openai-compatible provider (Fireworks, Together, local vLLM), the
 key goes in `~/.kimi-code/config.toml`, literally:
@@ -107,26 +111,22 @@ type    = "openai"
 api_key = "fw_…"          # read from here, never from the environment
 ```
 
-Verified against 0.34.0 — none of these reach kimi:
+**Upstream gate bug (not env-blind).** Kimi Code 0.33+ default print mode has an
+auth-gate regression
+([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745);
+fix [#2746](https://github.com/MoonshotAI/kimi-code/pull/2746), not yet in a
+kimi release when this was written). v0.4.16 wrongly called that “env-blind”
+(#68/#69); **retracted** in v0.4.17. Shipped `kimi.conf` carries:
 
-| Attempt | Result |
-|---|---|
-| `FIREWORKS_API_KEY` in the child env | `no credential configured` |
-| `api_key = "${FIREWORKS_API_KEY}"` | `401` — sent verbatim, not expanded |
-| `api_key_env = "…"` | not a config key |
-| `[providers.<name>.env]` sub-table | does not reach the process env |
+```ini
+env = KIMI_CODE_LEGACY_FLAG = 1
+```
 
-`KIMI_API_KEY` *is* read from the environment, but only for kimi's own built-in
-provider — not for custom ones.
+Delete that line once your kimi includes #2746 (0.32 never needed it). Opt-out
+is deleting the harness line — not a keep/export dance.
 
-So **`alias` does not help here.** It renames a variable in the child env, and
-the child never looks there. (Earlier revisions of this file recommended
-`alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY` for exactly this case; that
-advice was wrong and is withdrawn.)
-
-Getting kimi's key out of `config.toml` needs a launcher mechanism that renders
-resolved secrets to a private ephemeral file — see
-[docs/adr/0002-file-render-backend.md](docs/adr/0002-file-render-backend.md).
+`KIMI_API_KEY` is only for kimi’s **built-in** provider. Literal `api_key` in
+`~/.kimi-code/config.toml` still works if you prefer not to inject.
 
 ## Recipes agents actually need
 
@@ -199,6 +199,8 @@ optional sudo -u <service_user>
 → load manager token (file / prompt / env)
 → resolve manifest refs into process env
 → drop manager token
+→ apply harness alias= (secret renames) and env= (non-secret child vars)
+→ prepend bin= to PATH if set
 → exec agent …
 ```
 
@@ -218,12 +220,13 @@ can still read its own env (and so can anything as that user). Manifests are
 | `VAULTED_AGENT_NO_REEXEC=1` | Skip sudo hop (debug / doctor as caller) |
 | `VAULTED_AGENT_HANDOFF=spawn` | Tests only: spawn instead of exec |
 | `BWS_ACCESS_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN` | Manager token if already in env (wins over file) |
+| `KIMI_CODE_LEGACY_FLAG` | Optional; shipped on `kimi.conf` via `env=` until kimi-code#2746 is in a release (issue #70). Delete the harness line to drop it. |
 
 ## Developing this repo (contributors / coding agents)
 
 - Domain vocabulary: [CONTEXT.md](CONTEXT.md)
 - How to use domain docs: [docs/agents/domain.md](docs/agents/domain.md)
-- Issues: `gh` against `JacobStephens2/vaulted-agent-launcher` - [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)
+- Issues: `gh` against `JacobStephens2/vaulted-agent` - [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)
 - Bash→Rust and later behavior breaks: [MIGRATION.md](MIGRATION.md)
 - Installer hosting: [docs/hosting-the-installer.md](docs/hosting-the-installer.md)
 - ADRs: [docs/adr/](docs/adr/)
@@ -245,7 +248,7 @@ cargo clippy --all-targets -- -D warnings
 
 ### Issue tracker
 
-GitHub Issues on `JacobStephens2/vaulted-agent-launcher`, via the `gh` CLI. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+GitHub Issues on `JacobStephens2/vaulted-agent`, via the `gh` CLI. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
 
 ### Triage labels
 

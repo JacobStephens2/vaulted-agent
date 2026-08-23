@@ -1,3 +1,33 @@
+# Migration: kimi is not env-blind (retracts v0.4.16 / #69) (unreleased)
+
+v0.4.16 classified kimi as env-blind and stopped vault wiring (#68 / #69).
+End-to-end probes (issue #70) show kimi **does** read OpenAI-compatible
+provider keys from `process.env` (print mode verified). Failures on Kimi Code
+0.33+ come from an upstream auth-gate regression
+([kimi-code#2745](https://github.com/MoonshotAI/kimi-code/issues/2745),
+fix [PR #2746](https://github.com/MoonshotAI/kimi-code/pull/2746) — not yet
+in a kimi release when this was written), not from a design that ignores the
+environment.
+
+**This release:**
+
+- Removes `kimi` from `etc/env-blind-agents` (registry may stay empty).
+- Install wires day-one kimi harnesses to the vault refs file again.
+- `va doctor` no longer warns that inject/alias are useless for kimi.
+- Restores harness `alias = OPENAI_API_KEY = …` guidance for type-based env
+  selection (#66); Fireworks is the motivating example, not a second probe.
+- Adds harness `env = NAME = value` for non-secret child vars. Shipped
+  `kimi.conf` sets `env = KIMI_CODE_LEGACY_FLAG = 1` so vault inject works on
+  the broken gate; **delete that line** once your kimi includes #2746.
+
+**If you already applied v0.4.16:** re-run setup / wire so kimi is not stuck on
+`empty.env`, or set `backend` + `manifest` on `kimi.conf` by hand.
+
+File-render backends remain useful for tools that truly need secrets on disk
+(`.aws/credentials`, `.npmrc`, …) but are **not** justified by the kimi case.
+Follow-up: drop the shipped LEGACY `env=` line when #2746 is in a kimi release
+(track: issue #72).
+
 # Migration: harness `alias` renames an injected secret (unreleased)
 
 A harness could not hand an injected secret to the agent under a different

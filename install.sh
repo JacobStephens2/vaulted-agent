@@ -530,8 +530,9 @@ if (( ! NO_AUTO_HARNESS )); then
     printf '  %-8s not found (skipped)\n' grok
   fi
   # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
-  # --auto is Kimi's fully autonomous permission mode, the counterpart to
-  # claude's --permission-mode auto above.
+  # --auto matches unattended default. Vault inject works for OpenAI-compatible
+  # providers (OPENAI_API_KEY by type); see issue #70 / kimi-code#2745 for the
+  # 0.33–0.34 gate regression and the launcher LEGACY_FLAG workaround.
   if p="$(find_user_bin kimi)"; then
     write_auto_harness kimi "$p" "kimi --auto"
     found_any=1
@@ -663,30 +664,31 @@ ensure_workdir_caller() {
   shopt -u nullglob
 }
 
-# True when the harness runs an agent that does not read credentials from its
-# environment. Kimi Code takes a custom provider's key only from
-# ~/.kimi-code/config.toml: ${VAR} there is sent verbatim rather than expanded,
-# there is no api_key_env, and no sub-table reaches the process environment.
-# Wiring such a harness to a vault manifest resolves every secret and injects it
-# into a child that never looks -- nothing errors, and the agent fails later
-# with an auth error that looks nothing like a launcher problem (issue #68).
-# Keyed on the command's binary, not the filename, since harness names are free.
-harness_is_env_blind() {
-  local conf="$1" cmd
-  cmd="$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
-  cmd="${cmd%% *}"    # command is split on whitespace; the binary is the first word
-  cmd="${cmd##*/}"    # and may be written as an absolute path
-  case "$cmd" in
-    kimi) return 0 ;;
-    *)    return 1 ;;
-  esac
+# Env-blind agent basenames (etc/env-blind-agents). Same file the Rust binary
+# embeds for doctor — do not hardcode names here. The list may be empty; kimi
+# was wrongly listed in v0.4.16 and removed in #70 (upstream kimi-code#2745).
+is_env_blind_agent() {
+  local name="$1" list="$REPO/etc/env-blind-agents" line
+  [[ -n "$name" && -f "$list" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" == "$name" ]] && return 0
+  done < "$list"
+  return 1
 }
 
 # Day-one auto-harnesses are plainfile + empty.env. Choosing a vault backend
 # at install must rewire those, or auth_mode=prompt / -p never runs (plainfile
 # has no vault token). Never touch harnesses that already have a real backend.
+#
+# Exception: names listed in etc/env-blind-agents (may be empty). Those tools
+# do not consume vault inject for the usual provider path; leave them on
+# empty.env. Do not re-add kimi without re-checking issue #70.
 wire_day_one_harnesses() {
-  local backend="$1" manifest_name="$2" conf tmp n=0 be man
+  local backend="$1" manifest_name="$2" conf tmp n=0 be man cmd base stem
   case "$backend" in
     onepassword|bitwarden|pass) ;;
     *) return 0 ;;
@@ -696,13 +698,18 @@ wire_day_one_harnesses() {
   for conf in "$CONFIG"/harnesses.d/*.conf; do
     be="$(sed -n 's/^[[:space:]]*backend[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
     man="$(sed -n 's/^[[:space:]]*manifest[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
+    cmd="$(sed -n 's/^[[:space:]]*command[[:space:]]*=[[:space:]]*//p' "$conf" 2>/dev/null | head -1)"
     be="$(printf '%s' "$be" | sed 's/[[:space:]]*$//')"
     man="$(printf '%s' "$man" | sed 's/[[:space:]]*$//')"
-    # Leave env-blind agents on empty.env. A manifest here would inject secrets
-    # the child never reads, which is worse than no manifest: it reports healthy.
-    if harness_is_env_blind "$conf"; then
-      printf '  left %s  (reads credentials from its own config file, not the environment — see issue #68)\n' \
-        "${conf##*/}"
+    cmd="$(printf '%s' "$cmd" | sed 's/[[:space:]]*$//')"
+    base="${cmd%% *}"
+    base="${base##*/}"
+    stem="${conf##*/}"
+    stem="${stem%.conf}"
+    # Registry skip: only when etc/env-blind-agents lists this name.
+    if is_env_blind_agent "$base" || is_env_blind_agent "$stem"; then
+      printf '  left %s  (listed in etc/env-blind-agents as %s — not rewired to vault; see that file)\n' \
+        "${conf##*/}" "${base:-$stem}"
       continue
     fi
     # Only rewrite the installer's zero-secret starter config.

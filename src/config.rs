@@ -129,36 +129,10 @@ pub struct Harness {
     /// Child-env renames: `(target, source)`. Target gets a copy of source's
     /// resolved secret. Applied after inject, this harness only. See issue #66.
     pub aliases: Vec<(String, String)>,
+    /// Non-secret child-env pairs (`env = NAME = value`). Applied after inject
+    /// and aliases. Not for secrets (use the manifest). See issue #70 LEGACY flag.
+    pub env_sets: Vec<(String, String)>,
     pub command: Vec<String>,
-}
-
-/// Agents that take their credentials from their own config file and never look
-/// at the process environment.
-///
-/// For these, a manifest is not merely unhelpful, it is *invisible*: the
-/// launcher resolves every reference, injects the variables, and the child reads
-/// none of them. Nothing errors and every syntax check passes, so the report
-/// says healthy right up until the agent fails with an auth error that looks
-/// nothing like a launcher problem. Naming them is the only way doctor can tell
-/// the difference between "manifest is fine" and "manifest cannot possibly
-/// apply" (issue #68).
-///
-/// Kimi Code, verified against 0.34.0: `${VAR}` inside `api_key` is sent
-/// verbatim rather than expanded, `api_key_env` is not a config key, and a
-/// `[providers.<name>.env]` sub-table does not reach the process environment.
-/// (`KIMI_API_KEY` is read from the environment, but only for kimi's own
-/// built-in provider, never for a custom openai-compatible one.)
-///
-/// Keyed on the command's binary rather than the harness name, because harness
-/// names are free-form: `va k` may well run kimi.
-pub fn env_blind_agent(command: &[String]) -> Option<&'static str> {
-    // `command` is split on whitespace, so the binary is the first word, and it
-    // may be written as an absolute path.
-    let bin = command.first()?.rsplit('/').next()?;
-    match bin {
-        "kimi" => Some("kimi"),
-        _ => None,
-    }
 }
 
 impl Harness {
@@ -191,6 +165,7 @@ impl Harness {
         let mut labels = false;
         let mut keep = Vec::new();
         let mut aliases: Vec<(String, String)> = Vec::new();
+        let mut env_sets: Vec<(String, String)> = Vec::new();
         let mut command = Vec::new();
         let mut extra_args = Vec::new();
 
@@ -267,6 +242,43 @@ impl Harness {
                     }
                     aliases.push((target.to_string(), source.to_string()));
                 }
+                "env" => {
+                    // `env = NAME = value` — non-secret child env (not vault material).
+                    // Used e.g. for KIMI_CODE_LEGACY_FLAG until kimi-code#2746 ships.
+                    let Some((name, value)) = val.split_once('=') else {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: "env expects NAME = value (e.g. env = KIMI_CODE_LEGACY_FLAG = 1)"
+                                .into(),
+                        });
+                    };
+                    let (ename, evalue) = (name.trim(), value.trim());
+                    if ename.is_empty() {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: "env needs a variable name".into(),
+                        });
+                    }
+                    if !crate::validate::validate_var_name(ename) {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: format!(
+                                "env name must be a shell-safe identifier (got '{ename}')"
+                            ),
+                        });
+                    }
+                    if crate::env_scrub::MANAGER_TOKEN_VARS.contains(&ename) {
+                        return Err(Error::HarnessParse {
+                            name: name.to_string(),
+                            lineno: lineno + 1,
+                            msg: format!("env cannot set manager-token name '{ename}'"),
+                        });
+                    }
+                    env_sets.push((ename.to_string(), evalue.to_string()));
+                }
                 "command" => {
                     command = val.split_whitespace().map(|s| s.to_string()).collect();
                 }
@@ -318,6 +330,7 @@ impl Harness {
             labels,
             keep,
             aliases,
+            env_sets,
             command,
         })
     }
@@ -330,6 +343,39 @@ impl Harness {
             paths.manifest_dir.join(p)
         }
     }
+
+    /// Basename of the first command token (`kimi`, `claude`, …).
+    pub fn command_basename(&self) -> Option<&str> {
+        let prog = self.command.first()?;
+        Path::new(prog).file_name().and_then(|s| s.to_str())
+    }
+}
+
+/// Shared list of env-blind agent basenames (`etc/env-blind-agents`).
+///
+/// Install (`wire_day_one_harnesses`) reads the same file from the tree so
+/// doctor and install cannot drift (PR #69 review).
+const ENV_BLIND_AGENTS_LIST: &str = include_str!("../etc/env-blind-agents");
+
+/// True when `name` is a command basename (or harness stem) listed in
+/// `etc/env-blind-agents`.
+pub fn is_env_blind_agent(name: &str) -> bool {
+    for raw in ENV_BLIND_AGENTS_LIST.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if !line.is_empty() && line == name {
+            return true;
+        }
+    }
+    false
+}
+
+/// Doctor copy when `command_basename` is listed in `etc/env-blind-agents`.
+pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
+    is_env_blind_agent(command_basename).then_some(
+        "this agent is listed in etc/env-blind-agents: it does not consume \
+         vault-injected process-env credentials for the usual provider path. \
+         Keep an empty manifest or put secrets where the tool actually reads them.",
+    )
 }
 
 /// Read a single `key = value` from defaults.conf (first match wins).
@@ -566,6 +612,15 @@ mod tests {
     }
 
     #[test]
+    fn env_blind_list_does_not_classify_kimi_as_structurally_blind() {
+        // Issue #70: kimi reads process.env; 0.33–0.34 only fail on kimi-code#2745.
+        assert!(!is_env_blind_agent("kimi"));
+        assert!(!is_env_blind_agent("claude"));
+        assert!(env_blind_agent_reason("kimi").is_none());
+        assert!(env_blind_agent_reason("claude").is_none());
+    }
+
+    #[test]
     fn parse_harness_rejects_unknown_key() {
         let err = Harness::parse("x", "manifest = a\ncommand = true\nfoo = bar\n").unwrap_err();
         assert!(format!("{err}").contains("unknown key"));
@@ -588,6 +643,31 @@ mod tests {
                 ("ANTHROPIC_API_KEY".into(), "OTHER_KEY".into()),
             ]
         );
+    }
+
+    #[test]
+    fn parse_harness_env_sets_non_secret_child_vars() {
+        let h = Harness::parse(
+            "kimi",
+            "manifest = empty.env\n\
+             env = KIMI_CODE_LEGACY_FLAG = 1\n\
+             command = kimi --auto\n",
+        )
+        .unwrap();
+        assert_eq!(
+            h.env_sets,
+            vec![("KIMI_CODE_LEGACY_FLAG".into(), "1".into())]
+        );
+    }
+
+    #[test]
+    fn parse_harness_env_refuses_manager_token_names() {
+        let err = Harness::parse(
+            "x",
+            "manifest = m\ncommand = true\nenv = OP_SERVICE_ACCOUNT_TOKEN = x\n",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("manager-token"), "{err}");
     }
 
     #[test]
