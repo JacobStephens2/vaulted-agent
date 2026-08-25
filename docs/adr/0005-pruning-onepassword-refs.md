@@ -43,9 +43,10 @@ mapping new usernames would silently lose the one an agent is running on today.
 Deleting the line by hand is one `edit-manifest` away, and the report names the
 file, so the state is visible rather than mysterious.
 
-A mapping that is both excluded and dangling is pruned — as dangling. It is
-reported once, under one heading, because two headings would suggest two
-different fates.
+Only a mapping shown to **resolve** is reported this way. Every other fate has a
+heading of its own that says something this one would contradict — a dangling
+line is about to go, and an unchecked or unjudged line was never shown to
+resolve at all. One line, one heading, one fate.
 
 **2. `refresh` judges what it already fetched, and says so where it did not.**
 The item listing is one call and covers every item, so a reference into an item
@@ -54,8 +55,8 @@ run expanded, so:
 
 - item expanded → judged down to the field;
 - item in the listing, not expanded (not selected, or a per-item read that
-  failed) → **`Unfetched`**: reported under "Refs this run did not check",
-  never pruned;
+  failed) → an **unchecked ref** (`CONTEXT.md`): reported under "Refs this run
+  did not check", never pruned;
 - shape `op` itself cannot read, a placeholder, or a plain literal →
   `Unjudged`, exactly as on the Bitwarden side.
 
@@ -71,9 +72,17 @@ and delete it, which is why the item JSON is now read twice from one call: the
 fields worth mapping, and every field identity a reference may name.
 
 Every remaining uncertainty resolves toward "not dangling": vault, item title,
-section and field label match case-insensitively (as `op` resolves them), a
-field id counts as a name, and an unqualified reference matches a field in any
-section — because `op` will find it there.
+section and field label match case-insensitively (as `op` resolves them), the
+vault may be named by id as well as by name and the item by id as well as by
+title, a field id counts as a name, and an unqualified reference matches a field
+in any section — because `op` will find it there.
+
+A placeholder in **any** component leaves the line unjudged. `is_placeholder_ref`
+anchors most of its spellings at the start of the string, which behind an
+`op://` prefix is the scheme, so the components are offered to it one at a time.
+Invariant 4 keeps placeholders loud and ADR-0003 keeps prune off them: removing
+one would take the variable out of the manifest altogether, turning a loud
+misconfiguration into a secret that quietly stops being injected.
 
 ## Rejected alternatives
 
@@ -105,8 +114,9 @@ painful, it is its own issue.
 - `refresh` reports up to four groups on a 1Password manifest: dangling,
   unchecked, unjudged, and mapped-but-excluded. Exit stays `0` for all of them;
   `secrets validate` is the gate (invariant 5).
-- A per-item read failure (a 502 mid-run) leaves that item's mappings
-  `Unfetched`. A transient vault error must never read as "the secret is gone".
+- A per-item read failure (a 502 mid-run) leaves that item's mappings unchecked,
+  and is reported as a read failure rather than passed over. A transient vault
+  error must never read as "the secret is gone".
 - The prune runs before the merge writes, so a dangling line is out of the file
   before `refresh` decides what to append into it.
 - `CONTEXT.md` gains **unchecked ref**; **dangling ref** and **prune** keep the

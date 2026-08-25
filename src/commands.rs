@@ -1333,16 +1333,17 @@ fn print_excluded_report(path: &Path, scan: &[refs::ScannedRef], exclusions: &[S
     if excluded.is_empty() {
         return;
     }
-    println!(
-        "Mapped but excluded in {} ({} matching a recorded exclusion — kept, because \
-         they still resolve):",
-        path.display(),
-        excluded.len()
+    print_ref_group(
+        &format!(
+            "Mapped but excluded in {} ({} matching a recorded exclusion — kept, because \
+             they still resolve):",
+            path.display(),
+            excluded.len()
+        ),
+        &excluded,
+        Some("Remove one by hand if you meant it to go: vaulted-agent edit-manifest"),
     );
-    for r in &excluded {
-        println!("    {}", r.line);
-    }
-    println!("  Remove one by hand if you meant it to go: vaulted-agent edit-manifest\n");
+    println!();
 }
 
 /// What the scan found, said before anything is decided about it.
@@ -1383,14 +1384,15 @@ fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_
         }
     }
     if !dangling.is_empty() {
-        println!(
-            "Dangling refs in {} ({} matching no secret this token can see):",
-            path.display(),
-            dangling.len()
+        print_ref_group(
+            &format!(
+                "Dangling refs in {} ({} matching nothing this token can see):",
+                path.display(),
+                dangling.len()
+            ),
+            &dangling,
+            None,
         );
-        for r in &dangling {
-            println!("    {}", r.line);
-        }
         for warning in alias_warnings(
             paths,
             &dangling,
@@ -1399,38 +1401,55 @@ fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_
             println!("  ! {warning}");
         }
     }
-    let unfetched = refs::unfetched_refs(scan);
-    if !unfetched.is_empty() {
+    let unchecked = refs::unchecked_refs(scan);
+    if !unchecked.is_empty() {
         // Said out loud rather than passed over, because silence here would
         // read as "these are fine". They are simply unexamined: the item is
         // there, and what it costs to look inside is the reason refresh asks
         // which items to expand (ADR-0005).
-        println!(
-            "Refs this run did not check ({} — into items whose fields it did not read):",
-            unfetched.len()
+        print_ref_group(
+            &format!(
+                "Refs this run did not check ({} — into items whose fields it did not read):",
+                unchecked.len()
+            ),
+            &unchecked,
+            Some(
+                "Items you did not select, or that could not be read this run. \
+                 `--all` expands every item.",
+            ),
         );
-        for r in &unfetched {
-            println!("    {}", r.line);
-        }
-        println!(
-            "  Items you did not select, or that could not be read this run. \
-             `--all` expands every item.\n"
-        );
+        println!();
     }
     let unjudged = refs::unjudged_refs(scan);
-    if unjudged.is_empty() {
-        return;
+    if !unjudged.is_empty() {
+        // Reported separately and never pruned: prune removes what does not
+        // resolve, and these have not been shown not to.
+        print_ref_group(
+            &format!(
+                "Refs refresh cannot judge ({} — shape is `vaulted-agent secrets validate`'s job):",
+                unjudged.len()
+            ),
+            &unjudged,
+            None,
+        );
+        println!();
     }
-    // Reported separately and never pruned: prune removes what does not
-    // resolve, and these have not been shown not to.
-    println!(
-        "Refs refresh cannot judge ({} — shape is `vaulted-agent secrets validate`'s job):",
-        unjudged.len()
-    );
-    for r in &unjudged {
+}
+
+/// One heading, the lines under it verbatim, and an optional closing note.
+///
+/// Every group the report prints has this shape, and they are read together —
+/// an operator comparing "dangling" against "cannot judge" is comparing two
+/// lists of file lines. Printing them through one function is what keeps them
+/// looking like one report.
+fn print_ref_group(heading: &str, refs: &[&refs::ScannedRef], note: Option<&str>) {
+    println!("{heading}");
+    for r in refs {
         println!("    {}", r.line);
     }
-    println!();
+    if let Some(n) = note {
+        println!("  {n}");
+    }
 }
 
 /// Harness aliases that name a variable about to disappear.
@@ -1573,8 +1592,8 @@ fn refresh_onepassword(
         (0..items.len()).collect()
     } else {
         println!("Items visible to this token:");
-        for (i, (_, title, vault)) in items.iter().enumerate() {
-            println!("  {:2}) {}  ({})", i + 1, title, vault);
+        for (i, it) in items.iter().enumerate() {
+            println!("  {:2}) {}  ({})", i + 1, it.title, it.vault);
         }
         println!();
         eprint!("Items to include (e.g. 1,4,7 or 1-5,9 - blank for all): ");
@@ -1600,7 +1619,9 @@ fn refresh_onepassword(
         fields: std::collections::HashMap::new(),
     };
     for i in indices {
-        let (id, title, vault) = &items[i];
+        let backend::OpItem {
+            id, title, vault, ..
+        } = &items[i];
         // A per-item failure (transient 502 from the vault API, an item the
         // token cannot read) must not discard the whole run - reading 60 items
         // takes ~a minute, and refresh defaults to merge, so the next run picks
@@ -1618,17 +1639,19 @@ fn refresh_onepassword(
                 continue;
             }
         };
-        let fields = match backend::parse_op_item_fields_json(&json) {
-            Ok(f) => f,
+        let fields = match backend::parse_op_item_fields_json(&json)
+            .and_then(|f| backend::parse_op_item_field_refs(&json).map(|r| (f, r)))
+        {
+            Ok((fields, field_refs)) => {
+                world.fields.insert(id.clone(), field_refs);
+                fields
+            }
             Err(e) => {
                 eprintln!("  warn: {title}: {e}");
                 unreadable.push(title.clone());
                 continue;
             }
         };
-        if let Ok(refs_seen) = backend::parse_op_item_field_refs(&json) {
-            world.fields.insert(id.clone(), refs_seen);
-        }
         if fields.is_empty() {
             println!("  {title}: no referenceable fields, skipped");
             continue;

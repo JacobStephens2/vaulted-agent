@@ -316,10 +316,7 @@ pub fn op_whoami(token: &ManagerToken) -> Result<()> {
 /// Items only - fields are fetched per item in `op_item_field_labels`, because
 /// `op item list` does not include them and expanding every item up front costs
 /// one `op` call per item (~50s for a 60-item vault).
-pub fn op_list_items(
-    token: &ManagerToken,
-    vault: Option<&str>,
-) -> Result<Vec<(String, String, String)>> {
+pub fn op_list_items(token: &ManagerToken, vault: Option<&str>) -> Result<Vec<OpItem>> {
     let mut args: Vec<&str> = vec!["item", "list", "--format", "json"];
     if let Some(v) = vault {
         args.push("--vault");
@@ -330,7 +327,7 @@ pub fn op_list_items(
 }
 
 /// Parse `op item list --format json` into (id, title, vault name) rows.
-pub fn parse_op_item_list_json(list_json: &str) -> Result<Vec<(String, String, String)>> {
+pub fn parse_op_item_list_json(list_json: &str) -> Result<Vec<OpItem>> {
     let v: serde_json::Value = serde_json::from_str(list_json)
         .map_err(|e| Error::Message(format!("op item list JSON: {e}")))?;
     let arr = match &v {
@@ -346,12 +343,51 @@ pub fn parse_op_item_list_json(list_json: &str) -> Result<Vec<(String, String, S
             .and_then(|x| x.get("name"))
             .and_then(|x| x.as_str())
             .unwrap_or_default();
+        // Kept alongside the name because `op` resolves a reference against
+        // either, so a manifest may name the vault by id and a listing holding
+        // only names could not match it.
+        let vault_id = it
+            .get("vault")
+            .and_then(|x| x.get("id"))
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
         if id.is_empty() || title.is_empty() {
             continue;
         }
-        out.push((id.to_string(), title.to_string(), vault.to_string()));
+        out.push(OpItem {
+            id: id.to_string(),
+            title: title.to_string(),
+            vault: vault.to_string(),
+            vault_id: vault_id.to_string(),
+        });
     }
     Ok(out)
+}
+
+/// One item as `op item list` reports it. The four strings always travel
+/// together — a menu row, the argument to `op item get`, and what an existing
+/// `op://` reference is judged against all need the same four.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpItem {
+    pub id: String,
+    pub title: String,
+    pub vault: String,
+    pub vault_id: String,
+}
+
+impl OpItem {
+    /// True when a reference's vault and item components name this item.
+    ///
+    /// Both halves accept either identifier `op` accepts — the vault by name or
+    /// id, the item by title or id — and names match case-insensitively,
+    /// because `op` resolves them that way. A case difference is not a dangling
+    /// ref, and treating one as dangling would delete a line that launches
+    /// fine.
+    pub fn named_by(&self, vault: &str, item: &str) -> bool {
+        let vault_hit = self.vault.eq_ignore_ascii_case(vault)
+            || (!self.vault_id.is_empty() && self.vault_id == vault);
+        vault_hit && (self.id == item || self.title.eq_ignore_ascii_case(item))
+    }
 }
 
 /// Field labels on one item that are worth a reference.
@@ -509,6 +545,30 @@ pub struct OpFieldRef {
     pub id: String,
 }
 
+impl OpFieldRef {
+    /// True when a reference component names this field. Either identifier
+    /// does: `refresh` generates labels, but an operator may have pinned a
+    /// field id, and `op` resolves both. Labels match case-insensitively,
+    /// because `op` resolves them that way.
+    pub fn named(&self, want: &str) -> bool {
+        self.label.eq_ignore_ascii_case(want) || (!self.id.is_empty() && self.id == want)
+    }
+
+    /// True when this field sits in the section a reference names. `None` asks
+    /// for no section in particular: an unqualified reference is not required
+    /// to name a top-level field, because `op` will find a matching label
+    /// wherever it sits, and matching any section keeps a working line working.
+    pub fn in_section(&self, want: Option<&str>) -> bool {
+        match want {
+            Some(s) => self
+                .section
+                .as_deref()
+                .is_some_and(|t| t.eq_ignore_ascii_case(s)),
+            None => true,
+        }
+    }
+}
+
 /// Section name for a field: the label when set, else the section id, resolved
 /// against the item's top-level `sections` when the field only carries an id.
 fn op_section_name(item: &serde_json::Value, field: &serde_json::Value) -> Option<String> {
@@ -548,10 +608,15 @@ mod op_tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0],
-            ("a1".into(), "anthropic".into(), "Orchestrator".into())
+            OpItem {
+                id: "a1".into(),
+                title: "anthropic".into(),
+                vault: "Orchestrator".into(),
+                vault_id: "v".into(),
+            }
         );
         // Titles with spaces survive; op inject reads to end of line.
-        assert_eq!(rows[1].1, "github token");
+        assert_eq!(rows[1].title, "github token");
     }
 
     #[test]
@@ -559,7 +624,7 @@ mod op_tests {
         let json = r#"[{"id":"","title":"x"},{"id":"y","title":""},{"id":"ok","title":"t"}]"#;
         let rows = parse_op_item_list_json(json).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "ok");
+        assert_eq!(rows[0].id, "ok");
     }
 
     #[test]

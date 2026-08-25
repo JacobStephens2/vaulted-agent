@@ -313,11 +313,12 @@ pub enum RefFate {
     /// value carried across several lines. Reported, never pruned: shape is
     /// `secrets validate`'s concern (ADR-0003).
     Unjudged,
-    /// The reference names a live item whose fields this run never read, so
-    /// nothing was learned about it either way. 1Password only: fields cost one
-    /// `op item get` apiece, and `refresh` judges only what it already fetched
-    /// (ADR-0005). Reported so the gap is visible, never pruned.
-    Unfetched,
+    /// An **unchecked ref** (`CONTEXT.md`): the reference names a live item
+    /// whose fields this run never read, so nothing was learned about it either
+    /// way. 1Password only — fields cost one `op item get` apiece, and
+    /// `refresh` judges only what it already fetched (ADR-0005). Reported so
+    /// the gap is visible, never pruned.
+    Unchecked,
 }
 
 /// One mapping line, with its verdict against the listing.
@@ -472,10 +473,10 @@ pub fn unjudged_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
         .collect()
 }
 
-/// The lines this run never fetched enough to judge, in file order.
-pub fn unfetched_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
+/// The unchecked lines from a scan, in file order.
+pub fn unchecked_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
     scan.iter()
-        .filter(|r| r.fate == RefFate::Unfetched)
+        .filter(|r| r.fate == RefFate::Unchecked)
         .collect()
 }
 
@@ -484,12 +485,15 @@ pub fn unfetched_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
 ///
 /// Reported, never pruned (ADR-0005). An exclusion says what `refresh` may
 /// **add**; the mapping is still a working line, and removing a working line is
-/// the one thing prune promises not to do. Dangling lines are left out because
-/// prune already has them, and saying the same line twice under two headings
-/// would suggest two different fates.
+/// the one thing prune promises not to do.
+///
+/// Only lines shown to resolve. Every other fate already has a heading of its
+/// own, and each says something this one would contradict — a dangling line is
+/// about to go, and an unchecked or unjudged line was never shown to resolve at
+/// all. One line, one heading, one fate.
 pub fn excluded_refs<'a>(scan: &'a [ScannedRef], patterns: &[String]) -> Vec<&'a ScannedRef> {
     scan.iter()
-        .filter(|r| r.fate != RefFate::Dangling && is_excluded(patterns, &r.var))
+        .filter(|r| r.fate == RefFate::Resolvable && is_excluded(patterns, &r.var))
         .collect()
 }
 
@@ -846,33 +850,19 @@ fn text_has_reference(text: &str, reference: &str) -> bool {
 /// and names every item; fields cost one `op item get` per item, which is why
 /// selection is at item level in the first place. So a mapping into an item
 /// this run expanded is judged down to the field, and a mapping into an item it
-/// did not is `Unfetched` — reported, never pruned (ADR-0005).
+/// did not is an **unchecked ref** — reported, never pruned (ADR-0005).
 pub struct OpWorld {
-    /// `op item list`: `(id, title, vault)` for every item the token can see.
-    pub items: Vec<(String, String, String)>,
+    /// `op item list`: every item the token can see.
+    pub items: Vec<crate::backend::OpItem>,
     /// Field identities by item id, for the items this run expanded.
     pub fields: std::collections::HashMap<String, Vec<crate::backend::OpFieldRef>>,
 }
 
 impl OpWorld {
-    /// The listed item a reference's item component names — by opaque id, or by
-    /// title.
-    ///
-    /// Title and vault are matched case-insensitively because `op` resolves
-    /// them that way: a manifest written with a different case still works, and
-    /// calling it dangling would delete a line that launches fine.
-    fn item_of(&self, vault: &str, item: &str) -> Option<&(String, String, String)> {
-        self.items.iter().find(|(id, title, v)| {
-            v.eq_ignore_ascii_case(vault) && (id == item || title.eq_ignore_ascii_case(item))
-        })
+    /// The listed item a reference's vault and item components name, if any.
+    fn item_of(&self, vault: &str, item: &str) -> Option<&crate::backend::OpItem> {
+        self.items.iter().find(|it| it.named_by(vault, item))
     }
-}
-
-/// True when a reference component names this field. Either identifier does:
-/// `refresh` generates labels, but an operator may have pinned a field id, and
-/// `op` resolves both.
-fn op_field_named(f: &crate::backend::OpFieldRef, want: &str) -> bool {
-    f.label.eq_ignore_ascii_case(want) || (!f.id.is_empty() && f.id == want)
 }
 
 /// How one `op://` reference stands against what this run fetched.
@@ -898,33 +888,37 @@ fn op_ref_fate(reference: &str, world: &OpWorld) -> RefFate {
         // More components than `op`'s own form has: nothing to judge it by.
         _ => return RefFate::Unjudged,
     };
-    let Some((id, _, _)) = world.item_of(vault, item) else {
+    // A placeholder anywhere in the reference keeps the whole line unjudged.
+    // `is_placeholder_ref` anchors most of its spellings at the start of the
+    // string, which behind an `op://` prefix is the scheme, so the components
+    // have to be offered to it one at a time. Invariant 4 makes a placeholder
+    // fail closed and ADR-0003 keeps prune off it: removing one would take the
+    // variable out of the manifest and turn a loud misconfiguration into a
+    // secret that quietly stops being injected.
+    if [Some(item), section, Some(field)]
+        .into_iter()
+        .flatten()
+        .any(crate::validate::is_placeholder_ref)
+    {
+        return RefFate::Unjudged;
+    }
+    let Some(found) = world.item_of(vault, item) else {
         // Neither an id nor a title in the listing: the item was deleted,
         // renamed, or moved out of this token's reach. An `op` reference records
         // no source id (ADR-0005), so a rename here is indistinguishable from a
         // deletion and both are dangling.
         return RefFate::Dangling;
     };
-    let Some(fields) = world.fields.get(id.as_str()) else {
-        return RefFate::Unfetched;
+    let Some(fields) = world.fields.get(found.id.as_str()) else {
+        return RefFate::Unchecked;
     };
     // A default section label groups fields that were never grouped, and `op`
     // resolves the unqualified form to the field inside it — the same
     // equivalence `canonical_reference` relies on.
     let section = section.filter(|s| !op_section_is_default(s));
-    let hit = fields.iter().any(|f| {
-        op_field_named(f, field)
-            && match section {
-                Some(s) => f
-                    .section
-                    .as_deref()
-                    .is_some_and(|t| t.eq_ignore_ascii_case(s)),
-                // An unqualified reference is not required to name a
-                // top-level field: `op` picks a field with that label wherever
-                // it sits. Matching any section keeps a working line working.
-                None => true,
-            }
-    });
+    let hit = fields
+        .iter()
+        .any(|f| f.named(field) && f.in_section(section));
     if hit {
         RefFate::Resolvable
     } else {
@@ -2017,16 +2011,18 @@ mod tests {
         );
         OpWorld {
             items: vec![
-                (
-                    "id-host".to_string(),
-                    "db.example.com".to_string(),
-                    "Orchestrator".to_string(),
-                ),
-                (
-                    "id-other".to_string(),
-                    "github token".to_string(),
-                    "Orchestrator".to_string(),
-                ),
+                crate::backend::OpItem {
+                    id: "id-host".into(),
+                    title: "db.example.com".into(),
+                    vault: "Orchestrator".into(),
+                    vault_id: "vault-id-1".into(),
+                },
+                crate::backend::OpItem {
+                    id: "id-other".into(),
+                    title: "github token".into(),
+                    vault: "Orchestrator".into(),
+                    vault_id: "vault-id-1".into(),
+                },
             ],
             fields,
         }
@@ -2089,7 +2085,14 @@ mod tests {
         // Item in the listing, fields never read: nothing was learned.
         assert_eq!(
             fate("op://Orchestrator/github token/api-key"),
-            RefFate::Unfetched
+            RefFate::Unchecked
+        );
+
+        // `op` accepts a vault id in place of its name, so the listing has to
+        // match on either. Judging by name alone would prune a working line.
+        assert_eq!(
+            fate("op://vault-id-1/db.example.com/password"),
+            RefFate::Resolvable
         );
 
         // Shapes prune must not touch.
@@ -2098,10 +2101,17 @@ mod tests {
             fate("op://Orchestrator/db-admin (rw)/password"),
             RefFate::Unjudged
         );
-        assert_eq!(
-            fate("op://Orchestrator/db.example.com/REPLACE_WITH_FIELD"),
-            RefFate::Unjudged
-        );
+        // A placeholder in any component, not only the spellings that survive
+        // being read behind the `op://` prefix: invariant 4 keeps them loud,
+        // and pruning one would take the variable out of the manifest.
+        for placeholder in [
+            "op://Orchestrator/db.example.com/REPLACE_WITH_FIELD",
+            "op://Orchestrator/db.example.com/CHANGE_ME",
+            "op://Orchestrator/YOUR_ITEM/password",
+            "op://Orchestrator/db.example.com/TODO/password",
+        ] {
+            assert_eq!(fate(placeholder), RefFate::Unjudged, "{placeholder}");
+        }
     }
 
     #[test]
