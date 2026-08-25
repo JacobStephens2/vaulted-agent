@@ -13,6 +13,8 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Manifest** | The file a harness points at: either **refs** (references only) or dotenv-style secret material (plainfile/sops decrypt). |
 | **Backend** | Where secret values come from: `bitwarden`, `onepassword`, `pass`, `sops`, `plainfile`. Typed in the runtime; unknown names fail closed. |
 | **Refs file** | Bitwarden-oriented manifest of `VAR=reference` lines (uuid / name: / project:) — **no secret values** on disk. |
+| **Dangling ref** | A refs-file mapping whose reference matches no secret the manager token can see. Fails the launch closed; `secrets validate` detects one, `refresh` prunes it. Distinct from a malformed ref, which is a shape problem `validate` owns. |
+| **Prune** | `refresh` removing dangling refs from a manifest. Only ever removes what does not resolve — never rewrites or reorders a working mapping — and only under `--prune` or an interactive confirmation. |
 | **Manager token** | Vault *manager* credential (`BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`). Used only to resolve secrets; must never appear in the child agent env. |
 | **Secret value** | A resolved secret destined for the child environment. Redacted on Display/Debug. |
 | **Auth mode** | How the manager token is obtained: `file` (token file on disk) or `prompt` (TTY each launch). |
