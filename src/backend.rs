@@ -166,11 +166,32 @@ pub fn resolve_bitwarden(
     let pairs: Vec<(String, String)> = validate_manifest_file(manifest, Backend::Bitwarden)?;
     let mut out = HashMap::new();
     for (var, r) in pairs {
-        let id = bws_resolve_ref_to_id(token, &r)?;
+        let id =
+            bws_resolve_ref_to_id(token, &r).map_err(|e| name_the_manifest(manifest, &var, e))?;
         let value = bws_get_value(token, &id)?;
         out.insert(var, SecretValue::new(value));
     }
     Ok(out)
+}
+
+/// Give a "no secret matched" its context: the resolver knows only the
+/// reference, and the operator needs the variable, the file, and the way out.
+///
+/// Wrapped here rather than in the resolver, which is deliberately ignorant of
+/// manifests — threading a path down into it would make every future backend
+/// carry an argument it never uses. Other resolver failures pass through
+/// untouched; only this one has a manifest-level fix (issue #80).
+fn name_the_manifest(manifest: &Path, var: &str, e: Error) -> Error {
+    let msg = e.to_string();
+    if !msg.starts_with("no secret matched") {
+        return e;
+    }
+    Error::Message(format!(
+        "{msg} ({var} in {})\n  \
+         The secret may have been renamed or removed. Remove the dangling \
+         mapping with: vaulted-agent refresh --prune",
+        manifest.display()
+    ))
 }
 
 pub fn resolve_onepassword(

@@ -983,23 +983,27 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     let mut mode: Option<&str> = None;
     let mut backend_arg: Option<String> = None;
     let mut exclude: Vec<String> = Vec::new();
+    let mut prune = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!(
-                    "usage: vaulted-agent refresh [manifest] [--all] [--merge|--replace] [--backend NAME] [--exclude PATTERN]\n\
+                    "usage: vaulted-agent refresh [manifest] [--all] [--merge|--replace] [--prune] [--backend NAME] [--exclude PATTERN]\n\
                      Update a refs file after adding secrets in the vault.\n\
                      Backend defaults to the one your harnesses use (bitwarden or onepassword).\n\
                      bitwarden   : pick from the secrets the token can see\n\
                      onepassword : pick items from the vault; each item's fields become refs\n\
                      --exclude   : a VAR name refresh must not map ('*' and '?' allowed).\n\
                      \x20             Repeatable, recorded in the manifest, honoured by later runs.\n\
+                     --prune     : remove dangling refs — mappings matching no secret the\n\
+                     \x20             token can see (bitwarden). Reported either way.\n\
                      Secret values are never stored — only references."
                 );
                 return Ok(());
             }
             "--all" | "-a" => take_all = true,
+            "--prune" => prune = true,
             "-x" | "--exclude" => {
                 i += 1;
                 exclude.push(
@@ -1067,9 +1071,19 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
                     "refresh: --exclude applies to the onepassword backend only".into(),
                 ));
             }
-            refresh_bitwarden(paths, man_path, take_all, mode)
+            refresh_bitwarden(paths, man_path, take_all, mode, prune)
         }
-        Backend::OnePassword => refresh_onepassword(paths, man_path, take_all, mode, &exclude),
+        Backend::OnePassword => {
+            if prune {
+                // 1Password refs carry recorded --exclude patterns, so "does
+                // not resolve" has more shapes there; deferred to its own
+                // issue rather than guessed at (ADR-0003).
+                return Err(Error::Message(
+                    "refresh: --prune applies to the bitwarden backend only".into(),
+                ));
+            }
+            refresh_onepassword(paths, man_path, take_all, mode, &exclude)
+        }
         other => Err(Error::Message(format!(
             "refresh does not apply to backend '{}'. It builds refs files, which only \
              bitwarden and onepassword use; {} manifests are edited directly.",
@@ -1111,6 +1125,7 @@ fn refresh_bitwarden(
     man_path: Option<String>,
     take_all: bool,
     mode: Option<&str>,
+    prune: bool,
 ) -> Result<()> {
     let token = load_bws(paths)?;
     let secrets = backend::bws_list_secrets(&token)?;
@@ -1135,6 +1150,8 @@ fn refresh_bitwarden(
     let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
 
     ensure_manifest_writable(&path)?;
+
+    report_and_prune_dangling(paths, &path, &secrets, mode == "replace", prune)?;
 
     let indices = if take_all {
         None // all
@@ -1184,6 +1201,139 @@ fn refresh_bitwarden(
         }
     }
     Ok(())
+}
+
+/// Report the dangling refs in a Bitwarden manifest, and remove them when the
+/// operator has said to.
+///
+/// Reporting happens on every run; removal never does on its own. Exit status
+/// is unaffected either way — `refresh` is not a gate, `secrets validate` is
+/// (invariant 5), and it already fails on a dangling ref.
+fn report_and_prune_dangling(
+    paths: &Paths,
+    path: &Path,
+    secrets: &[(String, String, String)],
+    mode_is_replace: bool,
+    prune: bool,
+) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let scan = refs::scan_bitwarden_refs(&text, secrets);
+    let dangling = refs::dangling_refs(&scan);
+    print_ref_report(paths, path, &scan, &dangling);
+    if dangling.is_empty() {
+        return Ok(());
+    }
+
+    let doomed: Vec<String> = dangling.iter().map(|r| r.line.clone()).collect();
+    let remove = match refs::prune_choice(
+        doomed.len(),
+        prune,
+        mode_is_replace,
+        std::io::IsTerminal::is_terminal(&io::stdin()),
+    ) {
+        refs::PruneChoice::NothingDangling => return Ok(()),
+        refs::PruneChoice::ReplaceRegenerates => {
+            println!("  --replace rewrites the file, so these go with it.\n");
+            return Ok(());
+        }
+        refs::PruneChoice::Report => {
+            println!("  Left in place. Re-run with --prune to remove them.\n");
+            return Ok(());
+        }
+        refs::PruneChoice::Remove => true,
+        refs::PruneChoice::Ask => {
+            eprint!("Remove {} dangling mapping(s)? [y/N]: ", doomed.len());
+            let _ = io::stderr().flush();
+            let mut line = String::new();
+            io::stdin().read_line(&mut line).is_ok()
+                && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        }
+    };
+    if !remove {
+        println!("  Left in place.\n");
+        return Ok(());
+    }
+
+    let removed = refs::prune_refs_lines(path, &doomed)?;
+    // Verbatim, because scrollback is the recovery path — prune writes no
+    // backup file into the root-owned manifest directory.
+    println!("Removed {} dangling mapping(s):", removed.len());
+    for line in &removed {
+        println!("  - {line}");
+    }
+    println!();
+    Ok(())
+}
+
+/// What the scan found, said before anything is decided about it.
+fn print_ref_report(
+    paths: &Paths,
+    path: &Path,
+    scan: &[refs::ScannedRef],
+    dangling: &[&refs::ScannedRef],
+) {
+    if !dangling.is_empty() {
+        println!(
+            "Dangling refs in {} ({} matching no secret this token can see):",
+            path.display(),
+            dangling.len()
+        );
+        for r in dangling {
+            println!("    {}", r.line);
+        }
+        for warning in alias_warnings(paths, dangling) {
+            println!("  ! {warning}");
+        }
+    }
+    let unjudged: Vec<&refs::ScannedRef> = scan
+        .iter()
+        .filter(|r| r.fate == refs::RefFate::Unjudged)
+        .collect();
+    if unjudged.is_empty() {
+        return;
+    }
+    // Reported separately and never pruned: prune removes what does not
+    // resolve, and these have not been shown not to.
+    println!(
+        "Refs refresh cannot judge ({} — shape is `vaulted-agent secrets validate`'s job):",
+        unjudged.len()
+    );
+    for r in &unjudged {
+        println!("    {}", r.line);
+    }
+    println!();
+}
+
+/// Harness aliases that name a variable about to disappear.
+///
+/// A warning, never a block: prune removes the mapping, and the `alias =` line
+/// naming it is in a harness file prune does not own.
+fn alias_warnings(paths: &Paths, dangling: &[&refs::ScannedRef]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(names) = list_harness_names(paths) else {
+        return out;
+    };
+    for name in names {
+        let Ok(h) = Harness::load(paths, &name) else {
+            continue;
+        };
+        for (target, source) in &h.aliases {
+            if dangling.iter().any(|r| r.var == *source) {
+                out.push(format!(
+                    "harness {name}: alias = {target} = {source} reads a dangling mapping. \
+                     Pruning it leaves the alias to fail that launch closed — edit the \
+                     harness too."
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Fail now if the refs file cannot be written later.

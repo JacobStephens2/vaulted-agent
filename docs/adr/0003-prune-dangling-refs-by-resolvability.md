@@ -1,6 +1,6 @@
 # ADR 0003 — Pruning dangling refs by resolvability, not by provenance
 
-**Status:** accepted (design; implementation in progress)
+**Status:** accepted (implemented in `refresh --prune`)
 
 ## Problem
 
@@ -92,5 +92,10 @@ configured host. It must never delete mappings there. Pruning is maintenance, an
   ref. Two commands reporting "broken" would blur which one blocks a launch.
 - `refresh` warns, without blocking, when a harness `alias =` names a VAR about to
   be pruned — the one piece of cleanup prune cannot do itself.
+- A placeholder reference is never pruned, even though an all-zero UUID parses
+  as a form and matches nothing. Invariant 4 makes placeholders fail closed, and
+  they are `secrets validate`'s to report; removing one would take the variable
+  out of the manifest altogether, turning a loud misconfiguration into a secret
+  that quietly stops being injected.
 - Bitwarden only for now. 1Password refs carry recorded `--exclude` patterns, so
   "does not resolve" has more shapes there; deferred to its own issue.
