@@ -369,13 +369,58 @@ pub fn op_item_field_labels(
     item_id: &str,
     vault: Option<&str>,
 ) -> Result<Vec<OpField>> {
+    parse_op_item_fields_json(&op_item_json(token, item_id, vault)?)
+}
+
+/// One `op item get`, returned raw so a caller that needs two views of the same
+/// item pays for one round trip.
+///
+/// `refresh` needs both: the fields worth generating a mapping for, and every
+/// field identity a *reference* may name — which is a wider set, because an OTP
+/// or empty-valued field is one `refresh` will not generate and `op` will still
+/// resolve. Judging an existing mapping against the narrow view would call a
+/// working line dangling and remove it.
+pub fn op_item_json(token: &ManagerToken, item_id: &str, vault: Option<&str>) -> Result<String> {
     let mut args: Vec<&str> = vec!["item", "get", item_id, "--format", "json"];
     if let Some(v) = vault.filter(|v| !v.is_empty()) {
         args.push("--vault");
         args.push(v);
     }
-    let json = run_capture("op", &args, &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())])?;
-    parse_op_item_fields_json(&json)
+    run_capture("op", &args, &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())])
+}
+
+/// Every field identity on an item: no filtering, and the field id alongside
+/// the label, because a reference may name either.
+///
+/// Metadata only — values are never read here, not even for presence.
+pub fn parse_op_item_field_refs(item_json: &str) -> Result<Vec<OpFieldRef>> {
+    let v: serde_json::Value = serde_json::from_str(item_json)
+        .map_err(|e| Error::Message(format!("op item get JSON: {e}")))?;
+    let mut out: Vec<OpFieldRef> = Vec::new();
+    let Some(fields) = v.get("fields").and_then(|f| f.as_array()) else {
+        return Ok(out);
+    };
+    for f in fields {
+        let id = f
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let label = f
+            .get("label")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if id.is_empty() && label.is_empty() {
+            continue;
+        }
+        out.push(OpFieldRef {
+            section: op_section_name(&v, f),
+            label,
+            id,
+        });
+    }
+    Ok(out)
 }
 
 /// Parse `op item get --format json` into referenceable field labels.
@@ -452,6 +497,16 @@ pub fn parse_op_item_fields_json(item_json: &str) -> Result<Vec<OpField>> {
 pub struct OpField {
     pub section: Option<String>,
     pub label: String,
+}
+
+/// A field as a *reference* may name it: by label or by id, optionally
+/// qualified by its section. Wider than `OpField` on purpose — this is what
+/// exists in the vault, not what `refresh` would choose to map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpFieldRef {
+    pub section: Option<String>,
+    pub label: String,
+    pub id: String,
 }
 
 /// Section name for a field: the label when set, else the section id, resolved

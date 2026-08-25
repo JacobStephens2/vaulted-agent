@@ -99,6 +99,7 @@ refs file with the same checks doctor uses, run `va edit-manifest`.
 va refresh                        # backend comes from your harnesses
 va refresh --backend onepassword  # or say it explicitly
 va refresh --exclude '*_USERNAME' # and never map these
+va refresh --all --prune          # and remove mappings that resolve to nothing
 ```
 
 ```
@@ -129,6 +130,26 @@ whole name, case-insensitive), repeats, and is recorded in the manifest as an
 `# exclude:` line so later runs honour it without retyping. Excluded fields are
 listed on every run rather than dropped quietly. Delete the line to map them
 again.
+
+**Refs that no longer resolve.** An item renamed or deleted in the vault leaves a
+mapping behind, and `op inject` fails the *whole manifest* on one such reference —
+so one stale line stops every launch through it. `refresh` reports those on every
+run and removes them under `--prune` (or an interactive `[y/N]`, defaulting to no),
+keeping every other byte of the file.
+
+What it can say depends on what the run fetched: items come from one `op item
+list`, fields only for the items it expanded, so `--all --prune` gives full
+coverage and a narrow selection prunes narrowly. Mappings into items it did not
+open are listed as unchecked and never touched — including an item whose read
+failed, because a transient vault error is not evidence a secret is gone. An
+`op://` line records no source id, so a renamed item cannot be told apart from a
+deleted one; both are removed rather than repaired, unlike the Bitwarden case
+below.
+
+A mapping that still resolves but whose name matches a recorded `# exclude:` is
+listed under its own heading and **kept**. Exclusion governs what `refresh` adds;
+prune removes only what does not resolve. Delete the line with `va edit-manifest`
+if you want the variable gone.
 
 **Launching against another manifest.** `va -m <manifest> <harness>` runs a
 harness against a manifest other than its configured one — useful for taking a
@@ -164,7 +185,7 @@ va run -m openai.env.refs --backend bitwarden -p -- \
 |---|---|
 | Rotated a value | Nothing — next launch fetches live |
 | Added a secret you want mapped | `va refresh` (merge) or `va refresh --replace --all` |
-| Renamed or removed a secret | `va refresh --prune` (repairs renamed mappings, removes ones nothing resolves) |
+| Renamed or removed a secret | `va refresh --prune` (removes mappings nothing resolves; repairs renamed ones on Bitwarden) |
 | Removed or fixed a mapping | `va edit-manifest` (checks on save) or edit the refs file by hand |
 
 **Install options** (clone, shared host, flags): [Install details](#install-details).  

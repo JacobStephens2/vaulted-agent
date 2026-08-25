@@ -73,7 +73,7 @@ elevated launches always read the machine config dir).
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
 | Map new vault secrets into refs | `va refresh` / `va refresh --backend onepassword` |
 | Skip fields by name pattern (1P) | `va refresh --exclude '*_USERNAME'` |
-| Remove dangling refs / repair renamed refs (bitwarden) | `va refresh --prune` |
+| Remove dangling refs / repair renamed refs | `va refresh --prune` (repair is bitwarden only) |
 | Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
@@ -161,6 +161,15 @@ recording (any line written before this existed) the old mapping is a dangling r
 reported every run, removed under `--prune` or an interactive yes. Either way the
 change happens only when asked, changed lines print verbatim — there is no backup
 file — and lines that still resolve, comments, and ordering are untouched.  
+**Renamed or deleted a 1Password item / field** → `va refresh --backend onepassword
+--all --prune`. There is no source recording on an `op://` line, so a renamed item
+is indistinguishable from a deleted one: both are dangling refs and both are
+removed, never repaired. `refresh` judges only what the run fetched — items come
+from one `op item list`, fields only for the items it expanded — so use `--all` for
+full coverage; mappings into items it did not open are listed as unchecked and left
+alone. A mapping that still resolves but matches a recorded `# exclude:` is listed
+and **kept**: exclusion governs what refresh *adds* (ADR-0005). Delete it yourself
+with `va edit-manifest` if you meant it to go.  
 **1Password name cleanup / exclude** → see MIGRATION.md; `va refresh --exclude '…'`.
 
 ### Launch with a particular manifest (one session)
@@ -196,7 +205,9 @@ Interpret carefully:
 | `cannot enter /home/…` | `workdir=caller` + service account cannot traverse (often `setfacl -m u:<svc>:x /home/<op>`) |
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |
 | `could not resolve` / item named on validate or launch | Well-formed ref, vault item missing or renamed - fix the refs file or vault. Launch lists the variables implicated and suggests `secrets validate` |
-| `Dangling refs in <file>` on refresh | Mappings matching no secret the token can see (bitwarden). Reported every run; exit stays 0. `--prune` removes them |
+| `Dangling refs in <file>` on refresh | Mappings matching nothing the token can see - on 1Password, a missing item or field. Reported every run; exit stays 0. `--prune` removes them |
+| `Refs this run did not check` on refresh | 1Password mappings into items this run never expanded (not selected, or a read that failed). Never pruned; `refresh --all --prune` checks every item |
+| `Mapped but excluded in <file>` | 1Password mappings that resolve but match a recorded `# exclude:`. Kept on purpose (ADR-0005) - exclusion governs what refresh *adds*. Delete the line with `va edit-manifest` if you meant it to go |
 | `Renamed secrets in <file>` on refresh | Mappings whose `# uuid:…` recording names a secret now under a different key. `--prune` rewrites the reference and keeps the variable name |
 | `Refs refresh cannot judge (…)` | Shapes prune will not touch — an unreadable ref, a placeholder, a multi-line value. `secrets validate` owns those |
 | `no secret matched name:X (VAR in <file>)` | A dangling ref hit at launch. `va refresh --prune` removes the mapping — or repairs it, if the line records a `# uuid:…` and the secret was only renamed |
