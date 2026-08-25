@@ -313,6 +313,12 @@ pub enum RefFate {
     /// value carried across several lines. Reported, never pruned: shape is
     /// `secrets validate`'s concern (ADR-0003).
     Unjudged,
+    /// An **unchecked ref** (`CONTEXT.md`): the reference names a live item
+    /// whose fields this run never read, so nothing was learned about it either
+    /// way. 1Password only — fields cost one `op item get` apiece, and
+    /// `refresh` judges only what it already fetched (ADR-0005). Reported so
+    /// the gap is visible, never pruned.
+    Unchecked,
 }
 
 /// One mapping line, with its verdict against the listing.
@@ -392,6 +398,23 @@ fn renamed_key(value: &str, secrets: &[(String, String, String)]) -> Option<Stri
 /// never a Bitwarden reference, so it is marked `Unjudged` rather than risking
 /// a partial removal.
 pub fn scan_bitwarden_refs(text: &str, secrets: &[(String, String, String)]) -> Vec<ScannedRef> {
+    scan_refs(text, |value| {
+        match bitwarden_ref_matches(reference_of(value), secrets) {
+            Some(true) => (RefFate::Resolvable, None),
+            Some(false) => match renamed_key(value, secrets) {
+                Some(key) => (RefFate::Renamed, Some(key)),
+                None => (RefFate::Dangling, None),
+            },
+            None => (RefFate::Unjudged, None),
+        }
+    })
+}
+
+/// Walk a refs file's mapping lines, letting the backend say what each value
+/// means. The walk is the part both backends must agree on: prune puts the file
+/// back byte for byte, so what counts as one mapping line cannot differ by
+/// backend even where "does not resolve" does.
+fn scan_refs(text: &str, classify: impl Fn(&str) -> (RefFate, Option<String>)) -> Vec<ScannedRef> {
     let mut out: Vec<ScannedRef> = Vec::new();
     // Whether the previous mapping's value may still take continuation lines,
     // matching `parse_dotenv_pairs`: a blank line or a comment closes it.
@@ -418,18 +441,7 @@ pub fn scan_bitwarden_refs(text: &str, secrets: &[(String, String, String)]) -> 
             continue;
         };
         let value = value.trim();
-        let mut renamed_to = None;
-        let fate = match bitwarden_ref_matches(reference_of(value), secrets) {
-            Some(true) => RefFate::Resolvable,
-            Some(false) => match renamed_key(value, secrets) {
-                Some(key) => {
-                    renamed_to = Some(key);
-                    RefFate::Renamed
-                }
-                None => RefFate::Dangling,
-            },
-            None => RefFate::Unjudged,
-        };
+        let (fate, renamed_to) = classify(value);
         out.push(ScannedRef {
             var: var.trim().to_string(),
             reference: value.to_string(),
@@ -452,6 +464,37 @@ pub fn dangling_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
 /// The renamed lines from a scan, in file order.
 pub fn renamed_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
     scan.iter().filter(|r| r.fate == RefFate::Renamed).collect()
+}
+
+/// The lines a scan could not judge on shape, in file order.
+pub fn unjudged_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
+    scan.iter()
+        .filter(|r| r.fate == RefFate::Unjudged)
+        .collect()
+}
+
+/// The unchecked lines from a scan, in file order.
+pub fn unchecked_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
+    scan.iter()
+        .filter(|r| r.fate == RefFate::Unchecked)
+        .collect()
+}
+
+/// Mappings whose variable name matches a recorded exclusion but which resolve
+/// anyway, in file order.
+///
+/// Reported, never pruned (ADR-0005). An exclusion says what `refresh` may
+/// **add**; the mapping is still a working line, and removing a working line is
+/// the one thing prune promises not to do.
+///
+/// Only lines shown to resolve. Every other fate already has a heading of its
+/// own, and each says something this one would contradict — a dangling line is
+/// about to go, and an unchecked or unjudged line was never shown to resolve at
+/// all. One line, one heading, one fate.
+pub fn excluded_refs<'a>(scan: &'a [ScannedRef], patterns: &[String]) -> Vec<&'a ScannedRef> {
+    scan.iter()
+        .filter(|r| r.fate == RefFate::Resolvable && is_excluded(patterns, &r.var))
+        .collect()
 }
 
 /// Everything a scan says this manifest needs, as one ordered edit list.
@@ -798,6 +841,95 @@ fn text_has_reference(text: &str, reference: &str) -> bool {
         }
     }
     false
+}
+
+/// Everything `refresh` learned about the 1Password side of this run, and the
+/// whole world an existing mapping is judged against.
+///
+/// Deliberately only what the run already paid for. `op item list` is one call
+/// and names every item; fields cost one `op item get` per item, which is why
+/// selection is at item level in the first place. So a mapping into an item
+/// this run expanded is judged down to the field, and a mapping into an item it
+/// did not is an **unchecked ref** — reported, never pruned (ADR-0005).
+pub struct OpWorld {
+    /// `op item list`: every item the token can see.
+    pub items: Vec<crate::backend::OpItem>,
+    /// Field identities by item id, for the items this run expanded.
+    pub fields: std::collections::HashMap<String, Vec<crate::backend::OpFieldRef>>,
+}
+
+impl OpWorld {
+    /// The listed item a reference's vault and item components name, if any.
+    fn item_of(&self, vault: &str, item: &str) -> Option<&crate::backend::OpItem> {
+        self.items.iter().find(|it| it.named_by(vault, item))
+    }
+}
+
+/// How one `op://` reference stands against what this run fetched.
+///
+/// Lenient by construction: every uncertainty resolves toward "not dangling".
+/// A wrong `Dangling` removes a line that launches today, and no report is
+/// worth that.
+fn op_ref_fate(reference: &str, world: &OpWorld) -> RefFate {
+    let r = reference.trim();
+    // Invariant 4 keeps placeholders loud, and `secrets validate` owns them.
+    if crate::validate::is_placeholder_ref(r) {
+        return RefFate::Unjudged;
+    }
+    // A literal beside the references (a region, a URL) is not refresh's to
+    // judge, and neither is a shape `op` itself cannot read.
+    if !r.starts_with("op://") || !op_reference_is_parseable(r) {
+        return RefFate::Unjudged;
+    }
+    let parts: Vec<&str> = r["op://".len()..].split('/').collect();
+    let (vault, item, section, field) = match parts.as_slice() {
+        [v, i, f] => (*v, *i, None, *f),
+        [v, i, s, f] => (*v, *i, Some(*s), *f),
+        // More components than `op`'s own form has: nothing to judge it by.
+        _ => return RefFate::Unjudged,
+    };
+    // A placeholder anywhere in the reference keeps the whole line unjudged.
+    // `is_placeholder_ref` anchors most of its spellings at the start of the
+    // string, which behind an `op://` prefix is the scheme, so the components
+    // have to be offered to it one at a time. Invariant 4 makes a placeholder
+    // fail closed and ADR-0003 keeps prune off it: removing one would take the
+    // variable out of the manifest and turn a loud misconfiguration into a
+    // secret that quietly stops being injected.
+    if [Some(item), section, Some(field)]
+        .into_iter()
+        .flatten()
+        .any(crate::validate::is_placeholder_ref)
+    {
+        return RefFate::Unjudged;
+    }
+    let Some(found) = world.item_of(vault, item) else {
+        // Neither an id nor a title in the listing: the item was deleted,
+        // renamed, or moved out of this token's reach. An `op` reference records
+        // no source id (ADR-0005), so a rename here is indistinguishable from a
+        // deletion and both are dangling.
+        return RefFate::Dangling;
+    };
+    let Some(fields) = world.fields.get(found.id.as_str()) else {
+        return RefFate::Unchecked;
+    };
+    // A default section label groups fields that were never grouped, and `op`
+    // resolves the unqualified form to the field inside it — the same
+    // equivalence `canonical_reference` relies on.
+    let section = section.filter(|s| !op_section_is_default(s));
+    let hit = fields
+        .iter()
+        .any(|f| f.named(field) && f.in_section(section));
+    if hit {
+        RefFate::Resolvable
+    } else {
+        RefFate::Dangling
+    }
+}
+
+/// Classify every mapping line in a 1Password refs file against what this run
+/// fetched. No extra vault calls — same rule as Bitwarden, different world.
+pub fn scan_op_refs(text: &str, world: &OpWorld) -> Vec<ScannedRef> {
+    scan_refs(text, |value| (op_ref_fate(value, world), None))
 }
 
 const OP_REFS_HEADER: &str = "1Password refs (no secret values). Generated by";
@@ -1853,5 +1985,148 @@ mod tests {
             ),
             "every byte it did not have to change must survive"
         );
+    }
+
+    fn op_world() -> OpWorld {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert(
+            "id-host".to_string(),
+            vec![
+                crate::backend::OpFieldRef {
+                    section: None,
+                    label: "password".into(),
+                    id: "f1".into(),
+                },
+                crate::backend::OpFieldRef {
+                    section: Some("mysql".into()),
+                    label: "password".into(),
+                    id: "f2".into(),
+                },
+                crate::backend::OpFieldRef {
+                    section: Some("add more".into()),
+                    label: "app-id".into(),
+                    id: "f3".into(),
+                },
+            ],
+        );
+        OpWorld {
+            items: vec![
+                crate::backend::OpItem {
+                    id: "id-host".into(),
+                    title: "db.example.com".into(),
+                    vault: "Orchestrator".into(),
+                    vault_id: "vault-id-1".into(),
+                },
+                crate::backend::OpItem {
+                    id: "id-other".into(),
+                    title: "github token".into(),
+                    vault: "Orchestrator".into(),
+                    vault_id: "vault-id-1".into(),
+                },
+            ],
+            fields,
+        }
+    }
+
+    fn fate(reference: &str) -> RefFate {
+        let scan = scan_op_refs(&format!("VAR={reference}\n"), &op_world());
+        assert_eq!(scan.len(), 1);
+        scan[0].fate
+    }
+
+    #[test]
+    fn op_refs_are_judged_against_what_the_run_fetched() {
+        assert_eq!(
+            fate("op://Orchestrator/db.example.com/password"),
+            RefFate::Resolvable
+        );
+        assert_eq!(
+            fate("op://Orchestrator/db.example.com/mysql/password"),
+            RefFate::Resolvable
+        );
+        // The item component may be the opaque id, which is what refresh writes
+        // when the title is one `op` cannot parse.
+        assert_eq!(
+            fate("op://Orchestrator/id-host/password"),
+            RefFate::Resolvable
+        );
+        // A default section label groups fields that were never grouped, so the
+        // qualified and unqualified forms are the same reference.
+        assert_eq!(
+            fate("op://Orchestrator/id-host/add more/app-id"),
+            RefFate::Resolvable
+        );
+        assert_eq!(
+            fate("op://Orchestrator/id-host/app-id"),
+            RefFate::Resolvable
+        );
+        // `op` matches names case-insensitively; a manifest written in another
+        // case launches fine and must not be called dangling.
+        assert_eq!(
+            fate("op://orchestrator/DB.Example.com/PASSWORD"),
+            RefFate::Resolvable
+        );
+
+        // Item gone from the listing, and field gone from an item that was read.
+        assert_eq!(
+            fate("op://Orchestrator/vanished/password"),
+            RefFate::Dangling
+        );
+        assert_eq!(
+            fate("op://Orchestrator/db.example.com/api-key"),
+            RefFate::Dangling
+        );
+        // A vault this token cannot see holds nothing it can resolve.
+        assert_eq!(
+            fate("op://Other/db.example.com/password"),
+            RefFate::Dangling
+        );
+
+        // Item in the listing, fields never read: nothing was learned.
+        assert_eq!(
+            fate("op://Orchestrator/github token/api-key"),
+            RefFate::Unchecked
+        );
+
+        // `op` accepts a vault id in place of its name, so the listing has to
+        // match on either. Judging by name alone would prune a working line.
+        assert_eq!(
+            fate("op://vault-id-1/db.example.com/password"),
+            RefFate::Resolvable
+        );
+
+        // Shapes prune must not touch.
+        assert_eq!(fate("us-east-1"), RefFate::Unjudged);
+        assert_eq!(
+            fate("op://Orchestrator/db-admin (rw)/password"),
+            RefFate::Unjudged
+        );
+        // A placeholder in any component, not only the spellings that survive
+        // being read behind the `op://` prefix: invariant 4 keeps them loud,
+        // and pruning one would take the variable out of the manifest.
+        for placeholder in [
+            "op://Orchestrator/db.example.com/REPLACE_WITH_FIELD",
+            "op://Orchestrator/db.example.com/CHANGE_ME",
+            "op://Orchestrator/YOUR_ITEM/password",
+            "op://Orchestrator/db.example.com/TODO/password",
+        ] {
+            assert_eq!(fate(placeholder), RefFate::Unjudged, "{placeholder}");
+        }
+    }
+
+    #[test]
+    fn an_exclusion_does_not_make_a_working_mapping_prunable() {
+        let text = "DB_EXAMPLE_COM_PASSWORD=op://Orchestrator/db.example.com/password\n\
+                    GONE=op://Orchestrator/vanished/password\n";
+        let scan = scan_op_refs(text, &op_world());
+        let patterns = vec!["*_PASSWORD".to_string(), "GONE".to_string()];
+
+        // Reported under its own heading, and absent from the edit list.
+        let excluded = excluded_refs(&scan, &patterns);
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].var, "DB_EXAMPLE_COM_PASSWORD");
+        let edits = plan_ref_edits(&scan);
+        assert_eq!(edits.len(), 1);
+        assert!(edits[0].0.starts_with("GONE="));
     }
 }

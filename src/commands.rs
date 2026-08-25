@@ -996,10 +996,10 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
                      onepassword : pick items from the vault; each item's fields become refs\n\
                      --exclude   : a VAR name refresh must not map ('*' and '?' allowed).\n\
                      \x20             Repeatable, recorded in the manifest, honoured by later runs.\n\
-                     --prune     : fix what the scan found (bitwarden) — remove dangling\n\
-                     \x20             refs (matching no secret the token can see) and repair\n\
-                     \x20             renamed ones, keeping the variable name. Reported\n\
-                     \x20             either way.\n\
+                     --prune     : fix what the scan found — remove dangling refs\n\
+                     \x20             (matching nothing the token can see) and, on\n\
+                     \x20             bitwarden, repair renamed ones keeping the variable\n\
+                     \x20             name. Reported either way.\n\
                      Secret values are never stored — only references."
                 );
                 return Ok(());
@@ -1076,15 +1076,7 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
             refresh_bitwarden(paths, man_path, take_all, mode, prune)
         }
         Backend::OnePassword => {
-            if prune {
-                // 1Password refs carry recorded --exclude patterns, so "does
-                // not resolve" has more shapes there; deferred to its own
-                // issue rather than guessed at (ADR-0003).
-                return Err(Error::Message(
-                    "refresh: --prune applies to the bitwarden backend only".into(),
-                ));
-            }
-            refresh_onepassword(paths, man_path, take_all, mode, &exclude)
+            refresh_onepassword(paths, man_path, take_all, mode, &exclude, prune)
         }
         other => Err(Error::Message(format!(
             "refresh does not apply to backend '{}'. It builds refs files, which only \
@@ -1235,7 +1227,21 @@ fn report_and_fix_refs(
     // report must not promise a repair it will not perform.
     print_ref_report(paths, path, &scan, !mode_is_replace);
 
-    let edits = refs::plan_ref_edits(&scan);
+    apply_ref_edits(path, &scan, mode_is_replace, prune)
+}
+
+/// Decide what to do about a scan's pending edits, then do it.
+///
+/// Shared by both backends: the gate (`--prune`, an interactive yes, or report
+/// and leave) and the surgical write are the same act whatever made a line
+/// dangling. Only the classification differs.
+fn apply_ref_edits(
+    path: &Path,
+    scan: &[refs::ScannedRef],
+    mode_is_replace: bool,
+    prune: bool,
+) -> Result<()> {
+    let edits = refs::plan_ref_edits(scan);
     if edits.is_empty() {
         return Ok(());
     }
@@ -1287,6 +1293,59 @@ fn report_and_fix_refs(
     Ok(())
 }
 
+/// Report what the scan found in a 1Password manifest, and act on it under the
+/// same gate as Bitwarden.
+///
+/// Judged against what this run already fetched: the item listing, plus the
+/// fields of the items it expanded. Nothing here costs an extra `op` call
+/// (ADR-0005).
+fn report_and_fix_op_refs(
+    paths: &Paths,
+    path: &Path,
+    world: &refs::OpWorld,
+    exclusions: &[String],
+    mode_is_replace: bool,
+    prune: bool,
+) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let scan = refs::scan_op_refs(&text, world);
+    // No repair to promise: an `op://` line records no source id, so a renamed
+    // item is indistinguishable from a deleted one (ADR-0005).
+    print_ref_report(paths, path, &scan, false);
+    print_excluded_report(path, &scan, exclusions);
+    apply_ref_edits(path, &scan, mode_is_replace, prune)
+}
+
+/// Mappings that resolve but whose variable name an exclusion now covers.
+///
+/// Listed, never removed. An exclusion says what `refresh` may **add**; these
+/// lines still work, and prune removes only what does not resolve (ADR-0005).
+/// Naming the file and the fix keeps the operator from having to guess why a
+/// pattern did not make an existing variable go away.
+fn print_excluded_report(path: &Path, scan: &[refs::ScannedRef], exclusions: &[String]) {
+    let excluded = refs::excluded_refs(scan, exclusions);
+    if excluded.is_empty() {
+        return;
+    }
+    print_ref_group(
+        &format!(
+            "Mapped but excluded in {} ({} matching a recorded exclusion — kept, because \
+             they still resolve):",
+            path.display(),
+            excluded.len()
+        ),
+        &excluded,
+        Some("Remove one by hand if you meant it to go: vaulted-agent edit-manifest"),
+    );
+    println!();
+}
+
 /// What the scan found, said before anything is decided about it.
 fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_repair: bool) {
     let dangling = refs::dangling_refs(scan);
@@ -1325,14 +1384,15 @@ fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_
         }
     }
     if !dangling.is_empty() {
-        println!(
-            "Dangling refs in {} ({} matching no secret this token can see):",
-            path.display(),
-            dangling.len()
+        print_ref_group(
+            &format!(
+                "Dangling refs in {} ({} matching nothing this token can see):",
+                path.display(),
+                dangling.len()
+            ),
+            &dangling,
+            None,
         );
-        for r in &dangling {
-            println!("    {}", r.line);
-        }
         for warning in alias_warnings(
             paths,
             &dangling,
@@ -1341,23 +1401,55 @@ fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_
             println!("  ! {warning}");
         }
     }
-    let unjudged: Vec<&refs::ScannedRef> = scan
-        .iter()
-        .filter(|r| r.fate == refs::RefFate::Unjudged)
-        .collect();
-    if unjudged.is_empty() {
-        return;
+    let unchecked = refs::unchecked_refs(scan);
+    if !unchecked.is_empty() {
+        // Said out loud rather than passed over, because silence here would
+        // read as "these are fine". They are simply unexamined: the item is
+        // there, and what it costs to look inside is the reason refresh asks
+        // which items to expand (ADR-0005).
+        print_ref_group(
+            &format!(
+                "Refs this run did not check ({} — into items whose fields it did not read):",
+                unchecked.len()
+            ),
+            &unchecked,
+            Some(
+                "Items you did not select, or that could not be read this run. \
+                 `--all` expands every item.",
+            ),
+        );
+        println!();
     }
-    // Reported separately and never pruned: prune removes what does not
-    // resolve, and these have not been shown not to.
-    println!(
-        "Refs refresh cannot judge ({} — shape is `vaulted-agent secrets validate`'s job):",
-        unjudged.len()
-    );
-    for r in &unjudged {
+    let unjudged = refs::unjudged_refs(scan);
+    if !unjudged.is_empty() {
+        // Reported separately and never pruned: prune removes what does not
+        // resolve, and these have not been shown not to.
+        print_ref_group(
+            &format!(
+                "Refs refresh cannot judge ({} — shape is `vaulted-agent secrets validate`'s job):",
+                unjudged.len()
+            ),
+            &unjudged,
+            None,
+        );
+        println!();
+    }
+}
+
+/// One heading, the lines under it verbatim, and an optional closing note.
+///
+/// Every group the report prints has this shape, and they are read together —
+/// an operator comparing "dangling" against "cannot judge" is comparing two
+/// lists of file lines. Printing them through one function is what keeps them
+/// looking like one report.
+fn print_ref_group(heading: &str, refs: &[&refs::ScannedRef], note: Option<&str>) {
+    println!("{heading}");
+    for r in refs {
         println!("    {}", r.line);
     }
-    println!();
+    if let Some(n) = note {
+        println!("  {n}");
+    }
 }
 
 /// Harness aliases that name a variable about to disappear.
@@ -1454,6 +1546,7 @@ fn refresh_onepassword(
     take_all: bool,
     mode: Option<&str>,
     exclude: &[String],
+    prune: bool,
 ) -> Result<()> {
     let token = load_op(paths)?;
     let items = backend::op_list_items(&token, None)?;
@@ -1499,8 +1592,8 @@ fn refresh_onepassword(
         (0..items.len()).collect()
     } else {
         println!("Items visible to this token:");
-        for (i, (_, title, vault)) in items.iter().enumerate() {
-            println!("  {:2}) {}  ({})", i + 1, title, vault);
+        for (i, it) in items.iter().enumerate() {
+            println!("  {:2}) {}  ({})", i + 1, it.title, it.vault);
         }
         println!();
         eprint!("Items to include (e.g. 1,4,7 or 1-5,9 - blank for all): ");
@@ -1518,14 +1611,41 @@ fn refresh_onepassword(
     let mut unreadable: Vec<String> = Vec::new();
     let mut unrepresentable: Vec<String> = Vec::new();
     let mut excluded: Vec<String> = Vec::new();
+    // What the run learned, for judging the mappings already in the file. Only
+    // the items expanded below land in it: `refresh` judges what it fetched and
+    // nothing more (ADR-0005).
+    let mut world = refs::OpWorld {
+        items: items.clone(),
+        fields: std::collections::HashMap::new(),
+    };
     for i in indices {
-        let (id, title, vault) = &items[i];
+        let backend::OpItem {
+            id, title, vault, ..
+        } = &items[i];
         // A per-item failure (transient 502 from the vault API, an item the
         // token cannot read) must not discard the whole run - reading 60 items
         // takes ~a minute, and refresh defaults to merge, so the next run picks
         // up whatever was missed. Skips are reported, never silent.
-        let fields = match backend::op_item_field_labels(&token, id, Some(vault.as_str())) {
-            Ok(f) => f,
+        // One `op item get`, read twice: the fields worth mapping, and every
+        // field identity a reference may name. The second view is wider — an
+        // OTP or empty-valued field is one `refresh` will not map and `op` will
+        // still resolve — and judging an existing mapping against the narrow
+        // one would call a working line dangling.
+        let json = match backend::op_item_json(&token, id, Some(vault.as_str())) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("  warn: {title}: {e}");
+                unreadable.push(title.clone());
+                continue;
+            }
+        };
+        let fields = match backend::parse_op_item_fields_json(&json)
+            .and_then(|f| backend::parse_op_item_field_refs(&json).map(|r| (f, r)))
+        {
+            Ok((fields, field_refs)) => {
+                world.fields.insert(id.clone(), field_refs);
+                fields
+            }
             Err(e) => {
                 eprintln!("  warn: {title}: {e}");
                 unreadable.push(title.clone());
@@ -1618,6 +1738,11 @@ fn refresh_onepassword(
             unreadable.join(", ")
         );
     }
+
+    // After the reads, because the fields they returned are what makes a
+    // field-level verdict possible; before the write, so a dangling line is
+    // gone by the time merge decides what to append.
+    report_and_fix_op_refs(paths, &path, &world, &exclusions, mode == "replace", prune)?;
 
     if entries.is_empty() {
         return Err(Error::Message(if excluded.is_empty() {

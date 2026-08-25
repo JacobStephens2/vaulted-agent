@@ -97,5 +97,6 @@ configured host. It must never delete mappings there. Pruning is maintenance, an
   they are `secrets validate`'s to report; removing one would take the variable
   out of the manifest altogether, turning a loud misconfiguration into a secret
   that quietly stops being injected.
-- Bitwarden only for now. 1Password refs carry recorded `--exclude` patterns, so
-  "does not resolve" has more shapes there; deferred to its own issue.
+- Bitwarden first. 1Password refs carry recorded `--exclude` patterns, so "does
+  not resolve" has more shapes there; settled separately in ADR-0005, which
+  keeps this rule and adds that an exclusion is not one of those shapes.
