@@ -164,6 +164,7 @@ va run -m openai.env.refs --backend bitwarden -p -- \
 |---|---|
 | Rotated a value | Nothing — next launch fetches live |
 | Added a secret you want mapped | `va refresh` (merge) or `va refresh --replace --all` |
+| Renamed or removed a secret | `va refresh --prune` (removes mappings nothing resolves) |
 | Removed or fixed a mapping | `va edit-manifest` (checks on save) or edit the refs file by hand |
 
 **Install options** (clone, shared host, flags): [Install details](#install-details).  
@@ -711,7 +712,16 @@ refs builder, on an existing file):
 va refresh openai.env.refs              # merge: show what’s new, append picks
 va refresh openai.env.refs --all        # append every not-yet-mapped secret
 va refresh openai.env.refs --replace --all   # rewrite file from scratch
+va refresh openai.env.refs --prune           # also remove mappings that resolve to nothing
 ```
+
+**Renaming** a secret is the case merge alone cannot finish: the new key gets a
+mapping, and the old one stays behind as a **dangling ref** that fails every
+launch through that manifest. `refresh` reports dangling refs on every run and
+removes them under `--prune` (or an interactive `[y/N]`, defaulting to no).
+Removal is surgical — comments, blank lines, ordering, and UUID-form refs all
+survive, which `--replace` cannot promise. Removed lines print verbatim, and
+there is no backup file, so keep the scrollback.
 
 Rotating a secret’s **value** in SM needs no refresh - the next launch fetches
 it live. Placeholder values (`REPLACE_…`, all-zero UUIDs, …) are rejected by
