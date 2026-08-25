@@ -603,6 +603,37 @@ How should vault tokens be supplied at launch?
 That choice is written to `defaults.conf` before backend work. Non-interactive
 setup leaves the existing `auth_mode` alone.
 
+**Token capture.** When `auth_mode=file`, there is no token file yet and none is
+exported, setup obtains the token itself rather than leaving you to hand-edit
+`op.env` / `bws.env`. On a TTY it prints the vault console URL (it never opens a
+browser - setup runs under `sudo` on servers) and reads the paste with echo off;
+an empty paste skips with a "write it later" note. The paste is shape-checked
+first, so a master password or a login API key is caught before it reaches the
+vault, and then **verified live** (`bws secret list` / `op whoami`) - an invalid
+token never lands on disk. A rejected paste is re-prompted once.
+
+Without a terminal, pipe it under `--set-token`:
+
+```bash
+printf %s "$TOKEN" | sudo vaulted-agent setup bitwarden --set-token
+printf %s "$TOKEN" | sudo vaulted-agent setup onepassword --set-token
+```
+
+`--set-token` is also how you **rotate**: stdin outranks an exported token, so a
+rotation cannot silently re-store the stale value that is still in your shell. A
+leading `BWS_ACCESS_TOKEN=` / `OP_SERVICE_ACCOUNT_TOKEN=` is stripped, so a line
+copied out of a token file works; embedded newlines, a stray `=`, and empty
+input are refused rather than stored. The piped value is **not** shape-checked -
+a pipe is deliberate, and the live verify is the authority on whether the token
+works. Verification failure exits non-zero with nothing written. Running
+`--set-token` with stdin still attached to a terminal is an error, not a wait:
+it tells you to pipe it, or to drop the flag and paste interactively.
+
+Capture never fires for a token file that exists but **cannot be read** - that is
+a permissions fault, and overwriting it would clobber a working credential and
+hide the fault. It never runs on the launch path either: stdin there belongs to
+the agent.
+
 Then, for the vault backend: 1Password setup writes `op.env` and Bitwarden
 writes `bws.env` **only when** `auth_mode=file`. Under `auth_mode=prompt`,
 setup uses the token only in-process for `bws secret list` / refs building,
