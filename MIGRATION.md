@@ -1,3 +1,29 @@
+# Migration: refs lines record their source secret (unreleased)
+
+`vaulted-agent setup` and `vaulted-agent refresh` now write the source UUID on
+the lines they generate, as a trailing comment:
+
+```
+ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:ea6db86f-e103-4153-a71e-b4b100c30b65
+```
+
+This is a **Bitwarden refs-file format change** (issue #82, ADR-0004). It is what
+lets `refresh` report a vault-side rename as a rename and repair the one line —
+keeping the variable name, so a harness `alias =` reading it does not break.
+
+**Nothing you have to do.** Existing lines are never backfilled and keep their
+current behaviour exactly. The recording is stripped before the reference is
+resolved, so an annotated line launches and validates the same as before.
+
+**One-way, though.** A refs file containing an annotated line will not resolve
+under a launcher older than this release: it reads `name:KEY # uuid:…` as the
+whole reference and fails the launch closed. If you downgrade, either re-run
+`refresh --replace` on the old binary or strip the ` # uuid:…` tails by hand.
+
+Applies to `bitwarden` only. 1Password `op://` references carry their own
+identity, and dotenv manifests hold secret *values*, where a `#` is material and
+is left alone.
+
 # Migration: kimi is not env-blind (retracts v0.4.16 / #69) (unreleased)
 
 v0.4.16 classified kimi as env-blind and stopped vault wiring (#68 / #69).

@@ -164,7 +164,7 @@ va run -m openai.env.refs --backend bitwarden -p -- \
 |---|---|
 | Rotated a value | Nothing — next launch fetches live |
 | Added a secret you want mapped | `va refresh` (merge) or `va refresh --replace --all` |
-| Renamed or removed a secret | `va refresh --prune` (removes mappings nothing resolves) |
+| Renamed or removed a secret | `va refresh --prune` (repairs renamed mappings, removes ones nothing resolves) |
 | Removed or fixed a mapping | `va edit-manifest` (checks on save) or edit the refs file by hand |
 
 **Install options** (clone, shared host, flags): [Install details](#install-details).  
@@ -550,7 +550,7 @@ Set per harness with `backend =`, or set machine default `default_backend` in
 | backend | manifest is | on-disk credential | resolves |
 |---|---|---|---|
 | `onepassword` | `VAR=op://vault/item/field` | `op.env` (`OP_SERVICE_ACCOUNT_TOKEN`) when `auth_mode=file` | whole file, one `op inject` |
-| `bitwarden` | `VAR=<uuid\|uuid:…\|name:KEY\|project:P/KEY>` | `bws.env` (`BWS_ACCESS_TOKEN`) when `auth_mode=file` | one `bws secret get` per line (names resolved via `bws secret list`) |
+| `bitwarden` | `VAR=<uuid\|uuid:…\|name:KEY\|project:P/KEY>` (optional trailing `# uuid:…`) | `bws.env` (`BWS_ACCESS_TOKEN`) when `auth_mode=file` | one `bws secret get` per line (names resolved via `bws secret list`) |
 | `pass` | `VAR=store/entry/path` | the service account's GPG key | one `pass show` per line |
 | `sops` | a sops-encrypted dotenv | `age.key` | whole file, one `sops --decrypt` |
 | `plainfile` | a plain dotenv | the manifest itself | nothing to resolve |
@@ -712,16 +712,32 @@ refs builder, on an existing file):
 va refresh openai.env.refs              # merge: show what’s new, append picks
 va refresh openai.env.refs --all        # append every not-yet-mapped secret
 va refresh openai.env.refs --replace --all   # rewrite file from scratch
-va refresh openai.env.refs --prune           # also remove mappings that resolve to nothing
+va refresh openai.env.refs --prune           # also fix mappings that resolve to nothing
 ```
 
-**Renaming** a secret is the case merge alone cannot finish: the new key gets a
-mapping, and the old one stays behind as a **dangling ref** that fails every
-launch through that manifest. `refresh` reports dangling refs on every run and
-removes them under `--prune` (or an interactive `[y/N]`, defaulting to no).
-Removal is surgical — comments, blank lines, ordering, and UUID-form refs all
-survive, which `--replace` cannot promise. Removed lines print verbatim, and
-there is no backup file, so keep the scrollback.
+**Renaming** a secret is the case merge alone cannot finish. Lines `setup` and
+`refresh` generate record which secret they came from, as a trailing comment:
+
+```
+ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:ea6db86f-e103-4153-a71e-b4b100c30b65
+```
+
+With that recording present, a rename is reported as a **rename** and repaired:
+`refresh` rewrites the reference on that one line and **keeps the variable
+name**, so an agent — or a harness `alias =` — reading `ASSEMBLY_API_KEY` keeps
+working. The recording is metadata; it is stripped before the reference is
+resolved, and it never carries secret material.
+
+Without a recording — any line written before this existed, or one you pinned by
+hand — the old mapping stays behind as a **dangling ref** that fails every launch
+through that manifest. `refresh` never backfills recordings onto lines already on
+disk, so those keep exactly their old behaviour.
+
+Either way `refresh` reports what it found on every run and changes the file only
+under `--prune` (or an interactive `[y/N]`, defaulting to no). The edit is
+surgical — comments, blank lines, ordering, and UUID-form refs all survive, which
+`--replace` cannot promise. Changed lines print verbatim, and there is no backup
+file, so keep the scrollback.
 
 Rotating a secret’s **value** in SM needs no refresh - the next launch fetches
 it live. Placeholder values (`REPLACE_…`, all-zero UUIDs, …) are rejected by

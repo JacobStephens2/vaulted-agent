@@ -122,7 +122,18 @@ pub fn validate_manifest_text(text: &str, backend: Backend) -> Result<Vec<(Strin
     // Shared KEY=value policy with resolve (quotes, multiline, var names).
     let pairs = crate::config::parse_dotenv_pairs(text)?;
     let mut out = Vec::with_capacity(pairs.len());
-    for (var, r) in pairs {
+    for (var, mut r) in pairs {
+        // A Bitwarden refs line may record the secret it was generated from as
+        // a trailing `# uuid:…` (ADR-0004). Stripping it here — once, at the
+        // one seam every reader already goes through — is the whole cost of the
+        // format change on the launch path (story #44): `resolve_bitwarden`
+        // never learns the recording exists.
+        //
+        // Bitwarden only. A plainfile or sops manifest holds secret *values*,
+        // where a `#` is material and dropping the tail would truncate it.
+        if backend == Backend::Bitwarden {
+            r = crate::refs::reference_of(&r).to_string();
+        }
         if r.is_empty() {
             return Err(Error::Message(format!("empty reference for {var}")));
         }
@@ -375,5 +386,49 @@ GOOD=op://Vault/item/field\n\
         let pairs = validate_manifest_text("PEM=\"line1\nline2\"\n", Backend::Plainfile).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].1, "line1\nline2");
+    }
+
+    // ---- annotated bitwarden refs (issue #82, ADR-0004) ----
+
+    #[test]
+    fn an_annotated_bitwarden_ref_reaches_resolve_as_the_bare_reference() {
+        // The launch path is deliberately small (story #44): stripping the
+        // recording happens once, here, and `resolve_bitwarden` never learns
+        // the format changed.
+        let u = "11111111-1111-1111-1111-111111111111";
+        let text = format!("ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:{u}\n");
+        let pairs = validate_manifest_text(&text, Backend::Bitwarden).unwrap();
+        assert_eq!(
+            pairs,
+            vec![(
+                "ASSEMBLY_AI_API_KEY".to_string(),
+                "name:ASSEMBLY_AI_API_KEY".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_stale_recording_does_not_fail_the_pre_flight_gate() {
+        // The line resolves, so validate must not block it (invariant 5). A
+        // disagreement between the recording and the key is `refresh`'s signal
+        // to report a rename, not a misconfiguration.
+        let text = "A=name:A_KEY # uuid:11111111-1111-1111-1111-111111111111\n";
+        assert!(validate_manifest_text(text, Backend::Bitwarden).is_ok());
+    }
+
+    #[test]
+    fn a_hash_inside_a_secret_value_is_still_part_of_the_value() {
+        // The recording is a Bitwarden-refs concept. Stripping comments from
+        // dotenv secret material would silently truncate passwords.
+        let pairs =
+            validate_manifest_text("PW=s3cret # not-a-comment\n", Backend::Plainfile).unwrap();
+        assert_eq!(pairs[0].1, "s3cret # not-a-comment");
+    }
+
+    #[test]
+    fn an_annotation_cannot_smuggle_a_placeholder_past_the_gate() {
+        // Invariant 4: the reference itself is what must be real.
+        let text = "A=name: # uuid:11111111-1111-1111-1111-111111111111\n";
+        assert!(validate_manifest_text(text, Backend::Bitwarden).is_err());
     }
 }
