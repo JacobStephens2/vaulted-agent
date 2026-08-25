@@ -996,8 +996,10 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
                      onepassword : pick items from the vault; each item's fields become refs\n\
                      --exclude   : a VAR name refresh must not map ('*' and '?' allowed).\n\
                      \x20             Repeatable, recorded in the manifest, honoured by later runs.\n\
-                     --prune     : remove dangling refs — mappings matching no secret the\n\
-                     \x20             token can see (bitwarden). Reported either way.\n\
+                     --prune     : fix what the scan found (bitwarden) — remove dangling\n\
+                     \x20             refs (matching no secret the token can see) and repair\n\
+                     \x20             renamed ones, keeping the variable name. Reported\n\
+                     \x20             either way.\n\
                      Secret values are never stored — only references."
                 );
                 return Ok(());
@@ -1151,7 +1153,7 @@ fn refresh_bitwarden(
 
     ensure_manifest_writable(&path)?;
 
-    report_and_prune_dangling(paths, &path, &secrets, mode == "replace", prune)?;
+    report_and_fix_refs(paths, &path, &secrets, mode == "replace", prune)?;
 
     let indices = if take_all {
         None // all
@@ -1203,13 +1205,18 @@ fn refresh_bitwarden(
     Ok(())
 }
 
-/// Report the dangling refs in a Bitwarden manifest, and remove them when the
-/// operator has said to.
+/// Report what the scan found in a Bitwarden manifest, and act on it when the
+/// operator has said to: dangling refs removed, renamed refs repaired.
 ///
-/// Reporting happens on every run; removal never does on its own. Exit status
-/// is unaffected either way — `refresh` is not a gate, `secrets validate` is
-/// (invariant 5), and it already fails on a dangling ref.
-fn report_and_prune_dangling(
+/// Reporting happens on every run; changing the file never does on its own.
+/// Both kinds of change ride the one `--prune` / confirmation gate, because
+/// they are the same intent — fix this manifest — and a run that repairs one
+/// line while leaving another broken would be harder to reason about than
+/// either alone.
+///
+/// Exit status is unaffected either way — `refresh` is not a gate, `secrets
+/// validate` is (invariant 5), and it already fails on a dangling ref.
+fn report_and_fix_refs(
     paths: &Paths,
     path: &Path,
     secrets: &[(String, String, String)],
@@ -1224,70 +1231,113 @@ fn report_and_prune_dangling(
         source: e,
     })?;
     let scan = refs::scan_bitwarden_refs(&text, secrets);
-    let dangling = refs::dangling_refs(&scan);
-    print_ref_report(paths, path, &scan, &dangling);
-    if dangling.is_empty() {
+    // `--replace` regenerates from the listing instead of repairing, so the
+    // report must not promise a repair it will not perform.
+    print_ref_report(paths, path, &scan, !mode_is_replace);
+
+    let edits = refs::plan_ref_edits(&scan);
+    if edits.is_empty() {
         return Ok(());
     }
+    let what = refs::describe_ref_edits(&edits);
 
-    let doomed: Vec<String> = dangling.iter().map(|r| r.line.clone()).collect();
-    let remove = match refs::prune_choice(
-        doomed.len(),
+    let apply = match refs::ref_fix_choice(
+        edits.len(),
         prune,
         mode_is_replace,
         std::io::IsTerminal::is_terminal(&io::stdin()),
     ) {
-        refs::PruneChoice::NothingDangling => return Ok(()),
-        refs::PruneChoice::ReplaceRegenerates => {
+        refs::RefFixChoice::NothingPending => return Ok(()),
+        refs::RefFixChoice::ReplaceRegenerates => {
             println!("  --replace rewrites the file, so these go with it.\n");
             return Ok(());
         }
-        refs::PruneChoice::Report => {
-            println!("  Left in place. Re-run with --prune to remove them.\n");
+        refs::RefFixChoice::Report => {
+            println!("  Left in place. Re-run with --prune to apply.\n");
             return Ok(());
         }
-        refs::PruneChoice::Remove => true,
-        refs::PruneChoice::Ask => {
-            eprint!("Remove {} dangling mapping(s)? [y/N]: ", doomed.len());
+        refs::RefFixChoice::Apply => true,
+        refs::RefFixChoice::Ask => {
+            eprint!("{what}? [y/N]: ");
             let _ = io::stderr().flush();
             let mut line = String::new();
             io::stdin().read_line(&mut line).is_ok()
                 && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
         }
     };
-    if !remove {
+    if !apply {
         println!("  Left in place.\n");
         return Ok(());
     }
 
-    let removed = refs::prune_refs_lines(path, &doomed)?;
-    // Verbatim, because scrollback is the recovery path — prune writes no
+    let applied = refs::edit_refs_lines(path, &edits)?;
+    // Verbatim, because scrollback is the recovery path — refresh writes no
     // backup file into the root-owned manifest directory.
-    println!("Removed {} dangling mapping(s):", removed.len());
-    for line in &removed {
-        println!("  - {line}");
+    println!("{}:", refs::describe_ref_edits(&applied));
+    for (line, edit) in &applied {
+        match edit {
+            refs::RefEdit::Remove => println!("  - {line}"),
+            refs::RefEdit::Rewrite(new) => {
+                println!("  - {line}");
+                println!("  + {new}");
+            }
+        }
     }
     println!();
     Ok(())
 }
 
 /// What the scan found, said before anything is decided about it.
-fn print_ref_report(
-    paths: &Paths,
-    path: &Path,
-    scan: &[refs::ScannedRef],
-    dangling: &[&refs::ScannedRef],
-) {
+fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_repair: bool) {
+    let dangling = refs::dangling_refs(scan);
+    let renamed = refs::renamed_refs(scan);
+    if !renamed.is_empty() {
+        // Named as a rename because the recorded UUID proves it is one. The old
+        // guess — "one went dangling, one appeared" — was rejected in #80, and
+        // a wrong label is worse than none.
+        println!(
+            "Renamed secrets in {} ({} mapping(s) whose key changed in the vault):",
+            path.display(),
+            renamed.len()
+        );
+        for r in &renamed {
+            println!("    {}", r.line);
+            match (will_repair, r.repaired_line(), r.renamed_to.as_deref()) {
+                (true, Some(new), _) => println!("      -> {new}"),
+                (false, _, Some(key)) => println!("      now named {key} in the vault"),
+                _ => {}
+            }
+        }
+        // A repair keeps the variable name, so an `alias =` reading it keeps
+        // working — that is why it keeps the name. `--replace` gives no such
+        // promise: it remaps the secret under its new key and the old variable
+        // goes. That is the one piece of cleanup refresh cannot do itself
+        // (ADR-0003), so it has to be said out loud.
+        if !will_repair {
+            for warning in alias_warnings(
+                paths,
+                &renamed,
+                "a mapping whose secret was renamed in the vault. --replace remaps it \
+                 under the new key, so the alias will fail that launch closed",
+            ) {
+                println!("  ! {warning}");
+            }
+        }
+    }
     if !dangling.is_empty() {
         println!(
             "Dangling refs in {} ({} matching no secret this token can see):",
             path.display(),
             dangling.len()
         );
-        for r in dangling {
+        for r in &dangling {
             println!("    {}", r.line);
         }
-        for warning in alias_warnings(paths, dangling) {
+        for warning in alias_warnings(
+            paths,
+            &dangling,
+            "a dangling mapping. Pruning it leaves the alias to fail that launch closed",
+        ) {
             println!("  ! {warning}");
         }
     }
@@ -1312,9 +1362,15 @@ fn print_ref_report(
 
 /// Harness aliases that name a variable about to disappear.
 ///
-/// A warning, never a block: prune removes the mapping, and the `alias =` line
-/// naming it is in a harness file prune does not own.
-fn alias_warnings(paths: &Paths, dangling: &[&refs::ScannedRef]) -> Vec<String> {
+/// A warning, never a block: refresh changes the manifest, and the `alias =`
+/// line naming it is in a harness file refresh does not own. The caller supplies
+/// `consequence` because the two ways a variable can vanish — pruned, or
+/// regenerated away by `--replace` — need different advice.
+fn alias_warnings(
+    paths: &Paths,
+    vanishing: &[&refs::ScannedRef],
+    consequence: &str,
+) -> Vec<String> {
     let mut out = Vec::new();
     let Ok(names) = list_harness_names(paths) else {
         return out;
@@ -1324,11 +1380,10 @@ fn alias_warnings(paths: &Paths, dangling: &[&refs::ScannedRef]) -> Vec<String> 
             continue;
         };
         for (target, source) in &h.aliases {
-            if dangling.iter().any(|r| r.var == *source) {
+            if vanishing.iter().any(|r| r.var == *source) {
                 out.push(format!(
-                    "harness {name}: alias = {target} = {source} reads a dangling mapping. \
-                     Pruning it leaves the alias to fail that launch closed — edit the \
-                     harness too."
+                    "harness {name}: alias = {target} = {source} reads {consequence} \
+                     — edit the harness too."
                 ));
             }
         }

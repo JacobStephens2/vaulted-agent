@@ -73,7 +73,7 @@ elevated launches always read the machine config dir).
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
 | Map new vault secrets into refs | `va refresh` / `va refresh --backend onepassword` |
 | Skip fields by name pattern (1P) | `va refresh --exclude '*_USERNAME'` |
-| Remove dangling refs (bitwarden) | `va refresh --prune` |
+| Remove dangling refs / repair renamed refs (bitwarden) | `va refresh --prune` |
 | Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
@@ -154,10 +154,13 @@ flag that.
 
 **Rotate value in vault** → no command; next launch fetches live.  
 **Add a new mapping** → `va refresh` or `va edit-manifest`.  
-**Renamed a secret in the vault** → `va refresh --prune`. The old mapping matches
-nothing and fails every launch closed; `refresh` reports it on every run and removes
-it only under `--prune` or an interactive yes. Removed lines print verbatim — there is
-no backup file. Lines that still resolve, comments, and ordering are untouched.  
+**Renamed a secret in the vault** → `va refresh --prune`. If the mapping carries a
+`# uuid:…` source recording, `refresh` reports `renamed` and repairs that one line,
+keeping the variable name — so an `alias =` reading it keeps working. Without a
+recording (any line written before this existed) the old mapping is a dangling ref:
+reported every run, removed under `--prune` or an interactive yes. Either way the
+change happens only when asked, changed lines print verbatim — there is no backup
+file — and lines that still resolve, comments, and ordering are untouched.  
 **1Password name cleanup / exclude** → see MIGRATION.md; `va refresh --exclude '…'`.
 
 ### Launch with a particular manifest (one session)
@@ -194,8 +197,9 @@ Interpret carefully:
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |
 | `could not resolve` / item named on validate or launch | Well-formed ref, vault item missing or renamed - fix the refs file or vault. Launch lists the variables implicated and suggests `secrets validate` |
 | `Dangling refs in <file>` on refresh | Mappings matching no secret the token can see (bitwarden). Reported every run; exit stays 0. `--prune` removes them |
+| `Renamed secrets in <file>` on refresh | Mappings whose `# uuid:…` recording names a secret now under a different key. `--prune` rewrites the reference and keeps the variable name |
 | `Refs refresh cannot judge (…)` | Shapes prune will not touch — an unreadable ref, a placeholder, a multi-line value. `secrets validate` owns those |
-| `no secret matched name:X (VAR in <file>)` | A dangling ref hit at launch. `va refresh --prune` removes the mapping |
+| `no secret matched name:X (VAR in <file>)` | A dangling ref hit at launch. `va refresh --prune` removes the mapping — or repairs it, if the line records a `# uuid:…` and the secret was only renamed |
 | `secrets validate` needs token / fails without | Live gate by design; use `--offline` only for shape |
 | Legacy `*_ADD_MORE_*` names | Old 1Password refresh naming; still works; next refresh renames - see MIGRATION.md |
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
