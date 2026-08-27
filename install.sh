@@ -544,9 +544,7 @@ if (( ! NO_AUTO_HARNESS )); then
   else
     printf '  %-8s not found (skipped)\n' kimi
   fi
-  # bash is the secrets-injected shell harness, not an agent CLI. Extra argv
-  # is appended (`va bash ./script.sh`). Distinct from `va run`. Almost always
-  # on PATH, so it must not count as "an agent CLI was found".
+  # bash is almost always on PATH; do not treat it as an agent CLI being found.
   if p="$(find_user_bin bash)"; then
     write_auto_harness bash "$p" "bash"
     found_any=1

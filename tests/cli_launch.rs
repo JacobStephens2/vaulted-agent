@@ -97,8 +97,7 @@ fn missing_manifest_fails_closed() {
 #[test]
 fn bash_harness_appends_extra_args() {
     let seam = CliSeam::new();
-    // Stub must not be named `bash` — the child PATH does not put the test
-    // bin first, so a command of `bash` would exec the real shell and hang.
+    // Harness command is the stub name so the plan cannot resolve to /bin/bash.
     seam.install_stub_agent("va-bash-stub");
     fs::write(
         seam.config_dir.join("manifests/empty.env"),
