@@ -36,7 +36,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 ```
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
-`grok`, `kimi`), and can ask for a vault backend + auth mode. Pin:
+`grok`, `kimi`) and `bash`, and can ask for a vault backend + auth mode. Pin:
 `VAULTED_AGENT_VERSION=v0.4.18` (or `latest`).
 
 ### 2. Wire a vault

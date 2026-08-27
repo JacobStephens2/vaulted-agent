@@ -1,8 +1,9 @@
 # vaulted-agent for agents
 
 You are an autonomous coding agent on a host that may use **vaulted-agent**
-(`va`) to launch Claude Code, Codex, Grok, or Kimi with vault-resolved secrets
-**in the child process environment** - not via `.env` files on disk.
+(`va`) to launch Claude Code, Codex, Grok, or Kimi - or a secrets-injected
+`bash` - with vault-resolved secrets **in the child process environment** - not
+via `.env` files on disk.
 
 Read this file for the operator contract. Prefer it over skimming the full README
 when you need commands, paths, and failure modes. Full reference:
@@ -39,6 +40,7 @@ vaulted-agent version   # expect 0.4.18 (git stamp may appear in parentheses)
 | Term | Meaning |
 |------|---------|
 | **Harness** | Named profile in `harnesses.d/<name>.conf` (command, manifest, backend, workdir, optional `alias` / `keep`, …) |
+| **Bash harness** | `va bash` - named harness whose `command` is `bash`; extra argv is appended (`va bash ./script.sh`). Not `va run`. |
 | **Alias** | `alias = TARGET = SOURCE` in a harness conf: copy resolved SOURCE onto TARGET in that harness's child env only |
 | **Manifest / refs file** | Mapping file under `manifests/` - references only for vault backends |
 | **Manager token** | Vault SA token (`op.env` / `bws.env` or prompt) - used only to resolve, then dropped |
@@ -67,7 +69,7 @@ elevated launches always read the machine config dir).
 | Health (as launch account) | `va doctor` (syntax / config; offline by design) |
 | Pre-flight: refs resolve in vault | `va secrets validate` (live; needs manager token) |
 | Pre-flight: shape only | `va secrets validate --offline` |
-| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` |
+| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va bash` |
 | **This launch only: other manifest** | `va -m readonly.env.tpl claude` |
 | Interactive pick + optional -m | `va -m narrow.env.tpl pick` |
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
@@ -83,6 +85,10 @@ elevated launches always read the machine config dir).
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
 `-m` / `--manifest`, `-H` / `--harness`. After the harness name, flags go to the
 agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
+
+`va bash` is a harness whose command is always bash; extra argv is appended
+(`va bash ./script.sh`). It is not `va run` (any program) and not a retired
+`*-orchestrator` wrapper.
 
 ### Prompt auth
 

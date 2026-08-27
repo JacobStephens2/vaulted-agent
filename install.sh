@@ -509,23 +509,27 @@ EOF
 }
 
 if (( ! NO_AUTO_HARNESS )); then
-  printf '\nDetecting agent CLIs on PATH…\n'
+  printf '\nDetecting agent CLIs and bash on PATH…\n'
   found_any=0
+  found_agent=0
   if p="$(find_user_bin claude)"; then
     write_auto_harness claude "$p" "claude --permission-mode auto"
     found_any=1
+    found_agent=1
   else
     printf '  %-8s not found (skipped)\n' claude
   fi
   if p="$(find_user_bin codex)"; then
     write_auto_harness codex "$p" "codex"
     found_any=1
+    found_agent=1
   else
     printf '  %-8s not found (skipped)\n' codex
   fi
   if p="$(find_user_bin grok)"; then
     write_auto_harness grok "$p" "grok"
     found_any=1
+    found_agent=1
   else
     printf '  %-8s not found (skipped)\n' grok
   fi
@@ -536,11 +540,13 @@ if (( ! NO_AUTO_HARNESS )); then
   if p="$(find_user_bin kimi)"; then
     write_auto_harness kimi "$p" "kimi --auto"
     found_any=1
+    found_agent=1
   else
     printf '  %-8s not found (skipped)\n' kimi
   fi
   # bash is the secrets-injected shell harness, not an agent CLI. Extra argv
-  # is appended (`va bash ./script.sh`). Distinct from `va run`.
+  # is appended (`va bash ./script.sh`). Distinct from `va run`. Almost always
+  # on PATH, so it must not count as "an agent CLI was found".
   if p="$(find_user_bin bash)"; then
     write_auto_harness bash "$p" "bash"
     found_any=1
@@ -549,14 +555,19 @@ if (( ! NO_AUTO_HARNESS )); then
   fi
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
-    printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi   /   va bash\n'
-  else
-    printf '  No claude/codex/grok/kimi/bash found. Install an agent CLI, then re-run install\n'
+    if (( found_agent )); then
+      printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi   /   va bash\n'
+    else
+      printf '  Try:  va bash   (secrets-injected shell; extra argv is appended)\n'
+    fi
+  fi
+  if (( ! found_agent )); then
+    printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
   fi
-  unset found_any p
+  unset found_any found_agent p
 else
-  printf '\nskipped agent auto-detect (--no-auto-harness)\n'
+  printf '\nskipped auto-harness detect (--no-auto-harness)\n'
 fi
 
 # --- optional interactive vault backend + auth-mode setup -----------------
@@ -1120,8 +1131,8 @@ if [[ -z "$REFS_MANIFEST_PATH" ]]; then
   printf '    cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
 fi
 printf '  then run:  vaulted-agent   (or the short alias:  %s)\n' "$SHORT_NAME"
-printf '    e.g.  %s claude   /   %s grok   /   %s kimi\n' \
-  "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME"
+printf '    e.g.  %s claude   /   %s grok   /   %s kimi   /   %s bash\n' \
+  "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME"
 printf '    (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
 printf '\nTo remove this install later:\n'
 printf '  sudo vaulted-agent uninstall\n'
