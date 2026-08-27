@@ -8,6 +8,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 |------|---------|
 | **Launcher** | The `vaulted-agent` / `va` binary. Resolves secrets, scrubs the environment, and execs an agent. Not a long-running daemon. |
 | **Harness** | A named launch profile (`harnesses.d/<name>.conf`): backend, manifest, command, optional workdir/bin/labels/keep/**alias**. |
+| **Bash harness** | A Harness whose `command` is `bash`. Extra argv is appended (`va bash ./script.sh`). Not `va run` (any program) and not a retired `*-orchestrator` shell wrapper. |
 | **Alias** | Per-harness child-env rename after inject: `alias = TARGET = SOURCE` copies the resolved source secret onto TARGET (fail closed if source missing). |
 | **Env-blind agent** | Tool listed in `etc/env-blind-agents` that does not consume vault-injected process-env credentials for the usual provider path. Doctor warns; install skips vault rewire. (kimi is **not** in this list — issue #70.) |
 | **Manifest** | The file a harness points at: either **refs** (references only) or dotenv-style secret material (plainfile/sops decrypt). |

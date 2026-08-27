@@ -95,6 +95,38 @@ fn missing_manifest_fails_closed() {
 }
 
 #[test]
+fn bash_harness_appends_extra_args() {
+    let seam = CliSeam::new();
+    // Harness command is the stub name so the plan cannot resolve to /bin/bash.
+    seam.install_stub_agent("va-bash-stub");
+    fs::write(
+        seam.config_dir.join("manifests/empty.env"),
+        "APP_TOKEN=from-manifest\n",
+    )
+    .unwrap();
+    write_plain_harness(&seam, "bash", "empty.env", "va-bash-stub");
+
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .args(["bash", "./script.sh", "--flag"])
+        .output()
+        .expect("launch");
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let rec = seam.read_stub_record("va-bash-stub");
+    assert!(
+        rec.contains("ARGV:") && rec.contains("./script.sh") && rec.contains("--flag"),
+        "extra args missing from child argv: {rec}"
+    );
+    assert!(rec.contains("ENV APP_TOKEN"), "{rec}");
+}
+
+#[test]
 fn manifest_override_swaps_which_secrets_reach_the_agent() {
     // `va -m other.env claude` — the harness still decides the command, the
     // workdir and the backend; only which credentials it carries changes.

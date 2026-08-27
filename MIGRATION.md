@@ -1,3 +1,10 @@
+# Migration: `va bash` is a harness, not the retired Bash launcher (unreleased)
+
+`va bash` is a named harness whose `command` is always `bash` (extra argv is
+appended: `va bash ./script.sh`). It is not `va run` (any program) and not a
+return of the pre-v0.4.0 Bash launcher or `*-orchestrator` wrappers — those
+stay retired. Same scrub → resolve → exec path as `va claude`.
+
 # Migration: refs lines record their source secret (unreleased)
 
 `vaulted-agent setup` and `vaulted-agent refresh` now write the source UUID on

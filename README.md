@@ -36,7 +36,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 ```
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
-`grok`, `kimi`), and can ask for a vault backend + auth mode. Pin:
+`grok`, `kimi`) and `bash`, and can ask for a vault backend + auth mode. Pin:
 `VAULTED_AGENT_VERSION=v0.4.18` (or `latest`).
 
 ### 2. Wire a vault
@@ -62,6 +62,8 @@ va claude
 va codex
 va grok
 va kimi           # --auto; vault inject OPENAI_API_KEY (by provider type); see AGENTS.md
+va bash           # secrets-injected shell; extra argv is appended
+va bash ./script.sh
 ```
 
 With `auth_mode=prompt`, paste the vault manager token when asked (not written
@@ -76,6 +78,8 @@ va                        # list harnesses
 va pick                   # interactive menu
 va -m readonly.env.tpl claude   # this launch only, against another manifest
 va claude --resume <id>   # agent args pass through; resume shape is normalized
+va bash                   # interactive shell with the harness manifest
+va bash ./script.sh       # same env, run a script; not `va run`
 va doctor
 va secrets list           # Bitwarden SM (same auth as launches)
 va secrets validate           # resolves every ref against the vault
@@ -303,7 +307,7 @@ config file you have edited. Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you (writes `service_user` in defaults.conf when explicit) |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
-| `--no-auto-harness` | do not detect claude/codex/grok/kimi or write live harnesses |
+| `--no-auto-harness` | do not detect claude/codex/grok/kimi/bash or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Sets `default_backend` in `defaults.conf` and the summary’s token path (`bws.env` vs `op.env`) |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
