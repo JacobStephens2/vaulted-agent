@@ -43,7 +43,7 @@ ALLOW_USER=""                    # write a sudoers rule for this user
 LINK_USER=""                     # symlink into this user's ~/.local/bin
 NO_LINK=0                        # skip the default ~/.local/bin symlink
 NO_VA=0                          # skip the short `va` alias symlink
-NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok/kimi
+NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok/kimi/bash
 NO_SETUP=0                       # skip interactive vault backend questions
 SHORT_NAME="va"                  # short alias for vaulted-agent
 BACKEND_CHOICE=""                # onepassword|bitwarden|pass|sops|plainfile|skip
@@ -539,11 +539,19 @@ if (( ! NO_AUTO_HARNESS )); then
   else
     printf '  %-8s not found (skipped)\n' kimi
   fi
+  # bash is the secrets-injected shell harness, not an agent CLI. Extra argv
+  # is appended (`va bash ./script.sh`). Distinct from `va run`.
+  if p="$(find_user_bin bash)"; then
+    write_auto_harness bash "$p" "bash"
+    found_any=1
+  else
+    printf '  %-8s not found (skipped)\n' bash
+  fi
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
-    printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi\n'
+    printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi   /   va bash\n'
   else
-    printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
+    printf '  No claude/codex/grok/kimi/bash found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
   fi
   unset found_any p
