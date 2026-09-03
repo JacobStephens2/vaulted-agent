@@ -286,7 +286,8 @@ impl Harness {
                 // These are real settings, just not per-harness ones. Saying
                 // only "unknown key" sends people looking for a typo in a line
                 // that is spelled correctly and merely in the wrong file.
-                "service_user" | "auth_mode" | "default_backend" | "allow_run" => {
+                "service_user" | "auth_mode" | "default_backend" | "allow_run"
+                | "extra_manifest" => {
                     return Err(Error::HarnessParse {
                         name: name.to_string(),
                         lineno: lineno + 1,
@@ -397,6 +398,94 @@ pub fn load_default(paths: &Paths, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Every value recorded for `key` in defaults.conf, in file order.
+///
+/// `load_default` takes the first and stops, which is right for a setting that
+/// has one value. A machine can read more than one manifest, so that key is
+/// repeatable and the whole list matters.
+pub fn load_defaults_all(paths: &Paths, key: &str) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(&paths.defaults_file) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == key {
+            let v = v.trim();
+            if !v.is_empty() {
+                out.push(v.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// A manifest something on this machine reads that no Harness launches from.
+///
+/// Systemd units, cron jobs and deploy scripts on a box commonly read a second
+/// refs file of their own. It is a manifest in every sense that matters here —
+/// the same references, resolved against the same vault, fail-closed in the
+/// same way — and it is invisible to a check that walks harness profiles. That
+/// invisibility is the whole defect: a deleted vault item took four units down
+/// while `secrets validate` reported every harness green.
+///
+/// Recorded in defaults.conf, repeatable:
+///
+/// ```text
+/// extra_manifest = /srv/orchestration/env.tpl
+/// extra_manifest = /etc/other/refs.env = plainfile
+/// ```
+///
+/// Deliberately not modelled as a harness with a `command`: nothing launches
+/// it, and inventing a fake profile would put it in `secrets which`, in the
+/// harness picker, and one `-H` away from being launched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraManifest {
+    pub path: PathBuf,
+    /// `None` means the machine default at the time of use.
+    pub backend: Option<Backend>,
+}
+
+impl ExtraManifest {
+    /// Parse one `extra_manifest =` value: `<path>` or `<path> = <backend>`.
+    fn parse(value: &str, paths: &Paths) -> Result<Self> {
+        let (path, backend) = match value.split_once('=') {
+            Some((p, b)) => (p.trim(), Some(b.trim().parse::<Backend>()?)),
+            None => (value.trim(), None),
+        };
+        if path.is_empty() {
+            return Err(Error::Message(
+                "extra_manifest needs a path (defaults.conf)".into(),
+            ));
+        }
+        let p = Path::new(path);
+        let path = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            paths.manifest_dir.join(p)
+        };
+        Ok(Self { path, backend })
+    }
+}
+
+/// The extra manifests this machine records, in defaults.conf order.
+///
+/// Fails closed on a line it cannot read: an unusable entry means the operator
+/// believes a file is being checked that is not, which is the fault this whole
+/// concept exists to prevent.
+pub fn load_extra_manifests(paths: &Paths) -> Result<Vec<ExtraManifest>> {
+    load_defaults_all(paths, "extra_manifest")
+        .iter()
+        .map(|v| ExtraManifest::parse(v, paths))
+        .collect()
 }
 
 pub fn load_auth_mode(paths: &Paths) -> AuthMode {
@@ -687,6 +776,83 @@ mod tests {
         fs::create_dir_all(&paths.config_dir).unwrap();
         fs::write(&paths.defaults_file, "auth_mode = prompt\n").unwrap();
         assert_eq!(load_auth_mode(&paths), AuthMode::Prompt);
+    }
+
+    #[test]
+    fn extra_manifests_are_read_in_file_order_and_may_name_a_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.defaults_file,
+            "default_backend = onepassword
+             extra_manifest = /srv/orchestration/env.tpl
+             extra_manifest = /etc/other/refs.env = plainfile
+",
+        )
+        .unwrap();
+        let extras = load_extra_manifests(&paths).unwrap();
+        assert_eq!(extras.len(), 2);
+        assert_eq!(extras[0].path, PathBuf::from("/srv/orchestration/env.tpl"));
+        assert_eq!(extras[0].backend, None);
+        assert_eq!(extras[1].backend, Some(Backend::Plainfile));
+    }
+
+    #[test]
+    fn a_relative_extra_manifest_resolves_like_a_harness_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.defaults_file,
+            "extra_manifest = other.env.tpl
+",
+        )
+        .unwrap();
+        let extras = load_extra_manifests(&paths).unwrap();
+        assert_eq!(extras[0].path, paths.manifest_dir.join("other.env.tpl"));
+    }
+
+    #[test]
+    fn an_unreadable_extra_manifest_line_fails_closed() {
+        // Reporting green because a line could not be parsed is the exact
+        // shape of the fault this concept exists to prevent.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.defaults_file,
+            "extra_manifest = /x = nosuch
+",
+        )
+        .unwrap();
+        assert!(load_extra_manifests(&paths).is_err());
+    }
+
+    #[test]
+    fn no_extra_manifest_lines_means_no_extra_manifests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.defaults_file,
+            "auth_mode = file
+",
+        )
+        .unwrap();
+        assert!(load_extra_manifests(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn extra_manifest_in_a_harness_file_says_where_it_belongs() {
+        let err = Harness::parse(
+            "claude",
+            "extra_manifest = /x
+command = claude
+",
+        )
+        .expect_err("extra_manifest is not a harness key");
+        assert!(err.to_string().contains("defaults.conf"), "{err}");
     }
 
     #[test]

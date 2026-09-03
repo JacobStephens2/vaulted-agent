@@ -107,7 +107,13 @@ fn validating_every_harness_resolves_each_one() {
     let seam = seam_with("A=op://Orchestrator/anthropic/conductor-api-key\n");
     let (ok, out) = validate(&seam, &[]);
     assert!(ok, "{out}");
-    assert!(out.contains("probe: ok (1 variable(s) resolved)"), "{out}");
+    // The manifest is named alongside the harness: several harnesses usually
+    // share one file, and "which files were checked" is the question.
+    assert!(
+        out.contains("probe (") && out.contains("m.env.tpl"),
+        "{out}"
+    );
+    assert!(out.contains("ok (1 variable(s) resolved)"), "{out}");
 }
 
 #[test]

@@ -1,3 +1,28 @@
+# Migration: `secrets validate` names the manifest on every line (unreleased)
+
+`va secrets validate` with no argument now prints the manifest alongside the
+harness, and checks every `extra_manifest` recorded in `defaults.conf` as well
+(issue #359, ADR-0006):
+
+```
+claude (/etc/vaulted-agent/manifests/full.env.tpl): ok (252 variable(s) resolved)
+/srv/orchestration/env.tpl: ok (252 variable(s) resolved)
+```
+
+The old shape was `claude: ok (252 variable(s) resolved)`. **Anything parsing
+that output needs updating**; exit status is unchanged in meaning (non-zero on
+any reference that will not resolve).
+
+**Nothing you have to do.** A machine that records no `extra_manifest` checks
+exactly the same files as before. Adding one is a line in `defaults.conf`:
+
+```conf
+extra_manifest = /srv/orchestration/env.tpl
+```
+
+A recorded manifest that is missing, unparseable, or names an unknown backend
+now fails the check rather than being skipped.
+
 # Migration: `va bash` is a harness, not the retired Bash launcher (unreleased)
 
 `va bash` is a named harness whose `command` is always `bash` (extra argv is

@@ -12,6 +12,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Alias** | Per-harness child-env rename after inject: `alias = TARGET = SOURCE` copies the resolved source secret onto TARGET (fail closed if source missing). |
 | **Env-blind agent** | Tool listed in `etc/env-blind-agents` that does not consume vault-injected process-env credentials for the usual provider path. Doctor warns; install skips vault rewire. (kimi is **not** in this list — issue #70.) |
 | **Manifest** | The file a harness points at: either **refs** (references only) or dotenv-style secret material (plainfile/sops decrypt). |
+| **Extra manifest** | A Manifest something on the machine reads that no Harness launches from (systemd units, deploy scripts). Recorded in `defaults.conf` as `extra_manifest = <path>[ = <backend>]`; validated with the harness manifests and launchable by nothing (ADR-0006). |
 | **Backend** | Where secret values come from: `bitwarden`, `onepassword`, `pass`, `sops`, `plainfile`. Typed in the runtime; unknown names fail closed. |
 | **Refs file** | Manifest of `VAR=reference` lines — Bitwarden (uuid / name: / project:) or 1Password (`op://vault/item[/section]/field`). **No secret values** on disk. |
 | **Dangling ref** | A refs-file mapping whose reference matches no secret the manager token can see — on 1Password, a missing item or a missing field. Fails the launch closed; `secrets validate` detects one, `refresh` prunes it. Distinct from a malformed ref, which is a shape problem `validate` owns. |
@@ -47,7 +48,7 @@ Agent-facing ops contract (commands, recipes, failure modes): **`AGENTS.md`**.
 2. No secret material on the agent argv.
 3. Sudo re-exec replays **original** argv so sudoers matches what the operator typed.
 4. Fail closed on unknown backend, bad var names, and placeholder refs (misconfiguration).
-5. `secrets validate` is the pre-flight gate before privileged/paid launches — must not fail open.
+5. `secrets validate` is the pre-flight gate before privileged/paid launches — must not fail open. It covers every manifest the machine reads, harness or **extra** (ADR-0006).
 6. Unreadable manager-token files are not reported as missing and do not fall through to an interactive SA-token paste.
 7. Conductor invocation must not honor `-H` or `-m` (fixed entitlement).
 
