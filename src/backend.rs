@@ -433,28 +433,53 @@ pub fn parse_op_item_field_refs(item_json: &str) -> Result<Vec<OpFieldRef>> {
     let v: serde_json::Value = serde_json::from_str(item_json)
         .map_err(|e| Error::Message(format!("op item get JSON: {e}")))?;
     let mut out: Vec<OpFieldRef> = Vec::new();
-    let Some(fields) = v.get("fields").and_then(|f| f.as_array()) else {
-        return Ok(out);
-    };
-    for f in fields {
-        let id = f
-            .get("id")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let label = f
-            .get("label")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if id.is_empty() && label.is_empty() {
-            continue;
+    if let Some(fields) = v.get("fields").and_then(|f| f.as_array()) {
+        for f in fields {
+            let id = f
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let label = f
+                .get("label")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if id.is_empty() && label.is_empty() {
+                continue;
+            }
+            out.push(OpFieldRef {
+                section: op_section_name(&v, f),
+                label,
+                id,
+            });
         }
-        out.push(OpFieldRef {
-            section: op_section_name(&v, f),
-            label,
-            id,
-        });
+    }
+    if let Some(urls) = v.get("urls").and_then(|u| u.as_array()) {
+        for u in urls {
+            let label = u
+                .get("label")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if !label.is_empty() {
+                out.push(OpFieldRef {
+                    section: None,
+                    label: label.clone(),
+                    id: label,
+                });
+            }
+            out.push(OpFieldRef {
+                section: None,
+                label: "website".to_string(),
+                id: "website".to_string(),
+            });
+            out.push(OpFieldRef {
+                section: None,
+                label: "url".to_string(),
+                id: "url".to_string(),
+            });
+        }
     }
     Ok(out)
 }

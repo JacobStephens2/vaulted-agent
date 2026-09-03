@@ -241,6 +241,7 @@ JSON
         # different secrets. The second section carries only an id.
         cat <<'JSON'
 {"id":"id-host","title":"db.example.com",
+ "urls":[{"label":"website","primary":true,"href":"db.example.com"}],
  "sections":[{"id":"s1","label":"mysql"},{"id":"s2","label":"replica"}],
  "fields":[
   {"id":"f1","label":"password","type":"CONCEALED","value":"SECRET-TOP"},

@@ -59,6 +59,7 @@ ANTHROPIC_CONDUCTOR_API_KEY=op://Orchestrator/anthropic/conductor-api-key
 ANTHROPIC_ONE_TIME=op://Orchestrator/anthropic/one-time
 ANTHROPIC_BLANK_FIELD=op://Orchestrator/anthropic/blank-field
 DB_EXAMPLE_COM_MYSQL_PASSWORD=op://Orchestrator/db.example.com/mysql/password
+DB_EXAMPLE_COM_HOST=op://Orchestrator/db.example.com/website
 FLAKY_KEY=op://Orchestrator/flaky item/api-key
 AWS_REGION=us-east-1
 PINNED=op://Orchestrator/anthropic/REPLACE_WITH_FIELD
@@ -115,6 +116,8 @@ fn prune_removes_only_what_does_not_resolve() {
         "ANTHROPIC_BLANK_FIELD=op://Orchestrator/anthropic/blank-field",
         // Section-qualified.
         "DB_EXAMPLE_COM_MYSQL_PASSWORD=op://Orchestrator/db.example.com/mysql/password",
+        // Website URL field.
+        "DB_EXAMPLE_COM_HOST=op://Orchestrator/db.example.com/website",
         // The item could not be read this run (a 502 in the fake vault). A
         // transient failure must never read as "the secret is gone".
         "FLAKY_KEY=op://Orchestrator/flaky item/api-key",
