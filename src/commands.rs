@@ -652,7 +652,7 @@ fn workdir_warning(
     workdir: Option<&str>,
     harness: &str,
 ) -> Option<String> {
-    let is_agent = matches!(harness, "claude" | "codex" | "grok" | "kimi");
+    let is_agent = matches!(harness, "claude" | "codex" | "grok" | "kimi" | "agy");
     let wd_is_caller = workdir == Some("caller");
     match (service_user, wd_is_caller) {
         (Some(svc), true) => {

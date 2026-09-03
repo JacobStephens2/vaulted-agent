@@ -1,9 +1,9 @@
 # vaulted-agent for agents
 
 You are an autonomous coding agent on a host that may use **vaulted-agent**
-(`va`) to launch Claude Code, Codex, Grok, or Kimi - or a secrets-injected
-`bash` - with vault-resolved secrets **in the child process environment** - not
-via `.env` files on disk.
+(`va`) to launch Claude Code, Codex, Grok, Kimi, or Antigravity - or a
+secrets-injected `bash` - with vault-resolved secrets **in the child process
+environment** - not via `.env` files on disk.
 
 Read this file for the operator contract. Prefer it over skimming the full README
 when you need commands, paths, and failure modes. Full reference:
@@ -69,7 +69,7 @@ elevated launches always read the machine config dir).
 | Health (as launch account) | `va doctor` (syntax / config; offline by design) |
 | Pre-flight: refs resolve in vault | `va secrets validate` (live; needs manager token; covers every harness manifest **and** every `extra_manifest`) |
 | Pre-flight: shape only | `va secrets validate --offline` |
-| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va bash` |
+| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va agy` / `va bash` |
 | **This launch only: other manifest** | `va -m readonly.env.tpl claude` |
 | Interactive pick + optional -m | `va -m narrow.env.tpl pick` |
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
@@ -96,6 +96,20 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 |------|----------------------------------|
 | `va …` | `va -p grok` or `va --prompt-auth claude` |
 | `*-conductor` | `VAULTED_AGENT_PROMPT_AUTH=1 claude-conductor …` (`-p` is the agent’s) |
+
+### Antigravity
+
+The shipped / auto Harness runs bare `agy` with `workdir = caller`, preserving
+AGY's permission settings and cwd-scoped conversations. Arguments pass through
+unchanged: `va agy --continue` (or `-c`) continues the latest conversation for
+the cwd, and `va agy --conversation <uuid>` selects one explicitly.
+
+AGY owns its OAuth login and settings under the launch account's home. When a
+Harness uses `service_user`, it does not inherit the invoking user's AGY login.
+Vaulted-agent injects the selected Manifest but does not configure AGY's
+authentication. AGY reads an injected `GEMINI_API_KEY` only when its settings
+select `modelProvider = gemini`. Authentication details:
+https://antigravity.google/docs/cli/install/
 
 ### Kimi
 

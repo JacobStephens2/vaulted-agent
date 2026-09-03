@@ -43,7 +43,7 @@ ALLOW_USER=""                    # write a sudoers rule for this user
 LINK_USER=""                     # symlink into this user's ~/.local/bin
 NO_LINK=0                        # skip the default ~/.local/bin symlink
 NO_VA=0                          # skip the short `va` alias symlink
-NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok/kimi/bash
+NO_AUTO_HARNESS=0                # skip detecting claude/codex/grok/kimi/agy/bash
 NO_SETUP=0                       # skip interactive vault backend questions
 SHORT_NAME="va"                  # short alias for vaulted-agent
 BACKEND_CHOICE=""                # onepassword|bitwarden|pass|sops|plainfile|skip
@@ -544,6 +544,14 @@ if (( ! NO_AUTO_HARNESS )); then
   else
     printf '  %-8s not found (skipped)\n' kimi
   fi
+  # Antigravity CLI (https://antigravity.google/docs/cli/) - binary name is `agy`.
+  if p="$(find_user_bin agy)"; then
+    write_auto_harness agy "$p" "agy"
+    found_any=1
+    found_agent=1
+  else
+    printf '  %-8s not found (skipped)\n' agy
+  fi
   # bash is almost always on PATH; do not treat it as an agent CLI being found.
   if p="$(find_user_bin bash)"; then
     write_auto_harness bash "$p" "bash"
@@ -554,13 +562,13 @@ if (( ! NO_AUTO_HARNESS )); then
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
     if (( found_agent )); then
-      printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi   /   va bash\n'
+      printf '  Try:  va claude   /   va codex   /   va grok   /   va kimi   /   va agy   /   va bash\n'
     else
       printf '  Try:  va bash   (secrets-injected shell; extra argv is appended)\n'
     fi
   fi
   if (( ! found_agent )); then
-    printf '  No claude/codex/grok/kimi found. Install an agent CLI, then re-run install\n'
+    printf '  No claude/codex/grok/kimi/agy found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
   fi
   unset found_any found_agent p
@@ -657,9 +665,9 @@ ensure_ref_manifest() {
   printf '  wrote %s  (add VAR=reference lines when ready)\n' "$path"
 }
 
-# Personal installs: agent sessions (claude/codex/grok/kimi) are cwd-scoped.
+# Personal installs: agent sessions (claude/codex/grok/kimi/agy) are cwd-scoped.
 # Ensure live harnesses use workdir=caller so `va grok --resume …` / `va kimi
-# --continue` match a normal launch from the same directory.
+# --continue` / `va agy --continue` match a normal launch from the same directory.
 ensure_workdir_caller() {
   local conf tmp
   shopt -s nullglob
@@ -1129,8 +1137,8 @@ if [[ -z "$REFS_MANIFEST_PATH" ]]; then
   printf '    cp %s/harnesses.d/claude.conf.example %s/harnesses.d/claude.conf\n' "$CONFIG" "$CONFIG"
 fi
 printf '  then run:  vaulted-agent   (or the short alias:  %s)\n' "$SHORT_NAME"
-printf '    e.g.  %s claude   /   %s grok   /   %s kimi   /   %s bash\n' \
-  "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME"
+printf '    e.g.  %s claude   /   %s grok   /   %s kimi   /   %s agy   /   %s bash\n' \
+  "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME" "$SHORT_NAME"
 printf '    (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
 printf '\nTo remove this install later:\n'
 printf '  sudo vaulted-agent uninstall\n'
