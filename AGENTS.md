@@ -67,7 +67,7 @@ elevated launches always read the machine config dir).
 |------|---------|
 | List harnesses | `va` |
 | Health (as launch account) | `va doctor` (syntax / config; offline by design) |
-| Pre-flight: refs resolve in vault | `va secrets validate` (live; needs manager token) |
+| Pre-flight: refs resolve in vault | `va secrets validate` (live; needs manager token; covers every harness manifest **and** every `extra_manifest`) |
 | Pre-flight: shape only | `va secrets validate --offline` |
 | Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va bash` |
 | **This launch only: other manifest** | `va -m readonly.env.tpl claude` |
@@ -218,6 +218,8 @@ Interpret carefully:
 | `Refs refresh cannot judge (…)` | Shapes prune will not touch — an unreadable ref, a placeholder, a multi-line value. `secrets validate` owns those |
 | `no secret matched name:X (VAR in <file>)` | A dangling ref hit at launch. `va refresh --prune` removes the mapping — or repairs it, if the line records a `# uuid:…` and the secret was only renamed |
 | `secrets validate` needs token / fails without | Live gate by design; use `--offline` only for shape |
+| A manifest on a validate line you did not expect | An `extra_manifest` from `defaults.conf`: a file the machine reads that no harness launches from (ADR-0006). Fix it where it lives, not in `harnesses.d` |
+| Validate FAILs on a manifest that is not on disk | An `extra_manifest` path that no longer exists. Fail-closed on purpose: correct the path or drop the line |
 | Legacy `*_ADD_MORE_*` names | Old 1Password refresh naming; still works; next refresh renames - see MIGRATION.md |
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
 | `no manager token yet and no terminal to paste one` | `setup` with `auth_mode=file` and nothing to capture; pipe it with `--set-token`, export the token, or `va auth-mode prompt` |

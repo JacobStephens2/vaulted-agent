@@ -82,7 +82,7 @@ va bash                   # interactive shell with the harness manifest
 va bash ./script.sh       # same env, run a script; not `va run`
 va doctor
 va secrets list           # Bitwarden SM (same auth as launches)
-va secrets validate           # resolves every ref against the vault
+va secrets validate           # resolves every ref in every manifest, against the vault
 va secrets validate --offline # syntax only, no token needed
 va refresh                # build/update a refs file (Bitwarden or 1Password)
 va edit-manifest          # open a refs file in $EDITOR; check on save
@@ -566,6 +566,45 @@ drop-in `key = value` files win on three:
 
 So: yes, the spacing in the examples is purely cosmetic, and no, the
 free-form-ness was never what made it safe.
+
+### Manifests nothing launches from
+
+A machine usually reads more manifests than it launches from: a refs file that
+systemd units, a deploy script, or a status page resolve for themselves. No
+harness names it, so `va secrets validate` — the check you run after touching
+the vault — never looked at it, and reported every harness green while the
+units reading that file were down. That is what happened on 2026-09-03: a
+deleted vault item took four units out for six hours, and the documented gate
+said everything was fine.
+
+Record those files, repeatably, and validate covers them:
+
+```conf
+# /etc/vaulted-agent/defaults.conf
+extra_manifest = /srv/orchestration/env.tpl
+extra_manifest = /etc/other/refs.env = plainfile
+```
+
+A relative path resolves against the manifest directory; the backend defaults
+to `default_backend` and may be named per entry. `va secrets validate` then
+names every file it checked, pass or fail, and exits non-zero on any reference
+it could not resolve — so it is usable from a timer:
+
+```
+claude (/etc/vaulted-agent/manifests/full.env.tpl): ok (252 variable(s) resolved)
+/srv/orchestration/env.tpl: FAIL (…)
+    CLOUD_BEAVER_DB_ADMIN_PASSWORD
+      op://Orchestrator/db-admin/password
+```
+
+An extra manifest is validated and nothing else. It has no command, does not
+appear in `va` or `va pick`, and cannot be launched — see
+[ADR-0006](docs/adr/0006-validate-every-manifest-the-machine-reads.md). A
+recorded path that is missing, or a line that cannot be parsed, is a failure
+rather than a skip: an operator who lists a file believes it is being checked.
+
+This covers references in *manifests*. A script that calls `op read` directly
+is outside any manifest and outside this check.
 
 ## Backends
 

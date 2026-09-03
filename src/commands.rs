@@ -523,14 +523,35 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
             let target = positional.first().copied();
             match target {
                 None => {
-                    let mut err = false;
-                    let names = list_harness_names(paths)?;
+                    // Everything this machine reads, not everything it
+                    // launches. The manifest an operator forgets is exactly
+                    // the one nothing launches from, and a gate that walks
+                    // launch profiles alone reports it green while the units
+                    // that read it are down.
                     let be_default = default_backend(paths);
-                    for name in names {
+                    let mut targets: Vec<(String, Backend, PathBuf)> = Vec::new();
+                    for name in list_harness_names(paths)? {
                         let h = Harness::load(paths, &name)?;
-                        let be = h.backend.unwrap_or(be_default);
                         let man_path = h.resolve_manifest_path(paths);
-                        print!("{name}: ");
+                        // The manifest is named on every line because several
+                        // harnesses commonly share one file: six green
+                        // harnesses can be one file checked six times, and the
+                        // operator cannot see which files were covered
+                        // otherwise.
+                        let label = format!("{name} ({})", man_path.display());
+                        targets.push((label, h.backend.unwrap_or(be_default), man_path));
+                    }
+                    // Fails closed on an entry it cannot read: an unusable
+                    // line means a file the operator believes is checked is
+                    // not being checked.
+                    for extra in crate::config::load_extra_manifests(paths)? {
+                        let label = extra.path.display().to_string();
+                        targets.push((label, extra.backend.unwrap_or(be_default), extra.path));
+                    }
+
+                    let mut err = false;
+                    for (label, be, man_path) in targets {
+                        print!("{label}: ");
                         match validate_manifest_against_vault(paths, be, &man_path, offline) {
                             Ok(n) => println!("{}", format_validate_ok(n)),
                             Err(e) => {
