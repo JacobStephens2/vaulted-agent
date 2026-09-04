@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "vaulted-agent"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "rpassword",
  "serde_json",
