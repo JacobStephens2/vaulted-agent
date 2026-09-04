@@ -1,3 +1,17 @@
+# Migration: `va update` replaces the installed binary (unreleased)
+
+`va update` downloads a GitHub release asset for this OS/arch and overwrites
+the running launcher (`current_exe`, usually `/usr/local/bin/vaulted-agent`).
+Default target is `VAULTED_AGENT_VERSION`, else the latest GitHub release.
+`va update v0.4.20` pins. `--check` and `--dry-run` write nothing.
+
+This is not `install.sh`. Harnesses, manifests, and token files stay put. If
+the dest is not writable, it retries with `sudo install`. `va` and
+`*-conductor` links keep working because they point at the same binary.
+
+A host that does not yet have this command still bootstraps with
+`curl -fsSL https://vaultedagent.com/install.sh | bash`.
+
 # Migration: `secrets validate` names the manifest on every line (unreleased)
 
 `va secrets validate` with no argument now prints the manifest alongside the

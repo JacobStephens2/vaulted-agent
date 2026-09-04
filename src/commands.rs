@@ -1,4 +1,4 @@
-//! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, pick, run.
+//! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, update, pick, run.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -2100,6 +2100,10 @@ fn user_home(user: &str) -> Option<PathBuf> {
     }
 }
 
+pub fn cmd_update(args: &[String]) -> Result<()> {
+    crate::update::cmd_update(args)
+}
+
 pub fn cmd_uninstall(args: &[String]) -> Result<()> {
     let mut purge = false;
     let mut dry = false;
@@ -2465,6 +2469,7 @@ pub fn usage(paths: &Paths) {
          \x20      vaulted-agent edit-manifest [name]\n\
          \x20      vaulted-agent auth-mode [mode]\n\
          \x20      vaulted-agent version\n\
+         \x20      vaulted-agent update [VERSION]\n\
          \x20      vaulted-agent uninstall [opts]\n\
          \nlauncher flags:  --prompt-auth|-p   prompt for vault token this launch\n\
          \x20                --manifest|-m     launch the harness against this manifest\n\
@@ -2743,6 +2748,7 @@ pub fn is_reserved(name: &str, paths: &Paths) -> bool {
         "doctor",
         "secrets",
         "uninstall",
+        "update",
         "pick",
         "run",
         "edit-manifest",

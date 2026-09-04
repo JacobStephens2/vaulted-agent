@@ -11,6 +11,7 @@ pub mod privilege;
 pub mod refs;
 pub mod resume;
 pub mod secret;
+pub mod update;
 pub mod validate;
 
 pub use config::{list_harness_names, load_auth_mode, AuthMode, Backend, Harness, Paths};

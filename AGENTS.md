@@ -80,6 +80,7 @@ elevated launches always read the machine config dir).
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
+| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.20` |
 | Uninstall | `sudo va uninstall` |
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
@@ -89,6 +90,11 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 `va bash` is a harness whose command is always bash; extra argv is appended
 (`va bash ./script.sh`). It is not `va run` (any program) and not a retired
 `*-orchestrator` wrapper.
+
+`va update` replaces the installed launcher binary from a GitHub release asset
+(same stems as `install-remote.sh`). It does not re-run `install.sh` and does
+not change harnesses or manifests. `--check` / `--dry-run` write nothing. If
+the dest is not writable: `sudo va update`.
 
 ### Prompt auth
 
