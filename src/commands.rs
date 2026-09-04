@@ -2465,6 +2465,7 @@ pub fn usage(paths: &Paths) {
          \x20      vaulted-agent edit-manifest [name]\n\
          \x20      vaulted-agent auth-mode [mode]\n\
          \x20      vaulted-agent version\n\
+         \x20      vaulted-agent update [VERSION]\n\
          \x20      vaulted-agent uninstall [opts]\n\
          \nlauncher flags:  --prompt-auth|-p   prompt for vault token this launch\n\
          \x20                --manifest|-m     launch the harness against this manifest\n\
@@ -2743,6 +2744,7 @@ pub fn is_reserved(name: &str, paths: &Paths) -> bool {
         "doctor",
         "secrets",
         "uninstall",
+        "update",
         "pick",
         "run",
         "edit-manifest",

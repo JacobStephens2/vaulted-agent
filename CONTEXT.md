@@ -40,7 +40,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 
 The **CLI** is the primary and sole public acceptance seam (story #50). Library modules support the binary; they are not a second product API.
 
-Management verbs: `setup`, `refresh`, `secrets`, `doctor`, `auth-mode`, `run`, `pick`, `uninstall`, `version`.
+Management verbs: `setup`, `refresh`, `secrets`, `doctor`, `auth-mode`, `run`, `pick`, `uninstall`, `update`, `version`.
 
 Agent-facing ops contract (commands, recipes, failure modes): **`AGENTS.md`**.
 

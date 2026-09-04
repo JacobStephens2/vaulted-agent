@@ -90,6 +90,8 @@ va secrets validate --offline # syntax only, no token needed
 va refresh                # build/update a refs file (Bitwarden or 1Password)
 va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
+va update                 # replace the installed binary from the latest GitHub release
+va update v0.4.20         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
 
