@@ -22,8 +22,10 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Renamed ref** | A refs mapping whose reference matches nothing but whose source recording names a secret still visible under a different key. Repaired in place — reference rewritten, **variable name kept** — not pruned. Distinct from a dangling ref, where the secret is genuinely gone. |
 | **Manager token** | Vault *manager* credential (`BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`). Used only to resolve secrets; must never appear in the child agent env. |
 | **Secret value** | A resolved secret destined for the child environment. Redacted on Display/Debug. |
+| **Agent-owned credential** | Authentication state created, stored, and consumed by the launched agent itself. Outside launcher manifest resolution and rotation; distinct from a Manager token or an injected Secret value. |
 | **Auth mode** | How the manager token is obtained: `file` (token file on disk) or `prompt` (TTY each launch). |
 | **Token capture** | `setup`-only path that obtains a manager token (TTY paste, or piped stdin under `--set-token`), verifies it against the backend, then writes the token file. Distinct from load: never runs on the launch path, and never fires for an unreadable existing token file (invariant 6). |
+| **Operator identity** | The human on whose behalf a Harness is launched; determines personal agent state and source-control attribution. Distinct from the Service user that executes the process. |
 | **Service user** | Optional dedicated OS account; launcher re-execs via `sudo -u` so the agent runs as that user. |
 | **Conductor link** | Symlink `*-conductor` → fixed harness name; `-H` must not override (narrow entitlement). |
 | **Launch path** | scrub → resolve → drop manager token → exec (story #44: keep small and auditable). |

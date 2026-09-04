@@ -106,3 +106,26 @@ fn doctor_warns_when_caller_cwd_is_untraversable() {
     perms.set_mode(0o755);
     fs::set_permissions(&blocked, perms).unwrap();
 }
+
+#[test]
+fn doctor_treats_agy_as_a_cwd_scoped_agent() {
+    let seam = CliSeam::new();
+    fs::write(seam.config_dir.join("manifests/empty.env"), "\n").unwrap();
+    fs::write(
+        seam.config_dir.join("harnesses.d/agy.conf"),
+        "backend = plainfile\nmanifest = empty.env\ncommand = true\n",
+    )
+    .unwrap();
+
+    let out = seam.vaulted_agent().arg("doctor").output().expect("doctor");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("harness: agy")
+            && combined.contains("WARN: agent harness without workdir=caller"),
+        "Doctor must protect AGY's cwd-scoped conversations:\n{combined}"
+    );
+}

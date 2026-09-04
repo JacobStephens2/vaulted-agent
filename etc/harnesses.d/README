@@ -32,8 +32,10 @@ Recognised keys, all optional except command and manifest:
     va grok --resume 019fabc1-…     |  va grok resume 019fabc1-…
     va claude --resume b03ca221-…   |  va claude resume b03ca221-…
     va codex resume 019fabc2-…      |  va codex --resume 019fabc2-…
+    va agy --continue               |  va agy --conversation <uuid>
     va bash                         |  va bash ./script.sh
   Shape is normalized per agent: codex wants `resume`; claude/grok want `--resume`.
+  AGY keeps its native conversation arguments unchanged.
   `va bash` is a harness (command is always bash). It is not `va run`.
 
 Whitespace around the key, the `=`, and the value is ignored, so align them

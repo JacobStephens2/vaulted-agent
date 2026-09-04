@@ -3,7 +3,7 @@
 [![CI](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent)](https://github.com/JacobStephens2/vaulted-agent/releases/latest)
 
-Give Claude Code, Codex, Grok, and Kimi Code real vault credentials
+Give Claude Code, Codex, Grok, Kimi Code, and Antigravity real vault credentials
 **in-process** - without leaving a pile of `.env` files on disk.
 (Kimi Code 0.33+ currently needs `env = KIMI_CODE_LEGACY_FLAG = 1` on the
 harness until [kimi-code#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)
@@ -36,7 +36,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 ```
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
-`grok`, `kimi`) and `bash`, and can ask for a vault backend + auth mode. Pin:
+`grok`, `kimi`, `agy`) and `bash`, and can ask for a vault backend + auth mode. Pin:
 `VAULTED_AGENT_VERSION=v0.4.19` (or `latest`).
 
 ### 2. Wire a vault
@@ -62,6 +62,7 @@ va claude
 va codex
 va grok
 va kimi           # --auto; vault inject OPENAI_API_KEY (by provider type); see AGENTS.md
+va agy            # bare AGY; native permissions, authentication, and conversation args
 va bash           # secrets-injected shell; extra argv is appended
 va bash ./script.sh
 ```
@@ -78,6 +79,8 @@ va                        # list harnesses
 va pick                   # interactive menu
 va -m readonly.env.tpl claude   # this launch only, against another manifest
 va claude --resume <id>   # agent args pass through; resume shape is normalized
+va agy --continue          # AGY arguments pass through unchanged; short form: -c
+va agy --conversation <id>
 va bash                   # interactive shell with the harness manifest
 va bash ./script.sh       # same env, run a script; not `va run`
 va doctor
@@ -89,6 +92,11 @@ va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
 sudo va uninstall
 ```
+
+AGY owns its login and settings under the launch account's home. A launch under
+`service_user` does not inherit the invoking user's AGY login. Vaulted-agent
+injects the Harness manifest, but AGY uses an injected `GEMINI_API_KEY` only
+when its own settings select `modelProvider = gemini`; see [AGENTS.md](AGENTS.md).
 
 **Building a refs file from 1Password.** `va refresh` lists the items the token
 can see and asks which to include; each chosen item's fields become
@@ -307,7 +315,7 @@ config file you have edited. Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you (writes `service_user` in defaults.conf when explicit) |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
-| `--no-auto-harness` | do not detect claude/codex/grok/kimi/bash or write live harnesses |
+| `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/bash or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Sets `default_backend` in `defaults.conf` and the summary’s token path (`bws.env` vs `op.env`) |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
@@ -510,10 +518,11 @@ command  = claude --permission-mode auto
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 
-See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi`
+See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi|agy`
 resume examples. Native CLIs still differ without `va`: Claude/Grok use
 `--resume`; Codex uses the `resume` subcommand; Kimi Code uses `--continue` /
-`--session` (and accepts `--resume` as an alias).
+`--session` (and accepts `--resume` as an alias). AGY keeps its native
+`--continue` / `-c` and `--conversation <id>` arguments unchanged under `va`.
 
 Whitespace around the key, the `=`, and the value is ignored, so align them
 however you like. Your own arguments are appended after the configured ones.
