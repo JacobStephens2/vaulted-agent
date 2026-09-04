@@ -15,7 +15,7 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [vaultedagent.com](https://vaultedagent.com/) ·
-Latest: [v0.4.19](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.19)
+Latest: [v0.4.20](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.20)
 (Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
@@ -37,7 +37,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 `grok`, `kimi`, `agy`) and `bash`, and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.19` (or `latest`).
+`VAULTED_AGENT_VERSION=v0.4.20` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -227,7 +227,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.4.19](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.19)
+Latest: [v0.4.20](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.20)
 
 ## The honest claim
 

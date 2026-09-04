@@ -12,13 +12,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.19**
+Current release pin (product install): **v0.4.20**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.19 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.19 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.20 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.20 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
