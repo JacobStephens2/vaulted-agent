@@ -144,15 +144,13 @@ pub fn cmd_update(args: &[String]) -> Result<()> {
 
     let work = work_dir()?;
     let extracted = match env::var_os("VAULTED_AGENT_UPDATE_ASSET") {
-        Some(p) => extract_tarball(Path::new(&p), &work)?,
+        Some(p) => {
+            let bin = extract_tarball(Path::new(&p), &work)?;
+            prepare_bin(&bin)?;
+            bin
+        }
         None => download_asset(&tag, &work)?,
     };
-
-    fs::set_permissions(&extracted, fs::Permissions::from_mode(0o755)).map_err(|e| Error::Io {
-        path: extracted.clone(),
-        source: e,
-    })?;
-    verify_runs(&extracted)?;
 
     if opts.dry_run {
         println!(
@@ -294,7 +292,15 @@ fn try_asset(tag: &str, asset_name: &str, work: &Path) -> Result<PathBuf> {
     } else {
         eprintln!("  warning: no .sha256 asset; installing without checksum verification");
     }
-    extract_tarball(&tgz, work)
+    let bin = extract_tarball(&tgz, work)?;
+    // Same as install-remote.sh try_asset: a stem that will not start is the
+    // wrong candidate, not a hard failure. Drop it and let the caller try
+    // the next name (musl then gnu on Linux).
+    if let Err(e) = prepare_bin(&bin) {
+        let _ = fs::remove_file(&bin);
+        return Err(e);
+    }
+    Ok(bin)
 }
 
 fn curl_to_file(url: &str, dest: &Path) -> Result<String> {
@@ -393,17 +399,30 @@ fn extract_tarball(tgz: &Path, work: &Path) -> Result<PathBuf> {
     ))
 }
 
-fn verify_runs(bin: &Path) -> Result<()> {
+fn prepare_bin(bin: &Path) -> Result<()> {
+    fs::set_permissions(bin, fs::Permissions::from_mode(0o755)).map_err(|e| Error::Io {
+        path: bin.to_path_buf(),
+        source: e,
+    })?;
     let status = Command::new(bin)
         .arg("version")
         .status()
         .map_err(|e| Error::Message(format!("update: new binary will not start: {e}")))?;
     if !status.success() {
-        return Err(Error::Message(
-            "update: new binary `version` failed; not installing it".into(),
-        ));
+        return Err(Error::Message(format!(
+            "update: {} does not run on this host; skipping it",
+            bin.display()
+        )));
     }
     Ok(())
+}
+
+fn dest_sibling(dest: &Path, suffix: &str) -> PathBuf {
+    let name = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "vaulted-agent".into());
+    dest.with_file_name(format!("{name}.{suffix}"))
 }
 
 fn install_over(src: &Path, dest: &Path) -> Result<()> {
@@ -415,12 +434,7 @@ fn install_over(src: &Path, dest: &Path) -> Result<()> {
             })?;
         }
     }
-    let staged = dest.with_file_name(format!(
-        "{}.new",
-        dest.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "vaulted-agent".into())
-    ));
+    let staged = dest_sibling(dest, "new");
     if let Err(e) = fs::copy(src, &staged) {
         if e.kind() == ErrorKind::PermissionDenied {
             return sudo_install(src, dest);
@@ -440,12 +454,7 @@ fn install_over(src: &Path, dest: &Path) -> Result<()> {
         Err(e) => {
             // Running dest on some hosts refuses a direct overwrite. Move it
             // aside first, then put the new file on the original name.
-            let bak = dest.with_file_name(format!(
-                "{}.old",
-                dest.file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "vaulted-agent".into())
-            ));
+            let bak = dest_sibling(dest, "old");
             if fs::rename(dest, &bak).is_ok() {
                 match fs::rename(&staged, dest) {
                     Ok(()) => {
@@ -548,5 +557,68 @@ mod tests {
     fn parse_latest_tag_reads_tag_name() {
         let json = r#"{"tag_name":"v0.4.20","draft":false}"#;
         assert_eq!(parse_latest_tag(json).unwrap(), "v0.4.20");
+    }
+
+    #[test]
+    fn dest_sibling_keeps_the_basename() {
+        let dest = Path::new("/usr/local/bin/vaulted-agent");
+        assert_eq!(
+            dest_sibling(dest, "new"),
+            Path::new("/usr/local/bin/vaulted-agent.new")
+        );
+        assert_eq!(
+            dest_sibling(dest, "old"),
+            Path::new("/usr/local/bin/vaulted-agent.old")
+        );
+    }
+
+    /// install-remote.sh is the hosted bootstrap: it cannot read a repo data
+    /// file before the tarball exists. The stems still have to match. Drive
+    /// `detect_assets` with a mocked `uname` and compare to `asset_names`.
+    #[test]
+    fn asset_names_match_install_remote_detect_assets() {
+        let pairs = [
+            ("linux", "x86_64", "Linux", "x86_64"),
+            ("linux", "aarch64", "Linux", "aarch64"),
+            ("linux", "aarch64", "Linux", "arm64"),
+            ("macos", "x86_64", "Darwin", "x86_64"),
+            ("macos", "aarch64", "Darwin", "arm64"),
+        ];
+        for (os, arch, uname_s, uname_m) in pairs {
+            let rust = asset_names(os, arch).unwrap();
+            let shell = shell_detect_assets(uname_s, uname_m);
+            assert_eq!(
+                rust, shell,
+                "asset_names({os}, {arch}) vs detect_assets uname -s {uname_s} -m {uname_m}"
+            );
+        }
+    }
+
+    fn shell_detect_assets(uname_s: &str, uname_m: &str) -> Vec<String> {
+        let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/install-remote.sh"));
+        let start = src
+            .find("detect_assets() {")
+            .expect("detect_assets in install-remote.sh");
+        let rest = &src[start..];
+        let end = rest.find("\n}\n").expect("end of detect_assets");
+        let func = &rest[..=end + 1];
+        let script = format!(
+            "{func}\nuname() {{ case \"$1\" in -s) printf '%s\\n' '{uname_s}';; -m) printf '%s\\n' '{uname_m}';; esac; }}\ndetect_assets\n"
+        );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run detect_assets");
+        assert!(
+            out.status.success(),
+            "detect_assets {uname_s}:{uname_m}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|s| s.to_string())
+            .collect()
     }
 }

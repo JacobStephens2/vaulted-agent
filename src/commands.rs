@@ -1,4 +1,4 @@
-//! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, update, pick, run.
+//! Management subcommands: secrets, doctor, setup, refresh, auth-mode, uninstall, pick, run.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -2098,10 +2098,6 @@ fn user_home(user: &str) -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(home))
     }
-}
-
-pub fn cmd_update(args: &[String]) -> Result<()> {
-    crate::update::cmd_update(args)
 }
 
 pub fn cmd_uninstall(args: &[String]) -> Result<()> {
