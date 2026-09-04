@@ -12,13 +12,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.20**
+Current release pin (product install): **v0.4.21**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.20 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.20 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.21 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.21 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
@@ -80,7 +80,7 @@ elevated launches always read the machine config dir).
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
-| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.20` |
+| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.21` |
 | Uninstall | `sudo va uninstall` |
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
