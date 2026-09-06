@@ -1,3 +1,24 @@
+# Migration: glued Bitwarden refs from bash 0.3.0 `va refresh` (unreleased)
+
+`va refresh` on the bash launcher (v0.3.0) captured each new `VAR=name:KEY`
+line with `$(…)`, which strips the trailing newline, then concatenated. A
+refs file could end up with one physical line:
+
+```
+META_AI_API_KEY=name:META_AI_API_KEYFIREWORKS_API_KEY=name:FIREWORKS_API_KEY…
+```
+
+Launch used to send that blob to the vault and fail with `no secret matched
+'name:META_AI_API_KEYFIREWORKS_API_KEY=name:…'`.
+
+**What to do.** `va refresh` now splits those mappings onto their own lines
+(even when every secret already appears as a substring, so a second refresh
+is not a no-op). `va doctor` and `va secrets validate --offline` fail closed
+on the glued shape and print the recovered lines.
+
+A host still running the 0.3.0 bash binary will re-glue on the next merge
+refresh. `va update` (or a reinstall) is the way off that writer.
+
 # Migration: `va update` replaces the installed binary (unreleased)
 
 `va update` downloads a GitHub release asset for this OS/arch and overwrites
