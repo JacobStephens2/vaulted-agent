@@ -200,6 +200,7 @@ va run -m openai.env.refs --backend bitwarden -p -- \
 | Rotated a value | Nothing — next launch fetches live |
 | Added a secret you want mapped | `va refresh` (merge) or `va refresh --replace --all` |
 | Renamed or removed a secret | `va refresh --prune` (removes mappings nothing resolves; repairs renamed ones on Bitwarden) |
+| Launch fails on a huge `name:KEYOTHER=name:OTHER` ref | `va refresh` (splits the bash 0.3.0 glued line) |
 | Removed or fixed a mapping | `va edit-manifest` (checks on save) or edit the refs file by hand |
 
 **Install options** (clone, shared host, flags): [Install details](#install-details).  
