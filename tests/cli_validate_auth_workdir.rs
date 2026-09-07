@@ -99,6 +99,39 @@ fn secrets_validate_accepts_name_ref() {
 }
 
 #[test]
+fn secrets_validate_offline_rejects_glued_name_refs() {
+    // Bash 0.3.0 refresh glued VAR=name:KEY lines together. Offline validate
+    // must fail closed on the shape, not send the blob to the vault.
+    let seam = CliSeam::new();
+    fs::write(
+        seam.config_dir.join("manifests/glued.env.refs"),
+        "META_AI_API_KEY=name:META_AI_API_KEYFIREWORKS_API_KEY=name:FIREWORKS_API_KEY\n",
+    )
+    .unwrap();
+    write_plain_harness(
+        &seam,
+        "grok",
+        "backend = bitwarden\nmanifest = glued.env.refs\ncommand = true\n",
+    );
+    let out = seam
+        .vaulted_agent()
+        .args(["secrets", "validate", "grok", "--offline"])
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("glued onto one line"), "{err}");
+    assert!(
+        err.contains("FIREWORKS_API_KEY=name:FIREWORKS_API_KEY"),
+        "{err}"
+    );
+}
+
+#[test]
 fn secrets_validate_without_a_token_fails_rather_than_passing_blind() {
     // The behaviour change that matters: a gate that cannot reach the vault
     // must say so, not report ok. Before this, no token meant a syntax check

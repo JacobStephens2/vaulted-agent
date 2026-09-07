@@ -83,6 +83,29 @@ pub fn validate_bitwarden_ref(var: &str, r: &str) -> Result<()> {
     if r.is_empty() {
         return Err(Error::Message(format!("empty reference for {var}")));
     }
+    // None of the four Bitwarden reference forms contain `=`. A second
+    // `VAR=name:KEY` glued onto this one is the bash 0.3.0 refresh merge
+    // (command substitution strips the trailing newline). Fail closed with
+    // the recovered lines rather than sending the blob to the vault.
+    if r.contains('=') {
+        let glued = format!("{var}={r}");
+        if let Some(parts) = crate::refs::split_glued_bitwarden_line(&glued) {
+            let listed = parts
+                .iter()
+                .map(|p| format!("  {p}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(Error::Message(format!(
+                "{var} looks like several mappings glued onto one line \
+                 (va 0.3.0 refresh merge dropped the newlines). \
+                 Split each onto its own line:\n{listed}\n\
+                 Or run: vaulted-agent refresh"
+            )));
+        }
+        return Err(Error::Message(format!(
+            "{var} bad bitwarden ref {r} (a reference cannot contain '=')"
+        )));
+    }
     if let Some(rest) = r.strip_prefix("uuid:") {
         if !is_uuid(rest) {
             return Err(Error::Message(format!(
@@ -430,5 +453,30 @@ GOOD=op://Vault/item/field\n\
         // Invariant 4: the reference itself is what must be real.
         let text = "A=name: # uuid:11111111-1111-1111-1111-111111111111\n";
         assert!(validate_manifest_text(text, Backend::Bitwarden).is_err());
+    }
+
+    #[test]
+    fn a_glued_0_3_0_refresh_line_fails_closed_with_the_recovered_mappings() {
+        // The launch used to send the whole blob to the vault and report
+        // `no secret matched 'name:META_AI_API_KEYFIREWORKS_API_KEY=name:…'`.
+        // Shape is validate's job (CONTEXT.md: malformed ref).
+        let text = "META_AI_API_KEY=name:META_AI_API_KEYFIREWORKS_API_KEY=name:FIREWORKS_API_KEYELEVENLABS_API_KEY=name:ELEVENLABS_API_KEY\n";
+        let err = validate_manifest_text(text, Backend::Bitwarden)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("glued onto one line"), "{err}");
+        assert!(
+            err.contains("META_AI_API_KEY=name:META_AI_API_KEY"),
+            "{err}"
+        );
+        assert!(
+            err.contains("FIREWORKS_API_KEY=name:FIREWORKS_API_KEY"),
+            "{err}"
+        );
+        assert!(
+            err.contains("ELEVENLABS_API_KEY=name:ELEVENLABS_API_KEY"),
+            "{err}"
+        );
+        assert!(err.contains("vaulted-agent refresh"), "{err}");
     }
 }

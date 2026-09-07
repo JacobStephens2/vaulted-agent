@@ -1199,17 +1199,27 @@ fn refresh_bitwarden(
             println!("Wrote refs file (replace): {}", path.display());
         }
         _ => {
-            let added = refs::write_refs_merge(
+            let merge = refs::write_refs_merge(
                 &path,
                 &secrets,
                 indices.as_deref(),
                 "vaulted-agent refresh",
             )?;
-            if added == 0 {
-                println!("No new mappings to add: {}", path.display());
+            if merge.recovered > 0 {
+                println!(
+                    "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh): {}",
+                    merge.recovered,
+                    path.display()
+                );
+            }
+            if merge.added == 0 {
+                if merge.recovered == 0 {
+                    println!("No new mappings to add: {}", path.display());
+                }
             } else {
                 println!(
-                    "Updated refs file (+{added} mapping(s)): {}",
+                    "Updated refs file (+{} mapping(s)): {}",
+                    merge.added,
                     path.display()
                 );
             }
@@ -1936,8 +1946,14 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
     let man_path = default_bitwarden_manifest(paths)?;
     fs::create_dir_all(&paths.manifest_dir).ok();
     if man_path.is_file() {
-        let added = refs::write_refs_merge(&man_path, &secrets, None, "vaulted-agent setup")?;
-        println!("Merged into {} (+{added})", man_path.display());
+        let merge = refs::write_refs_merge(&man_path, &secrets, None, "vaulted-agent setup")?;
+        if merge.recovered > 0 {
+            println!(
+                "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh)",
+                merge.recovered
+            );
+        }
+        println!("Merged into {} (+{})", man_path.display(), merge.added);
     } else {
         refs::write_refs_replace(&man_path, &secrets, None, "vaulted-agent setup")?;
         println!("Wrote {}", man_path.display());
