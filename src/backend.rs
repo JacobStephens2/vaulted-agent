@@ -94,8 +94,7 @@ pub fn parse_bws_list_json(list_json: &str) -> Result<Vec<(String, String, Strin
     Ok(rows)
 }
 
-fn parse_bws_ref(list_json: &str, r: &str) -> Result<String> {
-    let rows = parse_bws_list_json(list_json)?;
+fn parse_bws_ref(rows: &[(String, String, String)], r: &str) -> Result<String> {
     if let Some(want_name) = r.strip_prefix("name:") {
         let matches: Vec<_> = rows.iter().filter(|(_, k, _)| k == want_name).collect();
         if matches.is_empty() {
@@ -121,13 +120,30 @@ fn parse_bws_ref(list_json: &str, r: &str) -> Result<String> {
     Err(Error::Message(format!("bad bitwarden ref {r}")))
 }
 
-fn bws_resolve_ref_to_id(token: &ManagerToken, r: &str) -> Result<String> {
-    let bare = r.strip_prefix("uuid:").unwrap_or(r);
-    if is_uuid(bare) {
-        return Ok(bare.to_string());
+/// Lookup metadata lives only for one resolution; UUIDs need no listing.
+struct BwsRefResolver<'a> {
+    token: &'a ManagerToken,
+    rows: Option<Vec<(String, String, String)>>,
+}
+
+impl<'a> BwsRefResolver<'a> {
+    fn new(token: &'a ManagerToken) -> Self {
+        Self { token, rows: None }
     }
-    let list = bws_list_json(token)?;
-    parse_bws_ref(&list, r)
+
+    fn resolve_id(&mut self, r: &str) -> Result<String> {
+        let bare = r.strip_prefix("uuid:").unwrap_or(r);
+        if is_uuid(bare) {
+            return Ok(bare.to_string());
+        }
+        let rows = match self.rows {
+            Some(ref rows) => rows,
+            None => self
+                .rows
+                .insert(parse_bws_list_json(&bws_list_json(self.token)?)?),
+        };
+        parse_bws_ref(rows, r)
+    }
 }
 
 /// Extract secret value from `bws secret get --output json`.
@@ -151,7 +167,7 @@ fn bws_get_value(token: &ManagerToken, id: &str) -> Result<String> {
 
 /// Resolve a bitwarden ref to secret id (for secrets get).
 pub fn bws_resolve_ref(token: &ManagerToken, r: &str) -> Result<String> {
-    bws_resolve_ref_to_id(token, r)
+    BwsRefResolver::new(token).resolve_id(r)
 }
 
 /// Fetch secret value by id (for secrets get).
@@ -165,9 +181,11 @@ pub fn resolve_bitwarden(
 ) -> Result<HashMap<String, SecretValue>> {
     let pairs: Vec<(String, String)> = validate_manifest_file(manifest, Backend::Bitwarden)?;
     let mut out = HashMap::new();
+    let mut resolver = BwsRefResolver::new(token);
     for (var, r) in pairs {
-        let id =
-            bws_resolve_ref_to_id(token, &r).map_err(|e| name_the_manifest(manifest, &var, e))?;
+        let id = resolver
+            .resolve_id(&r)
+            .map_err(|e| name_the_manifest(manifest, &var, e))?;
         let value = bws_get_value(token, &id)?;
         out.insert(var, SecretValue::new(value));
     }
@@ -765,7 +783,8 @@ mod tests {
     #[test]
     fn parse_name_ref() {
         let j = r#"[{"id":"id1","key":"openai-api-key","project":{"name":"tools"}}]"#;
-        assert_eq!(parse_bws_ref(j, "name:openai-api-key").unwrap(), "id1");
+        let rows = parse_bws_list_json(j).unwrap();
+        assert_eq!(parse_bws_ref(&rows, "name:openai-api-key").unwrap(), "id1");
     }
 
     #[test]

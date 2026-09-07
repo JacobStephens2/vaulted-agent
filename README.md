@@ -767,9 +767,12 @@ Wrong token types fail with errors such as â€œDoesn't contain a decryption key.â
 | `name:` | `OPENAI_API_KEY=name:openai-api-key` |
 | `project:/` | `OPENAI_API_KEY=project:tools/openai-api-key` |
 
-Names resolve via `bws secret list` once per process. Prefer
-`vaulted-agent secrets list` / `vaulted-agent setup` over raw `bws` so auth
-matches launches.
+Names and project-qualified references share one `bws secret list` per manifest
+resolution. UUID-only and empty manifests need no listing. Lookup metadata is
+kept only for that resolution; each launch fetches current vault state and still
+runs one `bws secret get` per mapping. No lookup data or secret values are cached
+between launches. Prefer `vaulted-agent secrets list` / `vaulted-agent setup`
+over raw `bws` so auth matches launches.
 
 **Refs file (what setup / refresh write).** After listing secrets, setup (or
 `va refresh`) can write a **refs file** under `/etc/vaulted-agent/manifests/`
