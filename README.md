@@ -369,7 +369,7 @@ $ vaulted-agent pick
 
    1) claude           claude --permission-mode auto           full.env.tpl
    2) claude-ro        claude --permission-mode auto           readonly.env.tpl
-   3) codex            codex -s danger-full-access -a on-r...  limited.env.tpl
+   3) codex            codex -s danger-full-access             limited.env.tpl
    4) grok             grok                                    readonly.env.tpl
 
 harness [1-4, q to quit]: 2
