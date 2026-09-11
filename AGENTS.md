@@ -229,6 +229,7 @@ Interpret carefully:
 | `op.env: missing` | File really absent (or not a file) |
 | `op.env: unreadable (… as user)` | Present but EACCES - often need `service_user` or group/ACL, **not** a paste of the vault SA token |
 | `cannot enter /home/…` | `workdir=caller` + service account cannot traverse (often `setfacl -m u:<svc>:x /home/<op>`) |
+| `Failed to read project config … Permission denied` | `workdir=caller` in an operator home where agent config (e.g. `~/.codex/config.toml`) is mode 0600 — grant service account read: `setfacl -m u:<svc>:r ~/.codex/config.toml` && `setfacl -d -m u:<svc>:r ~/.codex` |
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |
 | `could not resolve` / item named on validate or launch | Well-formed ref, vault item missing or renamed - fix the refs file or vault. Launch lists the variables implicated and suggests `secrets validate` |
 | `Dangling refs in <file>` on refresh | Mappings matching nothing the token can see - on 1Password, a missing item or field. Reported every run; exit stays 0. `--prune` removes them |

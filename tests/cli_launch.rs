@@ -166,6 +166,60 @@ fn shipped_agy_harness_injects_manifest_and_preserves_native_args() {
 }
 
 #[test]
+fn shipped_codex_harness_preserves_extra_args_without_approval_conflict() {
+    let seam = CliSeam::new();
+    let home = seam.root.join("home");
+    let home_bin = home.join(".local/bin");
+    fs::create_dir_all(&home_bin).unwrap();
+    fs::rename(seam.install_stub_agent("codex"), home_bin.join("codex")).unwrap();
+    seam.install_fake_op();
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "auth_mode = file\ndefault_backend = onepassword\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("op.env"),
+        "OP_SERVICE_ACCOUNT_TOKEN=dummy\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("manifests/limited.env.tpl"),
+        "APP_TOKEN=from-manifest\n",
+    )
+    .unwrap();
+    fs::copy(
+        format!("{}/etc/harnesses.d/codex.conf", env!("CARGO_MANIFEST_DIR")),
+        seam.config_dir.join("harnesses.d/codex.conf"),
+    )
+    .unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .env("HOME", home)
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .args(["codex", "--yolo"])
+        .output()
+        .expect("launch");
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let rec = seam.read_stub_record("codex");
+    assert!(
+        rec.contains("ARGV: -s danger-full-access --yolo"),
+        "shipped codex harness argv mismatch: {rec}"
+    );
+    assert!(
+        !rec.contains("-a on-request"),
+        "must not bake in -a on-request: {rec}"
+    );
+    assert!(rec.contains("ENV APP_TOKEN"), "{rec}");
+}
+
+#[test]
 fn manifest_override_swaps_which_secrets_reach_the_agent() {
     // `va -m other.env claude` — the harness still decides the command, the
     // workdir and the backend; only which credentials it carries changes.
