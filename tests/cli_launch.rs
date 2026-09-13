@@ -166,6 +166,65 @@ fn shipped_agy_harness_injects_manifest_and_preserves_native_args() {
 }
 
 #[test]
+fn shipped_muse_harness_injects_manifest_and_preserves_native_args() {
+    let seam = CliSeam::new();
+    let home = seam.root.join("home");
+    let home_bin = home.join(".local/bin");
+    fs::create_dir_all(&home_bin).unwrap();
+    fs::rename(seam.install_stub_agent("muse"), home_bin.join("muse")).unwrap();
+    fs::write(
+        seam.config_dir.join("manifests/empty.env"),
+        "APP_TOKEN=from-manifest\n",
+    )
+    .unwrap();
+    fs::copy(
+        format!("{}/etc/harnesses.d/muse.conf", env!("CARGO_MANIFEST_DIR")),
+        seam.config_dir.join("harnesses.d/muse.conf"),
+    )
+    .unwrap();
+
+    for (args, expected) in [
+        (vec!["--yolo"], "ARGV: --yolo"),
+        (vec!["resume", "--last"], "ARGV: resume --last"),
+        (
+            vec!["exec", "--yolo", "review this"],
+            "ARGV: exec --yolo review\\ this",
+        ),
+    ] {
+        let out = seam
+            .vaulted_agent()
+            .env("HOME", &home)
+            .env("BWS_ACCESS_TOKEN", "synthetic-manager-token")
+            .env("OP_SERVICE_ACCOUNT_TOKEN", "synthetic-manager-token")
+            .env("PARENT_ONLY_SECRET", "must-not-appear")
+            .arg("muse")
+            .args(args)
+            .output()
+            .expect("launch");
+        assert!(
+            out.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rec = seam.read_stub_record("muse");
+        assert_eq!(rec.lines().next(), Some(expected));
+        assert!(rec.contains("ENV APP_TOKEN=from-manifest\n"), "{rec}");
+        let cwd = fs::canonicalize(&seam.work_dir).unwrap();
+        assert!(
+            rec.contains(&format!("ENV PWD={}\n", cwd.display())),
+            "{rec}"
+        );
+        for excluded in [
+            "BWS_ACCESS_TOKEN",
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "PARENT_ONLY_SECRET",
+        ] {
+            assert!(!rec.contains(excluded), "{excluded} leaked: {rec}");
+        }
+    }
+}
+
+#[test]
 fn shipped_codex_harness_preserves_extra_args_without_approval_conflict() {
     let seam = CliSeam::new();
     let home = seam.root.join("home");

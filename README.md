@@ -3,7 +3,7 @@
 [![CI](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent)](https://github.com/JacobStephens2/vaulted-agent/releases/latest)
 
-Give Claude Code, Codex, Grok, Kimi Code, and Antigravity real vault credentials
+Give Claude Code, Codex, Grok, Kimi Code, Antigravity, and Muse Code real vault credentials
 **in-process** - without leaving a pile of `.env` files on disk.
 (Kimi Code 0.33+ currently needs `env = KIMI_CODE_LEGACY_FLAG = 1` on the
 harness until [kimi-code#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)
@@ -15,7 +15,7 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [vaultedagent.com](https://vaultedagent.com/) ·
-Latest: [v0.4.22](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.22)
+Latest: [v0.4.24](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.24)
 (Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
@@ -36,8 +36,8 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 ```
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
-`grok`, `kimi`, `agy`) and `bash`, and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.22` (or `latest`).
+`grok`, `kimi`, `agy`, `muse`) and `bash`, and can ask for a vault backend + auth mode. Pin:
+`VAULTED_AGENT_VERSION=v0.4.24` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -63,6 +63,8 @@ va codex
 va grok
 va kimi           # --auto; vault inject OPENAI_API_KEY (by provider type); see AGENTS.md
 va agy            # bare AGY; native permissions, authentication, and conversation args
+va muse           # bare Muse Code; preserves Muse's configured permissions
+va muse --yolo    # inject the manifest, then launch Muse in native yolo mode
 va bash           # secrets-injected shell; extra argv is appended
 va bash ./script.sh
 ```
@@ -81,6 +83,7 @@ va -m readonly.env.tpl claude   # this launch only, against another manifest
 va claude --resume <id>   # agent args pass through; resume shape is normalized
 va agy --continue          # AGY arguments pass through unchanged; short form: -c
 va agy --conversation <id>
+va muse resume --last     # native Muse arguments pass through unchanged
 va bash                   # interactive shell with the harness manifest
 va bash ./script.sh       # same env, run a script; not `va run`
 va doctor
@@ -90,8 +93,9 @@ va secrets validate --offline # syntax only, no token needed
 va refresh                # build/update a refs file (Bitwarden or 1Password)
 va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
-va update                 # replace the installed binary from the latest GitHub release
-va update v0.4.22         # pin; --check / --dry-run do not write
+va update                 # update the binary and add missing detected Harnesses
+va update --sync-harnesses # add missing Harnesses without downloading a binary
+va update v0.4.24         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
 
@@ -230,7 +234,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.4.22](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.22)
+Latest: [v0.4.24](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.24)
 
 ## The honest claim
 
@@ -318,7 +322,7 @@ config file you have edited. Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you (writes `service_user` in defaults.conf when explicit) |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
-| `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/bash or write live harnesses |
+| `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/muse/bash or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Sets `default_backend` in `defaults.conf` and the summary’s token path (`bws.env` vs `op.env`) |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
@@ -467,6 +471,36 @@ Maintainers: the `curl … | bash` one-liner serves `install-remote.sh` from thi
 repo, and refreshing it has an ordering constraint worth knowing before you cut
 a release - see [docs/hosting-the-installer.md](docs/hosting-the-installer.md).
 
+## Updating
+
+`va update` installs the requested release, then uses that release's automatic defaults
+(shared with the installer) to add missing Harnesses for detected agents (including Muse). Existing
+profiles are preserved, including custom commands and Manifest choices. The
+updater does not run `install.sh`, resolve vault secrets, or rewrite defaults,
+token files, or existing Manifests.
+
+When all existing Harnesses agree on a Backend and Manifest, new Harnesses use
+that pair. If they disagree, cannot be read, or none exist, new Harnesses start
+with `plainfile` and a verified empty `empty.env`; output tells you to configure
+their Backend and Manifest. Existing nonempty `empty.env` files are refused as
+starters. Agent-specific aliases and permission settings from other profiles
+are not copied. New Harnesses use the installer’s default command and caller directory.
+
+Root-owned machine configuration triggers a sudo retry. Discovery considers the
+configured Service user (or the invoking user under sudo), their local binary
+directories, and existing Harness `bin` directories. Custom config directories
+must be writable by the caller; their paths are not forwarded through sudo.
+
+`va update --sync-harnesses` adds missing Harnesses without downloading or
+replacing the binary. `--check` and `--dry-run` leave installed files and
+configuration unchanged. Downgrading to a release without Harness sync support
+preserves configuration and reports that sync was skipped.
+
+**First upgrade from v0.4.23 or earlier:** the old updater only replaces the
+binary. Once the new binary is installed, run `va update --sync-harnesses`
+(or `va update` again) to add missing profiles. Subsequent updates handle both
+steps in one command.
+
 ## Uninstall
 
 Remove it the same way you run agents - uninstall lives **in the installed
@@ -521,7 +555,7 @@ command  = claude --permission-mode auto
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 
-See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi|agy`
+See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi|agy|muse`
 resume examples. Native CLIs still differ without `va`: Claude/Grok use
 `--resume`; Codex uses the `resume` subcommand; Kimi Code uses `--continue` /
 `--session` (and accepts `--resume` as an alias). AGY keeps its native

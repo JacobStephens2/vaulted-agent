@@ -1,7 +1,7 @@
 //! Replace the installed launcher binary from a GitHub release asset.
 //!
-//! Binary only: does not re-run install.sh and does not touch harnesses,
-//! manifests, or token files. Asset names match `install-remote.sh`.
+//! The target binary adds missing detected Harnesses after replacement.
+//! Existing profiles, manifests, and tokens are preserved; install.sh is not run.
 
 use std::env;
 use std::fs;
@@ -65,6 +65,7 @@ pub fn parse_latest_tag(json: &str) -> Result<String> {
 }
 
 struct Opts {
+    sync_harnesses: bool,
     check: bool,
     dry_run: bool,
     help: bool,
@@ -76,8 +77,10 @@ fn parse_args(args: &[String]) -> Result<Opts> {
     let mut dry_run = false;
     let mut help = false;
     let mut tag = None;
+    let mut sync_harnesses = false;
     for a in args {
         match a.as_str() {
+            "--sync-harnesses" => sync_harnesses = true,
             "--check" => check = true,
             "--dry-run" => dry_run = true,
             "-h" | "--help" => help = true,
@@ -97,7 +100,13 @@ fn parse_args(args: &[String]) -> Result<Opts> {
             }
         }
     }
+    if sync_harnesses && (check || tag.is_some()) {
+        return Err(Error::Message(
+            "update: --sync-harnesses accepts only --dry-run or --help".into(),
+        ));
+    }
     Ok(Opts {
+        sync_harnesses,
         check,
         dry_run,
         help,
@@ -109,9 +118,12 @@ fn usage_text() -> &'static str {
     "usage: vaulted-agent update [VERSION]\n\
      \x20      vaulted-agent update --check [VERSION]\n\
      \x20      vaulted-agent update --dry-run [VERSION]\n\
+     \x20      vaulted-agent update --sync-harnesses [--dry-run]\n\
      \nReplace the installed launcher binary with a GitHub release asset.\n\
      Default VERSION is VAULTED_AGENT_VERSION, else the latest GitHub release.\n\
-     Does not re-run install.sh and does not change harnesses or manifests."
+     Adds missing detected agent Harnesses using the target release's profiles.\n\
+     Existing profiles, manifests, and token files are preserved.\n\
+     --sync-harnesses adds profiles without downloading or replacing the binary."
 }
 
 fn print_usage() {
@@ -123,6 +135,9 @@ pub fn cmd_update(args: &[String]) -> Result<()> {
     if opts.help {
         print_usage();
         return Ok(());
+    }
+    if opts.sync_harnesses {
+        return crate::harness_sync::sync(&crate::config::Paths::discover(), opts.dry_run);
     }
 
     let dest = resolve_dest()?;
@@ -158,6 +173,7 @@ pub fn cmd_update(args: &[String]) -> Result<()> {
             extracted.display(),
             dest.display()
         );
+        sync_with_target(&extracted, true)?;
         let _ = fs::remove_dir_all(&work);
         return Ok(());
     }
@@ -165,7 +181,56 @@ pub fn cmd_update(args: &[String]) -> Result<()> {
     install_over(&extracted, &dest)?;
     let _ = fs::remove_dir_all(&work);
     println!("updated {}", dest.display());
+    sync_with_target(&dest, false).map_err(|e| {
+        Error::Message(format!(
+            "binary updated, but Harness setup failed: {e}\n  Retry: va update --sync-harnesses"
+        ))
+    })?;
     Ok(())
+}
+
+fn sync_with_target(binary: &Path, dry_run: bool) -> Result<()> {
+    let mut command = target_command(binary);
+    let help = command
+        .args(["update", "--help"])
+        .output()
+        .map_err(|e| Error::Message(format!("update: target help probe: {e}")))?;
+    let supports_sync = help.status.success()
+        && (String::from_utf8_lossy(&help.stdout).contains("--sync-harnesses")
+            || String::from_utf8_lossy(&help.stderr).contains("--sync-harnesses"));
+    if !supports_sync {
+        println!("target release has no Harness sync support; existing configuration preserved");
+        return Ok(());
+    }
+    // Use a fresh Command: arguments from the help probe must not carry over.
+    let mut sync = target_command(binary);
+    sync.args(["update", "--sync-harnesses"]);
+    if dry_run {
+        sync.arg("--dry-run");
+    }
+    let status = sync
+        .status()
+        .map_err(|e| Error::Message(format!("update: Harness sync: {e}")))?;
+    if !status.success() {
+        return Err(Error::Message(
+            "target release could not add missing Harnesses".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn target_command(binary: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command
+        .env_clear()
+        .envs(crate::env_scrub::build_child_env(&[], &Default::default()));
+    // Same-user handoff only. The privileged sync path drops custom config.
+    for key in ["VAULTED_AGENT_CONFIG_DIR", "SUDO_USER"] {
+        if let Some(value) = env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
 }
 
 fn current_matches(current: &str, tag: &str) -> bool {
@@ -404,7 +469,7 @@ fn prepare_bin(bin: &Path) -> Result<()> {
         path: bin.to_path_buf(),
         source: e,
     })?;
-    let status = Command::new(bin)
+    let status = target_command(bin)
         .arg("version")
         .status()
         .map_err(|e| Error::Message(format!("update: new binary will not start: {e}")))?;

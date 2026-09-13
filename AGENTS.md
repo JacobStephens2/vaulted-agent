@@ -1,7 +1,7 @@
 # vaulted-agent for agents
 
 You are an autonomous coding agent on a host that may use **vaulted-agent**
-(`va`) to launch Claude Code, Codex, Grok, Kimi, or Antigravity - or a
+(`va`) to launch Claude Code, Codex, Grok, Kimi, Antigravity, or Muse Code - or a
 secrets-injected `bash` - with vault-resolved secrets **in the child process
 environment** - not via `.env` files on disk.
 
@@ -12,13 +12,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.22**
+Current release pin (product install): **v0.4.24**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.22 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.22 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.24 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.24 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
@@ -69,7 +69,7 @@ elevated launches always read the machine config dir).
 | Health (as launch account) | `va doctor` (syntax / config; offline by design) |
 | Pre-flight: refs resolve in vault | `va secrets validate` (live; needs manager token; covers every harness manifest **and** every `extra_manifest`) |
 | Pre-flight: shape only | `va secrets validate --offline` |
-| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va agy` / `va bash` |
+| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va agy` / `va muse` / `va bash` |
 | **This launch only: other manifest** | `va -m readonly.env.tpl claude` |
 | Interactive pick + optional -m | `va -m narrow.env.tpl pick` |
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
@@ -80,7 +80,7 @@ elevated launches always read the machine config dir).
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
-| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.22` |
+| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.24` |
 | Uninstall | `sudo va uninstall` |
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
@@ -91,10 +91,18 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 (`va bash ./script.sh`). It is not `va run` (any program) and not a retired
 `*-orchestrator` wrapper.
 
-`va update` replaces the installed launcher binary from a GitHub release asset
-(same stems as `install-remote.sh`). It does not re-run `install.sh` and does
-not change harnesses or manifests. `--check` / `--dry-run` write nothing. If
-the dest is not writable: `sudo va update`.
+`va update` replaces the installed launcher binary from a GitHub release asset,
+then asks that binary to add missing Harnesses for detected agents. It preserves
+existing profiles, Manifests, defaults, and token files. New Harnesses reuse the
+Backend and Manifest only when all existing profiles agree; otherwise they use
+a verified empty starter Manifest and print a configuration reminder. It never
+resolves secrets or runs `install.sh`. `--check` and `--dry-run` leave installed
+files and configuration unchanged. Root-owned machine configuration triggers a
+sudo retry; a custom config directory must be writable without that hop.
+
+`va update --sync-harnesses` performs only Harness discovery/setup. Updaters
+through v0.4.23 replace only the binary: after upgrading from one of those,
+run `va update --sync-harnesses` (or `va update` again) with the new binary.
 
 ### Prompt auth
 
@@ -116,6 +124,20 @@ Vaulted-agent injects the selected Manifest but does not configure AGY's
 authentication. AGY reads an injected `GEMINI_API_KEY` only when its settings
 select `modelProvider = gemini`. Authentication details:
 https://antigravity.google/docs/cli/install/
+
+### Muse Code
+
+The shipped / auto Harness runs bare `muse` with `workdir = caller`. Muse owns
+its permission settings. Arguments pass through unchanged: `va muse --yolo`
+injects the selected Manifest and starts Muse in its native yolo mode;
+`va muse resume --last` resumes through a fresh launch with freshly resolved
+secrets.
+
+Day-one configuration uses `plainfile` + `empty.env`. Point the Harness at
+your chosen Backend and Manifest to inject secrets; installer vault wiring
+also applies to Muse. Muse owns its account login under the launch account,
+so a Service user needs its own login. An injected `META_API_KEY` takes
+precedence over Muse's account login (`muse login --help`).
 
 ### Kimi
 
