@@ -69,7 +69,7 @@ elevated launches always read the machine config dir).
 | Health (as launch account) | `va doctor` (syntax / config; offline by design) |
 | Pre-flight: refs resolve in vault | `va secrets validate` (live; needs manager token; covers every harness manifest **and** every `extra_manifest`) |
 | Pre-flight: shape only | `va secrets validate --offline` |
-| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va agy` / `va bash` |
+| Launch harness | `va claude` / `va codex` / `va grok` / `va kimi` / `va agy` / `va muse` / `va bash` |
 | **This launch only: other manifest** | `va -m readonly.env.tpl claude` |
 | Interactive pick + optional -m | `va -m narrow.env.tpl pick` |
 | One-shot command | `va run -m REFS --backend bitwarden -- cmd…` |
@@ -116,6 +116,20 @@ Vaulted-agent injects the selected Manifest but does not configure AGY's
 authentication. AGY reads an injected `GEMINI_API_KEY` only when its settings
 select `modelProvider = gemini`. Authentication details:
 https://antigravity.google/docs/cli/install/
+
+### Muse Code
+
+The shipped / auto Harness runs bare `muse` with `workdir = caller`. Muse owns
+its permission settings. Arguments pass through unchanged: `va muse --yolo`
+injects the selected Manifest and starts Muse in its native yolo mode;
+`va muse resume --last` resumes through a fresh launch with freshly resolved
+secrets.
+
+Day-one configuration uses `plainfile` + `empty.env`. Point the Harness at
+your chosen Backend and Manifest to inject secrets; installer vault wiring
+also applies to Muse. Muse owns its account login under the launch account,
+so a Service user needs its own login. An injected `META_API_KEY` takes
+precedence over Muse's account login (`muse login --help`).
 
 ### Kimi
 

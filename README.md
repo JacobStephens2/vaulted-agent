@@ -36,7 +36,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 ```
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
-`grok`, `kimi`, `agy`) and `bash`, and can ask for a vault backend + auth mode. Pin:
+`grok`, `kimi`, `agy`, `muse`) and `bash`, and can ask for a vault backend + auth mode. Pin:
 `VAULTED_AGENT_VERSION=v0.4.22` (or `latest`).
 
 ### 2. Wire a vault
@@ -63,6 +63,8 @@ va codex
 va grok
 va kimi           # --auto; vault inject OPENAI_API_KEY (by provider type); see AGENTS.md
 va agy            # bare AGY; native permissions, authentication, and conversation args
+va muse           # bare Muse Code; preserves Muse's configured permissions
+va muse --yolo    # inject the manifest, then launch Muse in native yolo mode
 va bash           # secrets-injected shell; extra argv is appended
 va bash ./script.sh
 ```
@@ -81,6 +83,7 @@ va -m readonly.env.tpl claude   # this launch only, against another manifest
 va claude --resume <id>   # agent args pass through; resume shape is normalized
 va agy --continue          # AGY arguments pass through unchanged; short form: -c
 va agy --conversation <id>
+va muse resume --last     # native Muse arguments pass through unchanged
 va bash                   # interactive shell with the harness manifest
 va bash ./script.sh       # same env, run a script; not `va run`
 va doctor
@@ -318,7 +321,7 @@ config file you have edited. Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you (writes `service_user` in defaults.conf when explicit) |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
-| `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/bash or write live harnesses |
+| `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/muse/bash or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Sets `default_backend` in `defaults.conf` and the summary’s token path (`bws.env` vs `op.env`) |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
@@ -521,7 +524,7 @@ command  = claude --permission-mode auto
 | `command`  | the command line, split on whitespace                               |
 | `arg`      | one further argument, verbatim. Repeatable, and the only way to pass one containing a space |
 
-See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi|agy`
+See [Resume sessions](#resume-sessions) above for `va claude|codex|grok|kimi|agy|muse`
 resume examples. Native CLIs still differ without `va`: Claude/Grok use
 `--resume`; Codex uses the `resume` subcommand; Kimi Code uses `--continue` /
 `--session` (and accepts `--resume` as an alias). AGY keeps its native
