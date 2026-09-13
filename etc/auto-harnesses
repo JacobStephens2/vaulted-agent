@@ -1,0 +1,10 @@
+# Automatic Harness commands shared by install.sh and va update.
+# One command per line; the executable name is also the Harness name.
+# These are starter defaults, distinct from the editable example profiles.
+claude --permission-mode auto
+codex
+grok
+kimi --auto
+agy
+muse
+bash

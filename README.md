@@ -93,7 +93,8 @@ va secrets validate --offline # syntax only, no token needed
 va refresh                # build/update a refs file (Bitwarden or 1Password)
 va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
-va update                 # replace the installed binary from the latest GitHub release
+va update                 # update the binary and add missing detected Harnesses
+va update --sync-harnesses # add missing Harnesses without downloading a binary
 va update v0.4.23         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
@@ -469,6 +470,36 @@ hardening measure into the only thing standing between a harness grant and root.
 Maintainers: the `curl … | bash` one-liner serves `install-remote.sh` from this
 repo, and refreshing it has an ordering constraint worth knowing before you cut
 a release - see [docs/hosting-the-installer.md](docs/hosting-the-installer.md).
+
+## Updating
+
+`va update` installs the requested release, then uses that release's automatic defaults
+(shared with the installer) to add missing Harnesses for detected agents (including Muse). Existing
+profiles are preserved, including custom commands and Manifest choices. The
+updater does not run `install.sh`, resolve vault secrets, or rewrite defaults,
+token files, or existing Manifests.
+
+When all existing Harnesses agree on a Backend and Manifest, new Harnesses use
+that pair. If they disagree, cannot be read, or none exist, new Harnesses start
+with `plainfile` and a verified empty `empty.env`; output tells you to configure
+their Backend and Manifest. Existing nonempty `empty.env` files are refused as
+starters. Agent-specific aliases and permission settings from other profiles
+are not copied. New Harnesses use the installer’s default command and caller directory.
+
+Root-owned machine configuration triggers a sudo retry. Discovery considers the
+configured Service user (or the invoking user under sudo), their local binary
+directories, and existing Harness `bin` directories. Custom config directories
+must be writable by the caller; their paths are not forwarded through sudo.
+
+`va update --sync-harnesses` adds missing Harnesses without downloading or
+replacing the binary. `--check` and `--dry-run` leave installed files and
+configuration unchanged. Downgrading to a release without Harness sync support
+preserves configuration and reports that sync was skipped.
+
+**First upgrade from v0.4.23 or earlier:** the old updater only replaces the
+binary. Once the new binary is installed, run `va update --sync-harnesses`
+(or `va update` again) to add missing profiles. Subsequent updates handle both
+steps in one command.
 
 ## Uninstall
 

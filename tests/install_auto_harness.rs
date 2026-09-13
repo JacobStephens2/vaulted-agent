@@ -2,6 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use vaulted_agent::config::Harness;
 
 #[test]
 fn install_discovers_muse_and_preserves_an_existing_profile() {
@@ -9,9 +10,12 @@ fn install_discovers_muse_and_preserves_an_existing_profile() {
     let bin = tmp.path().join("bin");
     let config = tmp.path().join("etc");
     fs::create_dir(&bin).unwrap();
-    let muse = bin.join("muse");
-    fs::write(&muse, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&muse, fs::Permissions::from_mode(0o755)).unwrap();
+    let agents = ["claude", "codex", "grok", "kimi", "agy", "muse"];
+    for name in agents {
+        let agent = bin.join(name);
+        fs::write(&agent, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let user_out = Command::new("id").arg("-un").output().unwrap();
     assert!(user_out.status.success());
     let user = String::from_utf8(user_out.stdout).unwrap();
@@ -35,7 +39,7 @@ fn install_discovers_muse_and_preserves_an_existing_profile() {
         .arg(tmp.path())
         .env_clear()
         .env("HOME", tmp.path().join("home"))
-        .env("PATH", path)
+        .env("PATH", &path)
         .env("VAULTED_AGENT_BIN", env!("CARGO_BIN_EXE_vaulted-agent"));
     let out = installer.output().expect("install");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -64,6 +68,39 @@ fn install_discovers_muse_and_preserves_an_existing_profile() {
     assert!(config.join("manifests/empty.env").is_file());
     assert!(stdout.contains("va muse"), "{stdout}");
     assert!(!stdout.contains("found. Install an agent CLI"), "{stdout}");
+
+    // Both entry points must apply the same automatic defaults. Example
+    // profiles intentionally make different command/permission choices.
+    let update_config = tmp.path().join("update-config");
+    let out = Command::new(env!("CARGO_BIN_EXE_vaulted-agent"))
+        .args(["update", "--sync-harnesses"])
+        .env_clear()
+        .env("HOME", tmp.path().join("home"))
+        .env("PATH", &path)
+        .env("VAULTED_AGENT_CONFIG_DIR", &update_config)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for name in agents.into_iter().chain(["bash"]) {
+        let relative = format!("harnesses.d/{name}.conf");
+        let installed =
+            Harness::parse(name, &fs::read_to_string(config.join(&relative)).unwrap()).unwrap();
+        let updated = Harness::parse(
+            name,
+            &fs::read_to_string(update_config.join(&relative)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(installed.command, updated.command, "{name}");
+        assert_eq!(installed.keep, updated.keep, "{name}");
+        assert_eq!(installed.env_sets, updated.env_sets, "{name}");
+        assert_eq!(installed.backend, updated.backend, "{name}");
+        assert_eq!(installed.manifest, updated.manifest, "{name}");
+        assert_eq!(installed.workdir, updated.workdir, "{name}");
+    }
 
     let custom =
         "backend = bitwarden\nmanifest = custom.refs\nworkdir = caller\ncommand = muse --yolo\n";

@@ -6,6 +6,7 @@ pub mod commands;
 pub mod config;
 pub mod env_scrub;
 pub mod error;
+mod harness_sync;
 pub mod launch;
 pub mod privilege;
 pub mod refs;
