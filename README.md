@@ -3,7 +3,7 @@
 [![CI](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/JacobStephens2/vaulted-agent/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/JacobStephens2/vaulted-agent)](https://github.com/JacobStephens2/vaulted-agent/releases/latest)
 
-Give Claude Code, Codex, Grok, Kimi Code, and Antigravity real vault credentials
+Give Claude Code, Codex, Grok, Kimi Code, Antigravity, and Muse Code real vault credentials
 **in-process** - without leaving a pile of `.env` files on disk.
 (Kimi Code 0.33+ currently needs `env = KIMI_CODE_LEGACY_FLAG = 1` on the
 harness until [kimi-code#2746](https://github.com/MoonshotAI/kimi-code/pull/2746)
@@ -37,7 +37,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 `grok`, `kimi`, `agy`, `muse`) and `bash`, and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.22` (or `latest`).
+`VAULTED_AGENT_VERSION=v0.4.23` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -94,7 +94,7 @@ va refresh                # build/update a refs file (Bitwarden or 1Password)
 va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
 va update                 # replace the installed binary from the latest GitHub release
-va update v0.4.22         # pin; --check / --dry-run do not write
+va update v0.4.23         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
 
