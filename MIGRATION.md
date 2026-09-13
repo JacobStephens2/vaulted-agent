@@ -1,4 +1,4 @@
-# Migration: updates add missing Harnesses (unreleased)
+# Migration: updates add missing Harnesses (v0.4.24)
 
 `va update` now asks the newly installed binary to create missing Harnesses for
 detected agents. Existing profiles stay unchanged. New profiles inherit a
@@ -37,7 +37,7 @@ refresh. `va update` (or a reinstall) is the way off that writer.
 `va update` downloads a GitHub release asset for this OS/arch and overwrites
 the running launcher (`current_exe`, usually `/usr/local/bin/vaulted-agent`).
 Default target is `VAULTED_AGENT_VERSION`, else the latest GitHub release.
-`va update v0.4.23` pins. `--check` and `--dry-run` write nothing.
+`va update v0.4.24` pins. `--check` and `--dry-run` write nothing.
 
 This is not `install.sh`. Existing Harnesses, manifests, and token files stay
 put; newer updaters add missing Harnesses as described above. If the binary

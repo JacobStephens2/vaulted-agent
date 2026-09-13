@@ -37,7 +37,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 `grok`, `kimi`, `agy`, `muse`) and `bash`, and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.23` (or `latest`).
+`VAULTED_AGENT_VERSION=v0.4.24` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -95,7 +95,7 @@ va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
 va update                 # update the binary and add missing detected Harnesses
 va update --sync-harnesses # add missing Harnesses without downloading a binary
-va update v0.4.23         # pin; --check / --dry-run do not write
+va update v0.4.24         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
 
