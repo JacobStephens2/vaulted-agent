@@ -1,3 +1,16 @@
+# Migration: updates add missing Harnesses (unreleased)
+
+`va update` now asks the newly installed binary to create missing Harnesses for
+detected agents. Existing profiles stay unchanged. New profiles inherit a
+Backend/Manifest pair only when the existing profiles agree; otherwise they
+start without secrets and print a configuration reminder. No vault access is
+needed during update. Root-owned machine config is handled with a sudo retry.
+
+**Transition from v0.4.23 or earlier:** those installed updaters cannot run the
+new setup step. After the first binary upgrade, run `va update --sync-harnesses`
+or repeat `va update`. Future upgrades run both steps automatically. This also
+repairs a missing Muse Harness without reinstalling the whole launcher.
+
 # Migration: glued Bitwarden refs from bash 0.3.0 `va refresh` (unreleased)
 
 `va refresh` on the bash launcher (v0.3.0) captured each new `VAR=name:KEY`
@@ -26,8 +39,9 @@ the running launcher (`current_exe`, usually `/usr/local/bin/vaulted-agent`).
 Default target is `VAULTED_AGENT_VERSION`, else the latest GitHub release.
 `va update v0.4.23` pins. `--check` and `--dry-run` write nothing.
 
-This is not `install.sh`. Harnesses, manifests, and token files stay put. If
-the dest is not writable, it retries with `sudo install`. `va` and
+This is not `install.sh`. Existing Harnesses, manifests, and token files stay
+put; newer updaters add missing Harnesses as described above. If the binary
+dest is not writable, it retries with `sudo install`. `va` and
 `*-conductor` links keep working because they point at the same binary.
 
 A host that does not yet have this command still bootstraps with

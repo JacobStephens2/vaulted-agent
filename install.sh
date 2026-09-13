@@ -512,61 +512,19 @@ if (( ! NO_AUTO_HARNESS )); then
   printf '\nDetecting agent CLIs and bash on PATH…\n'
   found_any=0
   found_agent=0
-  if p="$(find_user_bin claude)"; then
-    write_auto_harness claude "$p" "claude --permission-mode auto"
-    found_any=1
-    found_agent=1
-  else
-    printf '  %-8s not found (skipped)\n' claude
-  fi
-  if p="$(find_user_bin codex)"; then
-    write_auto_harness codex "$p" "codex"
-    found_any=1
-    found_agent=1
-  else
-    printf '  %-8s not found (skipped)\n' codex
-  fi
-  if p="$(find_user_bin grok)"; then
-    write_auto_harness grok "$p" "grok"
-    found_any=1
-    found_agent=1
-  else
-    printf '  %-8s not found (skipped)\n' grok
-  fi
-  # Kimi Code CLI (https://www.kimi.com/code/en) — binary name is `kimi`.
-  # --auto matches unattended default. Vault inject works for OpenAI-compatible
-  # providers (OPENAI_API_KEY by type); see issue #70 / kimi-code#2745 for the
-  # 0.33–0.34 gate regression and the launcher LEGACY_FLAG workaround.
-  if p="$(find_user_bin kimi)"; then
-    write_auto_harness kimi "$p" "kimi --auto"
-    found_any=1
-    found_agent=1
-  else
-    printf '  %-8s not found (skipped)\n' kimi
-  fi
-  # Antigravity CLI (https://antigravity.google/docs/cli/) - binary name is `agy`.
-  if p="$(find_user_bin agy)"; then
-    write_auto_harness agy "$p" "agy"
-    found_any=1
-    found_agent=1
-  else
-    printf '  %-8s not found (skipped)\n' agy
-  fi
-  # Muse Code keeps its native permissions; e.g. va muse --yolo opts in per run.
-  if p="$(find_user_bin muse)"; then
-    write_auto_harness muse "$p" "muse"
-    found_any=1
-    found_agent=1
-  else
-    printf '  %-8s not found (skipped)\n' muse
-  fi
-  # bash is almost always on PATH; do not treat it as an agent CLI being found.
-  if p="$(find_user_bin bash)"; then
-    write_auto_harness bash "$p" "bash"
-    found_any=1
-  else
-    printf '  %-8s not found (skipped)\n' bash
-  fi
+  # Share starter commands with va update; examples may contain other choices.
+  while IFS= read -r cmd; do
+    [[ -z "$cmd" || "$cmd" == \#* ]] && continue
+    name="${cmd%% *}"
+    if p="$(find_user_bin "$name")"; then
+      write_auto_harness "$name" "$p" "$cmd"
+      found_any=1
+      # bash is useful, but does not count as finding an agent CLI.
+      if [[ "$name" != bash ]]; then found_agent=1; fi
+    else
+      printf '  %-8s not found (skipped)\n' "$name"
+    fi
+  done < "$REPO/etc/auto-harnesses"
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
     if (( found_agent )); then
@@ -579,7 +537,7 @@ if (( ! NO_AUTO_HARNESS )); then
     printf '  No claude/codex/grok/kimi/agy/muse found. Install an agent CLI, then re-run install\n'
     printf '  or copy a harnesses.d/*.conf.example and drop the .example suffix.\n'
   fi
-  unset found_any found_agent p
+  unset found_any found_agent p name cmd
 else
   printf '\nskipped auto-harness detect (--no-auto-harness)\n'
 fi

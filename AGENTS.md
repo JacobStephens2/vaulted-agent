@@ -91,10 +91,18 @@ agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
 (`va bash ./script.sh`). It is not `va run` (any program) and not a retired
 `*-orchestrator` wrapper.
 
-`va update` replaces the installed launcher binary from a GitHub release asset
-(same stems as `install-remote.sh`). It does not re-run `install.sh` and does
-not change harnesses or manifests. `--check` / `--dry-run` write nothing. If
-the dest is not writable: `sudo va update`.
+`va update` replaces the installed launcher binary from a GitHub release asset,
+then asks that binary to add missing Harnesses for detected agents. It preserves
+existing profiles, Manifests, defaults, and token files. New Harnesses reuse the
+Backend and Manifest only when all existing profiles agree; otherwise they use
+a verified empty starter Manifest and print a configuration reminder. It never
+resolves secrets or runs `install.sh`. `--check` and `--dry-run` leave installed
+files and configuration unchanged. Root-owned machine configuration triggers a
+sudo retry; a custom config directory must be writable without that hop.
+
+`va update --sync-harnesses` performs only Harness discovery/setup. Updaters
+through v0.4.23 replace only the binary: after upgrading from one of those,
+run `va update --sync-harnesses` (or `va update` again) with the new binary.
 
 ### Prompt auth
 
