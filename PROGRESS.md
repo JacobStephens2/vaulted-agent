@@ -12,3 +12,19 @@ reads this instead of relitigating a settled choice or repeating exploration
 that has already been done.
 
 Seeded by seed-run.sh. No Iteration has run yet.
+
+## Run started 2026-09-16T05:21:59Z
+
+Task: JacobStephens2/vaulted-agent#92
+
+Termination Contract:
+
+- Iterations per Run: 5
+- Iteration wall clock: 900s
+- Turns per Iteration: 100
+- Run wall clock: 5400s
+- Consecutive No-op Iterations that abort: 2
+- Completion Promise: recorded, never terminal
+- Agent command: /srv/tracewake/loop/agents/grok.sh
+- Discipline skills: /tdd for code work, /diagnosing-bugs for something broken or slow, /code-review before every commit
+
