@@ -28,3 +28,18 @@ Termination Contract:
 - Agent command: /srv/tracewake/loop/agents/grok.sh
 - Discipline skills: /tdd for code work, /diagnosing-bugs for something broken or slow, /code-review before every commit
 
+
+### Iteration 1 - 2026-09-16T05:21:59Z
+
+- Agent exit: 1
+- Turn bound: 100
+- No-op Iteration: head unchanged at ccb5172c077e
+- Completion Promise: not recorded
+
+Agent output, last 20 lines:
+
+    ERROR: unknown agent "docker.io/docker/sandbox-templates:shell-docker"
+    
+    Run 'sbx create --help' for the available agents
+    grok.sh: could not create the Execution Boundary for this Iteration from docker.io/docker/sandbox-templates:shell-docker. If the box is not holding that image, apply ansible/loop.yml - role loop_guest_template builds it.
+
