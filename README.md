@@ -313,6 +313,13 @@ running. A dedicated account with nothing else in it makes "the same user" as
 small a set as possible, and makes the audit trail say "the agent did this"
 rather than naming a person. Running as root is refused outright.
 
+Agent CLIs are auto-detected for the account that runs the harness
+(`--user`, defaulting to you): the installer's `command -v` probe plus that
+account's `~/.local/bin`, `~/.grok/bin`, and system directories. A CLI
+installed only for the invoking user is skipped with a message naming both
+accounts — install it for the service account, or configure that
+`harnesses.d/<name>.conf` explicitly.
+
 `install.sh` installs the Rust binary and writes machine defaults to
 `defaults.conf` (never sed-patches a shell script). It never overwrites a
 config file you have edited. Useful flags:
