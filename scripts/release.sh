@@ -283,7 +283,9 @@ cmd_deploy_site() {
 
   local stage
   stage=$(mktemp -d)
-  trap 'rm -rf "$stage"' RETURN
+  # Clear the trap before returning: RETURN traps are global, and a later
+  # function (readme-latest under cut) would expand the unset local.
+  trap 'rm -rf "$stage"; trap - RETURN' RETURN
   install -m 0644 "$remote" "$stage/install.sh"
   install -m 0644 "$agents" "$stage/AGENTS.md"
   bootstrap_is_safe "$stage/install.sh"
