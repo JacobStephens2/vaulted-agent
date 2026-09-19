@@ -5,6 +5,10 @@ Maintainer procedure for refreshing the script served at
 one-liner in the README. (`https://stephens.page/vaulted-agent/install.sh`
 301-redirects there.)
 
+The supported way to cut a release from this tree is `scripts/release.sh`.
+It encodes the order below: bump, tag, wait for GitHub assets, then refresh
+the hosted bootstrap. Do not invert that order by hand.
+
 ## The contract
 
 | | |
@@ -44,6 +48,25 @@ outright: both asset candidates 404, the source-archive fetch for the tag 404s,
 and the script calls `die`. That is strictly worse than shipping nothing.
 
 So, per release:
+
+```bash
+# On a release/vX.Y.Z branch, before the PR:
+./scripts/release.sh prepare vX.Y.Z
+# merge to main, then:
+./scripts/release.sh cut vX.Y.Z
+# commit the README Latest: link rewrite cut leaves in the tree
+```
+
+`prepare` bumps `Cargo.toml`, `Cargo.lock`, `DEFAULT_VERSION` in
+`install-remote.sh`, AGENTS.md / README pin examples, and the MIGRATION.md
+update-pin line. It does **not** rewrite the two `Latest:` links — those 404
+until the tag exists. `cut` is tag → wait for assets → deploy-site →
+readme-latest. `deploy-site` SSHes to `jacob@stephens.page` (override with
+`VAULTED_AGENT_DEPLOY_HOST` / `VAULTED_AGENT_DEPLOY_PATH`) and refuses to
+write if either GitHub asset is not `200`, if the local file is the fat
+`install.sh`, or if `DEFAULT_VERSION` does not match the tag.
+
+Equivalent by hand (the script is this list):
 
 1. Bump `version` in `Cargo.toml` and `DEFAULT_VERSION` in `install-remote.sh`
    to the same `vX.Y.Z`. Merge.
