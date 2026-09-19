@@ -290,6 +290,11 @@ if [[ -z "$SERVICE_USER" ]]; then
   fi
 fi
 
+# The human who invoked the installer. Auto-detection resolves binaries for
+# SERVICE_USER above; this identity is only named in skip messages, and keeps
+# its caller-scoped roles (user-local va link, source build) unchanged.
+INVOKING_USER="${SUDO_USER:-$(id -un)}"
+
 id -u "$SERVICE_USER" >/dev/null 2>&1 || \
   die "service account '$SERVICE_USER' does not exist. Create it first, e.g.
   # Linux:
@@ -457,18 +462,23 @@ for src in "$REPO"/etc/harnesses.d/* "$REPO"/etc/manifests/*; do
 done
 
 # --- auto-detect agent CLIs and activate harnesses ------------------------
-# Prefer the invoking user's PATH (not root's) when install runs under sudo.
-find_user_bin() {
-  local name="$1" p home
-  if [[ -n "${SUDO_USER:-}" ]] && command -v sudo >/dev/null 2>&1; then
-    p="$(sudo -nu "$SUDO_USER" -- command -v "$name" 2>/dev/null || true)"
-    if [[ -n "$p" ]]; then printf '%s\n' "$p"; return 0; fi
-    home="$(user_home "$SUDO_USER" 2>/dev/null || true)"
-  else
+# Binaries are resolved for the account that will run the harness
+# (SERVICE_USER, the launch identity) — never for the invoking user. Probing
+# the invoker's PATH here used to record an operator-owned directory in bin=
+# even when --user selected a different execution account; on a shared host
+# the service account then could not traverse that home, or quietly depended
+# on one operator's mutable installation.
+find_for_user_bin() {
+  local name="$1" user="$2" p home
+  if [[ "$user" == "$(id -un)" ]]; then
+    # Same identity: this shell already sees the user's PATH, no sudo needed.
     p="$(command -v "$name" 2>/dev/null || true)"
     if [[ -n "$p" ]]; then printf '%s\n' "$p"; return 0; fi
-    home="${HOME:-}"
+  elif command -v sudo >/dev/null 2>&1; then
+    p="$(sudo -nu "$user" -- command -v "$name" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then printf '%s\n' "$p"; return 0; fi
   fi
+  home="$(user_home "$user" 2>/dev/null || true)"
   for d in \
     ${home:+"$home/.local/bin"} \
     ${home:+"$home/.grok/bin"} \
@@ -509,22 +519,32 @@ EOF
 }
 
 if (( ! NO_AUTO_HARNESS )); then
-  printf '\nDetecting agent CLIs and bash on PATH…\n'
+  printf '\nDetecting agent CLIs and bash for service account %s…\n' "$SERVICE_USER"
   found_any=0
   found_agent=0
   # Share starter commands with va update; examples may contain other choices.
+  # VAULTED_AGENT_AUTO_HARNESSES overrides the command list (tests use a file
+  # with fictitious names so no developer-installed agent can interfere).
   while IFS= read -r cmd; do
     [[ -z "$cmd" || "$cmd" == \#* ]] && continue
     name="${cmd%% *}"
-    if p="$(find_user_bin "$name")"; then
+    if p="$(find_for_user_bin "$name" "$SERVICE_USER")"; then
       write_auto_harness "$name" "$p" "$cmd"
       found_any=1
       # bash is useful, but does not count as finding an agent CLI.
       if [[ "$name" != bash ]]; then found_agent=1; fi
+    elif [[ "$INVOKING_USER" != "$SERVICE_USER" ]] \
+      && inv_p="$(find_for_user_bin "$name" "$INVOKING_USER")"; then
+      printf '  %-8s skipped: found for %s but not for service account %s (%s)\n' \
+        "$name" "$INVOKING_USER" "$SERVICE_USER" "$inv_p"
+      printf '              install %s for %s (so `sudo -u %s command -v %s` finds it),\n' \
+        "$name" "$SERVICE_USER" "$SERVICE_USER" "$name"
+      printf '              or configure harnesses.d/%s.conf explicitly\n' "$name"
     else
       printf '  %-8s not found (skipped)\n' "$name"
     fi
-  done < "$REPO/etc/auto-harnesses"
+    unset inv_p p name cmd
+  done < "${VAULTED_AGENT_AUTO_HARNESSES:-"$REPO/etc/auto-harnesses"}"
   if (( found_any )); then
     printf '\nAuto-harnesses use plainfile + empty.env (no vault secrets yet).\n'
     if (( found_agent )); then
