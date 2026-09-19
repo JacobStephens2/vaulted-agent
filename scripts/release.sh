@@ -107,7 +107,10 @@ replace_file() {
   local tmp mode
   tmp=$(mktemp)
   cat >"$tmp"
-  mode=$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file")
+  # GNU: stat -c '%a'. BSD: stat -f '%Lp'. GNU's -f is --file-system and
+  # succeeds with a filesystem dump, so try -c first.
+  mode=$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file")
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "could not read mode of $file (got $mode)"
   chmod "$mode" "$tmp"
   mv "$tmp" "$file"
 }
