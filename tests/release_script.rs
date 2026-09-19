@@ -93,11 +93,13 @@ fn write_tree(root: &Path) {
         "[[package]]\nname = \"vaulted-agent\"\nversion = \"0.4.24\"\n",
     )
     .unwrap();
+    let remote = root.join("install-remote.sh");
     fs::write(
-        root.join("install-remote.sh"),
+        &remote,
         "#!/usr/bin/env bash\nDEFAULT_VERSION=\"v0.4.24\"\ndetect_assets() { :; }\n",
     )
     .unwrap();
+    fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(
         root.join("install.sh"),
         "#!/usr/bin/env bash\n# fat installer — must never be hosted\nSERVICE_USER=\"\"\n",
@@ -214,6 +216,15 @@ fn prepare_bumps_crate_bootstrap_and_pins_but_not_latest_links() {
     assert!(
         bootstrap.contains("DEFAULT_VERSION=\"v0.4.25\""),
         "{bootstrap}"
+    );
+    let mode = fs::metadata(fx.root.join("install-remote.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o111,
+        0o111,
+        "prepare must keep install-remote.sh executable"
     );
 
     let agents = fs::read_to_string(fx.root.join("AGENTS.md")).unwrap();

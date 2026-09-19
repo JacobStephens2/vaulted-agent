@@ -104,9 +104,11 @@ digest() {
 
 replace_file() {
   local file=$1
-  local tmp
+  local tmp mode
   tmp=$(mktemp)
   cat >"$tmp"
+  mode=$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file")
+  chmod "$mode" "$tmp"
   mv "$tmp" "$file"
 }
 
