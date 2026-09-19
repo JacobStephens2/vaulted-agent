@@ -37,7 +37,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 `grok`, `kimi`, `agy`, `muse`) and `bash`, and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.24` (or `latest`).
+`VAULTED_AGENT_VERSION=v0.4.25` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -95,7 +95,7 @@ va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
 va update                 # update the binary and add missing detected Harnesses
 va update --sync-harnesses # add missing Harnesses without downloading a binary
-va update v0.4.24         # pin; --check / --dry-run do not write
+va update v0.4.25         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
 
@@ -474,9 +474,11 @@ agent runs as, and `agent ALL=(ALL) NOPASSWD: ALL` makes every manifest
 boundary above it decorative — and turns each of the paragraphs above from a
 hardening measure into the only thing standing between a harness grant and root.
 
-Maintainers: the `curl … | bash` one-liner serves `install-remote.sh` from this
-repo, and refreshing it has an ordering constraint worth knowing before you cut
-a release - see [docs/hosting-the-installer.md](docs/hosting-the-installer.md).
+Maintainers: cut a release with `scripts/release.sh` (`prepare` on the
+release branch, `cut` after merge). The `curl … | bash` one-liner serves
+`install-remote.sh` from this repo; the script will not refresh the hosted
+copy until the GitHub assets exist. See
+[docs/hosting-the-installer.md](docs/hosting-the-installer.md).
 
 ## Updating
 

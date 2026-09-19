@@ -1,3 +1,21 @@
+# Migration: installer detects agent CLIs as the service account (v0.4.25)
+
+When install runs with `--user <service>`, auto-detection now resolves each
+CLI for that account (sudo PATH probe, then that account's `~/.local/bin` and
+`~/.grok/bin`, then system directories). A binary visible only to the invoking
+user is skipped, with a message naming both identities.
+
+Existing hosts are unchanged until they re-run `install.sh`. `va update` does
+not rewrite existing Harness `bin=` lines.
+
+# Migration: shipped Codex harness omits `-a on-request` (v0.4.25)
+
+The shipped `codex.conf` command is `codex -s danger-full-access`. Codex
+already defaults to OnRequest, and `-a on-request` conflicted with `--yolo`.
+
+Existing hosts keep their current Harness until they edit it or recreate it.
+`va update` does not rewrite existing profiles.
+
 # Migration: updates add missing Harnesses (v0.4.24)
 
 `va update` now asks the newly installed binary to create missing Harnesses for
@@ -37,7 +55,7 @@ refresh. `va update` (or a reinstall) is the way off that writer.
 `va update` downloads a GitHub release asset for this OS/arch and overwrites
 the running launcher (`current_exe`, usually `/usr/local/bin/vaulted-agent`).
 Default target is `VAULTED_AGENT_VERSION`, else the latest GitHub release.
-`va update v0.4.24` pins. `--check` and `--dry-run` write nothing.
+`va update v0.4.25` pins. `--check` and `--dry-run` write nothing.
 
 This is not `install.sh`. Existing Harnesses, manifests, and token files stay
 put; newer updaters add missing Harnesses as described above. If the binary
