@@ -309,7 +309,7 @@ cmd_deploy_site() {
   else
     remote_run "cp -a '$DEPLOY_PATH/install.sh' '$DEPLOY_PATH/install.sh.bak' && cp -a '$DEPLOY_PATH/AGENTS.md' '$DEPLOY_PATH/AGENTS.md.bak' && if [ -f '$DEPLOY_PATH/index.html' ]; then cp -a '$DEPLOY_PATH/index.html' '$DEPLOY_PATH/index.html.bak'; fi"
     if [[ -z "$previous" ]]; then
-      previous=$(remote_run "grep -E '^DEFAULT_VERSION=' '$DEPLOY_PATH/install.sh.bak' | head -n1" | sed -E 's/.*"(v[0-9.]+)".*/\1/')
+      previous=$(remote_run "cat '$DEPLOY_PATH/install.sh.bak'" | pin_in /dev/stdin || true)
     fi
     if remote_run "test -f '$DEPLOY_PATH/index.html.bak'"; then
       [[ -n "$previous" ]] || die "cannot rewrite index.html without the previous pin"
@@ -326,18 +326,39 @@ cmd_deploy_site() {
     fi
   fi
 
+  verify_deployed "$stage/install.sh" "$DEPLOY_PATH/install.sh" "$SITE_URL/install.sh"
+  verify_deployed "$stage/AGENTS.md" "$DEPLOY_PATH/AGENTS.md" "$SITE_URL/AGENTS.md"
+  if [[ -f "$stage/index.html" ]]; then
+    local page
+    if [[ "${VAULTED_AGENT_DEPLOY_LOCAL:-}" == 1 ]]; then
+      page=$(cat "$DEPLOY_PATH/index.html")
+    else
+      page=$(curl -fsSL "$SITE_URL/")
+    fi
+    printf '%s' "$page" | grep -q "$VERSION" \
+      || die "product page does not mention $VERSION after deploy"
+  fi
+  log "deployed $VERSION to $DEPLOY_PATH"
+}
+
+live_digest() {
+  local url=$1
+  curl -fsSL "$url" | {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
+  } | awk '{print $1}'
+}
+
+verify_deployed() {
+  local staged=$1 dest=$2 url=$3
   local staged_hash dest_hash
-  staged_hash=$(digest "$stage/install.sh")
+  staged_hash=$(digest "$staged")
   if [[ "${VAULTED_AGENT_DEPLOY_LOCAL:-}" == 1 ]]; then
-    dest_hash=$(digest "$DEPLOY_PATH/install.sh")
+    dest_hash=$(digest "$dest")
   else
-    dest_hash=$(curl -fsSL "$SITE_URL/install.sh" | {
-      if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi
-    } | awk '{print $1}')
+    dest_hash=$(live_digest "$url")
   fi
   [[ "$staged_hash" == "$dest_hash" ]] \
-    || die "live install.sh hash $dest_hash != staged $staged_hash"
-  log "deployed $VERSION to $DEPLOY_PATH (install.sh $staged_hash)"
+    || die "live $(basename "$dest") hash $dest_hash != staged $staged_hash"
 }
 
 cmd_readme_latest() {

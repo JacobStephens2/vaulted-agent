@@ -51,8 +51,7 @@ impl Fixture {
             .env("VAULTED_AGENT_RELEASE_ROOT", &self.root)
             .env("VAULTED_AGENT_DEPLOY_LOCAL", "1")
             .env("VAULTED_AGENT_DEPLOY_PATH", &self.site)
-            .env("GITHUB", "https://github.com")
-            .env("VAULTED_AGENT_FAKE_HTTP", &self.http);
+            .env("GITHUB", "https://github.com");
         cmd
     }
 
