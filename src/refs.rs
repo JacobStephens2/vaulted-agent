@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 mod writer;
 pub use writer::{write_refs, Mapping, RefsStyle, RefsWrite, WriteMode};
 
-pub fn key_to_var(key: &str) -> String {
+fn key_to_var(key: &str) -> String {
     let mut s: String = key
         .chars()
         .map(|c| {
@@ -732,9 +732,10 @@ pub fn scan_op_refs(text: &str, world: &OpWorld) -> Vec<ScannedRef> {
     scan_refs(text, |value| (op_ref_fate(value, world), None))
 }
 
-/// Comment form recording a variable name `refresh` must never map. The writer
-/// spells it out and `read_exclusions` reads it back, so both take it from here.
-const EXCLUDE_DIRECTIVE: &str = "# exclude:";
+/// Keyword of the comment recording a variable name `refresh` must never map
+/// (`# exclude: PATTERN`). The writer spells it out and `read_exclusions` reads
+/// it back, so both take it from here.
+const EXCLUDE_KEYWORD: &str = "exclude:";
 
 /// Variable-name patterns the manifest records as "do not map these".
 ///
@@ -761,7 +762,7 @@ pub fn read_exclusions(text: &str) -> Vec<String> {
         };
         let Some(rest) = body
             .trim_start()
-            .strip_prefix(EXCLUDE_DIRECTIVE.trim_start_matches(['#', ' ']))
+            .strip_prefix(EXCLUDE_KEYWORD)
             .or_else(|| body.trim_start().strip_prefix("exclude "))
         else {
             continue;

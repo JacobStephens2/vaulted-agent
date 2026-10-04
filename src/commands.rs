@@ -1249,7 +1249,7 @@ impl RefreshStep {
             }
             (WriteMode::Replace, RefreshStep::OnePassword { .. }) => {
                 println!(
-                    "\nWrote refs file (replace, {mappings} mapping(s)): {}",
+                    "{lead}Wrote refs file (replace, {mappings} mapping(s)): {}",
                     path.display()
                 );
             }
@@ -1345,7 +1345,7 @@ fn refresh_refs(
             &scan,
             step.exclusions(),
             step.repairs(),
-            mode == WriteMode::Replace,
+            mode,
             prune,
         )?;
     }
@@ -1427,9 +1427,10 @@ fn report_and_fix_refs(
     scan: &[refs::ScannedRef],
     exclusions: Option<&[String]>,
     can_repair: bool,
-    mode_is_replace: bool,
+    mode: WriteMode,
     prune: bool,
 ) -> Result<()> {
+    let mode_is_replace = mode == WriteMode::Replace;
     // `--replace` regenerates from the listing instead of repairing, so the
     // report must not promise a repair it will not perform.
     print_ref_report(paths, path, scan, can_repair && !mode_is_replace);

@@ -13,7 +13,7 @@ use std::path::Path;
 
 use super::{
     key_to_var, name_line, read_exclusions, recorded_uuid, split_annotation,
-    split_glued_bitwarden_line, write_atomic, EXCLUDE_DIRECTIVE,
+    split_glued_bitwarden_line, write_atomic, EXCLUDE_KEYWORD,
 };
 use crate::error::{Error, Result};
 
@@ -425,7 +425,7 @@ fn text_ends_in_banner(text: &str, source: &str) -> bool {
 fn exclusion_lines(patterns: &[String]) -> String {
     patterns
         .iter()
-        .map(|p| format!("{EXCLUDE_DIRECTIVE} {p}\n"))
+        .map(|p| format!("# {EXCLUDE_KEYWORD} {p}\n"))
         .collect()
 }
 
