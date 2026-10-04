@@ -1,20 +1,19 @@
-//! Launch path: resolve → scrub env → drop tokens → plan → exec (or spawn for tests).
+//! Launch adapter: manifest check → resolve → drop tokens → Workdir preflight
+//! → pure Launch plan (`launch_plan.rs`) → exec (or spawn for tests).
 
 use std::collections::HashMap;
 use std::env;
-use std::ffi::{OsStr, OsString};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::auth::TokenSource;
 use crate::backend;
-use crate::config::{
-    expand_home, load_default_backend, load_service_user, Backend, Harness, Paths,
-};
-use crate::env_scrub::{apply_aliases, build_child_env, MANAGER_TOKEN_VARS};
+use crate::config::{load_default_backend, load_service_user, Backend, Harness, Paths};
+use crate::env_scrub::{parent_env_snapshot, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
-use crate::resume;
+pub use crate::launch_plan::LaunchPlan;
+use crate::launch_plan::{self, LaunchFacts};
 use crate::secret::SecretValue;
 use crate::workdir::{self, CallerContext};
 
@@ -46,16 +45,8 @@ pub struct LaunchOpts {
     pub handoff: Option<HandoffMode>,
 }
 
-/// Pure launch plan: everything needed to start the agent without executing yet.
-#[derive(Debug, Clone)]
-pub struct LaunchPlan {
-    pub program: String,
-    pub args: Vec<String>,
-    pub workdir: PathBuf,
-    pub env: HashMap<OsString, OsString>,
-}
-
-/// Build scrub → resolve → drop token → child env + argv (composition seam).
+/// The launch adapter: every piece of launch I/O in order, then the pure
+/// Launch plan (`launch_plan::plan`) from what it gathered.
 pub fn build_launch_plan(
     paths: &Paths,
     harness: &Harness,
@@ -83,7 +74,7 @@ pub fn build_launch_plan(
     // The common cause is an item renamed in the vault since the manifest was
     // written: the reference stays well-formed and stops resolving, so nothing
     // offline can catch it.
-    let mut secrets: HashMap<String, SecretValue> =
+    let secrets: HashMap<String, SecretValue> =
         match backend::resolve(backend_name, &manifest, paths, opts.token_source) {
             Ok(s) => s,
             Err(e) => {
@@ -127,55 +118,18 @@ pub fn build_launch_plan(
         load_service_user(paths).as_deref(),
     )?;
 
-    // Per-harness renames after inject (issue #66). Mutates the secrets map
-    // only; values are still never logged. Fail closed if a source is missing.
-    apply_aliases(&mut secrets, &harness.aliases)?;
-
-    let mut child_env = build_child_env(&harness.keep, &secrets);
-
-    // Harness `env = NAME = value`: non-secret child vars (e.g. temporary
-    // KIMI_CODE_LEGACY_FLAG on kimi.conf until kimi-code#2746). Not for secrets.
-    for (k, v) in &harness.env_sets {
-        if MANAGER_TOKEN_VARS.contains(&k.as_str()) {
-            return Err(Error::Message(format!(
-                "harness env cannot set manager-token name '{k}'"
-            )));
-        }
-        child_env.insert(OsString::from(k.as_str()), OsString::from(v.as_str()));
-    }
-
-    let home = &caller.home;
-    let mut cmdline = harness.command.clone();
-    if let Some(bin) = &harness.bin_dir {
-        let bin = expand_home(bin, home);
-        let path = child_env
-            .get(OsStr::new("PATH"))
-            .map(|p| format!("{bin}:{}", p.to_string_lossy()))
-            .unwrap_or_else(|| bin.clone());
-        child_env.insert(OsString::from("PATH"), OsString::from(path));
-    }
-
-    if cmdline.is_empty() {
-        return Err(Error::Message("empty command".into()));
-    }
-    let program = expand_home(&cmdline.remove(0), home);
-    let agent_base = Path::new(&program)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&program);
-
-    let mut extra = opts.extra_args.clone();
-    extra = resume::normalize_argv(agent_base, &extra, harness.labels)?;
-
-    let mut args = cmdline;
-    args.extend(extra);
-
-    Ok(LaunchPlan {
-        program,
-        args,
-        workdir,
-        env: child_env,
-    })
+    // Snapshot after the token clear above, so the launcher holds no ambient
+    // token; the plan strips manager tokens from the child regardless.
+    launch_plan::plan(
+        harness,
+        secrets,
+        LaunchFacts {
+            workdir,
+            home: caller.home,
+            parent_env: parent_env_snapshot(),
+            extra_args: opts.extra_args.clone(),
+        },
+    )
 }
 
 /// Run a plan via exec (production) or spawn (tests).
@@ -242,62 +196,4 @@ pub fn launch_run(
             handoff: None,
         },
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::secret::SecretValue;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn build_plan_injects_secret_excludes_manager_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.manifest_dir).unwrap();
-        fs::write(
-            paths.manifest_dir.join("m.env"),
-            "APP_DB_PASS=\"secret-value\"\n",
-        )
-        .unwrap();
-
-        // Absolute command path — no PATH mutation required for plan build.
-        let agent = tmp.path().join("agent");
-        fs::write(&agent, "#!/bin/sh\n").unwrap();
-        let mut perms = fs::metadata(&agent).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&agent, perms).unwrap();
-
-        env::set_var("BWS_ACCESS_TOKEN", "should-not-reach-child");
-
-        let h = Harness {
-            name: "h".into(),
-            backend: Some(Backend::Plainfile),
-            manifest: "m.env".into(),
-            bin_dir: None,
-            workdir: None,
-            labels: false,
-            keep: vec![],
-            aliases: vec![],
-            env_sets: vec![],
-            command: vec![agent.display().to_string()],
-        };
-        let opts = LaunchOpts {
-            token_source: TokenSource::decide(None, None, false, crate::config::AuthMode::File),
-            extra_args: vec![],
-            handoff: None,
-        };
-        let plan = build_launch_plan(&paths, &h, &opts).unwrap();
-        assert_eq!(
-            plan.env
-                .get(OsStr::new("APP_DB_PASS"))
-                .map(|s| s.to_string_lossy().into_owned()),
-            Some("secret-value".into())
-        );
-        assert!(!plan.env.contains_key(OsStr::new("BWS_ACCESS_TOKEN")));
-        assert_eq!(plan.program, agent.display().to_string());
-        assert!(env::var_os("BWS_ACCESS_TOKEN").is_none());
-        let _ = SecretValue::new("x");
-    }
 }
