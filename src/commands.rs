@@ -22,6 +22,7 @@ use crate::onepassword::{self, OpListing};
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
+use crate::workdir::{self, CallerContext};
 
 pub fn default_backend(paths: &Paths) -> Backend {
     load_default_backend(paths)
@@ -334,12 +335,7 @@ fn ensure_workdir_for_setup(paths: &Paths, service_user: Option<&str>) -> Result
 
     if workdir == "caller" {
         if let Some(svc) = service_user.filter(|s| !s.is_empty()) {
-            eprintln!(
-                "  NOTE: service_user={svc} with workdir=caller needs {svc} to traverse your cwd.\n  \
-                 If launches fail at exec from a 0700 home:\n    \
-                 setfacl -m u:{svc}:x ~   # traverse only — does not allow listing\n  \
-                 (or pick a fixed workdir {svc} can enter)"
-            );
+            eprintln!("  {}", workdir::setup_note(svc, &CallerContext::from_env()));
         }
     }
     Ok(())
@@ -621,71 +617,23 @@ fn report_token_file(
 
 /// What, if anything, to say about a harness's `workdir`.
 ///
-/// `workdir=caller` + `service_user` used to always warn from config shape
-/// alone (issue #58). That cried wolf once homes had `setfacl …:x`. Doctor
-/// already runs as the service account, so probe real paths and warn only when
-/// traversal actually fails — same primitive as the launch preflight (#56).
+/// Under a Service user, the Workdir audit probes the paths a launch would
+/// need (issue #58) by the same rules the launch preflight uses (#128).
+/// Otherwise, nudge agent harnesses toward `workdir = caller`.
 fn workdir_warning(
     service_user: Option<&str>,
     workdir: Option<&str>,
     harness: &str,
+    caller: &CallerContext,
 ) -> Option<String> {
+    if service_user.is_some_and(|s| !s.is_empty()) {
+        return workdir::audit(workdir, caller, service_user);
+    }
     let is_agent = matches!(
         harness,
         "claude" | "codex" | "grok" | "kimi" | "agy" | "muse"
     );
-    let wd_is_caller = workdir == Some("caller");
-    match (service_user, wd_is_caller) {
-        (Some(svc), true) => {
-            let failed: Vec<_> = launch::caller_probe_paths()
-                .into_iter()
-                .filter(|p| launch::path_is_traversable(p).is_err())
-                .collect();
-            if failed.is_empty() {
-                return None;
-            }
-            let paths = failed
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let example = failed[0].display();
-            Some(format!(
-                "workdir=caller with service_user={svc}, and {svc} cannot enter {paths} \
-                 (Permission denied). Launching from there fails at exec. \
-                 Fix: setfacl -m u:{svc}:x {example}   # traverse only — does not allow listing \
-                 (or set an absolute workdir {svc} can enter)"
-            ))
-        }
-        (Some(svc), false) => {
-            // Absolute / fixed workdir: probe the resolved path when we can.
-            let raw = workdir.filter(|s| !s.is_empty())?;
-            if raw == "caller" {
-                return None;
-            }
-            let path = {
-                let s = if let Some(rest) = raw.strip_prefix("$HOME") {
-                    format!("{}{rest}", std::env::var("HOME").unwrap_or_default())
-                } else if let Some(rest) = raw.strip_prefix("${HOME}") {
-                    format!("{}{rest}", std::env::var("HOME").unwrap_or_default())
-                } else {
-                    raw.to_string()
-                };
-                std::path::PathBuf::from(s)
-            };
-            if launch::path_is_traversable(&path).is_ok() {
-                return None;
-            }
-            Some(format!(
-                "workdir={raw} with service_user={svc}, and {svc} cannot enter {} \
-                 (Permission denied). Fix: setfacl -m u:{svc}:x {} or pick a path {svc} can enter",
-                path.display(),
-                path.display()
-            ))
-        }
-        (None, false) if is_agent => Some("agent harness without workdir=caller".to_string()),
-        _ => None,
-    }
+    (is_agent && workdir != Some("caller")).then(|| "agent harness without workdir=caller".into())
 }
 
 /// Names for a one-line report: the first few, then a count of the rest.
@@ -729,6 +677,7 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     // never read against the wrong one.
     let running_as = crate::privilege::current_user();
     let service_user = load_service_user(paths);
+    let caller = CallerContext::from_env();
     match service_user.as_deref() {
         Some(svc) if svc != running_as => {
             // Only reached when the hop was declined (VAULTED_AGENT_NO_REEXEC)
@@ -951,7 +900,9 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
             | Backend::Sops
             | Backend::Pass => {}
         }
-        if let Some(msg) = workdir_warning(service_user.as_deref(), h.workdir.as_deref(), name) {
+        if let Some(msg) =
+            workdir_warning(service_user.as_deref(), h.workdir.as_deref(), name, &caller)
+        {
             println!("  WARN: {msg}");
             warn += 1;
         }
@@ -2066,28 +2017,6 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
     Ok(())
 }
 
-fn user_home(user: &str) -> Option<PathBuf> {
-    let out = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                "getent passwd {user} 2>/dev/null | cut -d: -f6 || \
-                 dscl . -read /Users/{user} NFSHomeDirectory 2>/dev/null | awk '{{print $2}}'"
-            ),
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if home.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(home))
-    }
-}
-
 pub fn cmd_uninstall(args: &[String]) -> Result<()> {
     let mut purge = false;
     let mut dry = false;
@@ -2162,7 +2091,7 @@ pub fn cmd_uninstall(args: &[String]) -> Result<()> {
 
     // User-local symlinks (~/.local/bin/vaulted-agent and va)
     for u in &link_users {
-        if let Some(home) = user_home(u) {
+        if let Some(home) = crate::privilege::account_home(u) {
             for name in ["vaulted-agent", "va"] {
                 let p = home.join(".local/bin").join(name);
                 if p.exists() || p.is_symlink() {
@@ -2827,75 +2756,28 @@ mod tests {
     }
 
     #[test]
-    fn workdir_caller_is_silent_when_probe_paths_are_traversable() {
-        // Test cwd is always traversable; config shape alone must not warn.
-        assert_eq!(
-            workdir_warning(Some("conductor"), Some("caller"), "claude"),
-            None
-        );
-    }
-
-    #[test]
-    fn workdir_caller_warns_only_when_a_probe_path_fails() {
-        let uid = std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .unwrap_or(0);
-        if uid == 0 {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let blocked = tmp.path().join("no-enter");
-        fs::create_dir(&blocked).unwrap();
-        let mut perms = fs::metadata(&blocked).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o000);
-        fs::set_permissions(&blocked, perms).unwrap();
-
-        std::env::set_var("VAULTED_AGENT_CALLER_CWD", &blocked);
-        let w = workdir_warning(Some("conductor"), Some("caller"), "claude")
-            .expect("blocked caller path should warn");
-        assert!(w.contains("cannot enter"), "{w}");
-        assert!(w.contains("conductor"), "{w}");
-        assert!(w.contains("setfacl"), "{w}");
-        std::env::remove_var("VAULTED_AGENT_CALLER_CWD");
-
-        let mut perms = fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&blocked, perms).unwrap();
-    }
-
-    #[test]
-    fn absolute_workdir_is_fine_under_a_service_user_when_traversable() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(
-            workdir_warning(
-                Some("conductor"),
-                Some(tmp.path().to_str().unwrap()),
-                "claude"
-            ),
-            None
-        );
-    }
-
-    #[test]
     fn agent_without_caller_still_warns_when_no_service_user() {
+        let caller = CallerContext::default();
         assert_eq!(
-            workdir_warning(None, Some("/srv/x"), "claude").as_deref(),
+            workdir_warning(None, Some("/srv/x"), "claude", &caller).as_deref(),
             Some("agent harness without workdir=caller")
         );
-        assert_eq!(workdir_warning(None, Some("caller"), "claude"), None);
+        assert_eq!(
+            workdir_warning(None, None, "claude", &caller).as_deref(),
+            Some("agent harness without workdir=caller")
+        );
+        assert_eq!(
+            workdir_warning(None, Some("caller"), "claude", &caller),
+            None
+        );
     }
 
     #[test]
     fn non_agent_harness_is_not_nagged_about_workdir() {
-        assert_eq!(workdir_warning(None, Some("/srv/x"), "backup"), None);
+        let caller = CallerContext::default();
+        assert_eq!(
+            workdir_warning(None, Some("/srv/x"), "backup", &caller),
+            None
+        );
     }
 }

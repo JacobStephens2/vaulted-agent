@@ -18,6 +18,7 @@ pub mod resume;
 pub mod secret;
 pub mod update;
 pub mod validate;
+mod workdir;
 
 pub use config::{list_harness_names, load_auth_mode, AuthMode, Backend, Harness, Paths};
 pub use error::{Error, Result};

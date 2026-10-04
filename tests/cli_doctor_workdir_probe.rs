@@ -107,6 +107,59 @@ fn doctor_warns_when_caller_cwd_is_untraversable() {
     fs::set_permissions(&blocked, perms).unwrap();
 }
 
+/// Issue #128: launch treats an unset `workdir` as `caller`, so the doctor
+/// must probe the caller paths for it too rather than report it healthy.
+#[test]
+fn doctor_warns_when_unset_workdir_caller_cwd_is_untraversable() {
+    if is_root() {
+        return;
+    }
+    let seam = CliSeam::new();
+    fs::write(seam.config_dir.join("manifests/empty.env"), "\n").unwrap();
+    fs::write(
+        seam.config_dir.join("harnesses.d/claude.conf"),
+        "backend = plainfile\nmanifest = empty.env\ncommand = true\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "auth_mode = file\nservice_user = conductor\n",
+    )
+    .unwrap();
+
+    let blocked = seam.root.join("blocked");
+    fs::create_dir(&blocked).unwrap();
+    let mut perms = fs::metadata(&blocked).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&blocked, perms).unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .args(["doctor"])
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .env("VAULTED_AGENT_CALLER_CWD", &blocked)
+        .output()
+        .expect("doctor");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut perms = fs::metadata(&blocked).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&blocked, perms).unwrap();
+
+    assert!(
+        combined.contains(&format!("cannot enter {}", blocked.display())),
+        "unset workdir must be probed like caller:\n{combined}"
+    );
+    assert!(
+        combined.contains(&format!("setfacl -m u:conductor:x {}", blocked.display())),
+        "{combined}"
+    );
+}
+
 #[test]
 fn doctor_treats_native_agents_as_cwd_scoped() {
     for harness in ["agy", "muse"] {

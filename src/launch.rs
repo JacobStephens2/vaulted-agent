@@ -3,180 +3,20 @@
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::auth::TokenSource;
 use crate::backend;
-use crate::config::{load_default_backend, load_service_user, Backend, Harness, Paths};
+use crate::config::{
+    expand_home, load_default_backend, load_service_user, Backend, Harness, Paths,
+};
 use crate::env_scrub::{apply_aliases, build_child_env, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
-use crate::privilege;
 use crate::resume;
 use crate::secret::SecretValue;
-
-fn expand_home(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix("$HOME") {
-        let home = env::var("HOME").unwrap_or_default();
-        return format!("{home}{rest}");
-    }
-    if let Some(rest) = s.strip_prefix("${HOME}") {
-        let home = env::var("HOME").unwrap_or_default();
-        return format!("{home}{rest}");
-    }
-    s.to_string()
-}
-
-fn resolve_workdir(harness: &Harness, caller_cwd: &Path) -> Result<PathBuf> {
-    match harness.workdir.as_deref() {
-        None | Some("") => Ok(caller_cwd.to_path_buf()),
-        Some("caller") => {
-            let c = env::var_os("VAULTED_AGENT_CALLER_CWD")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| caller_cwd.to_path_buf());
-            Ok(c)
-        }
-        Some(p) => Ok(PathBuf::from(expand_home(p))),
-    }
-}
-
-/// True when the process can search (traverse) `path` — execute bit / ACL, not
-/// necessarily list. `open()` would demand read permission and false-negative a
-/// `setfacl …:x` fix (issue #56). Shared by launch preflight and doctor (#58).
-#[cfg(unix)]
-pub(crate) fn path_is_traversable(path: &Path) -> std::io::Result<()> {
-    // `test -x` follows the same search rules as path resolution.
-    let status = Command::new("test").arg("-x").arg(path).status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Permission denied",
-        ))
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn path_is_traversable(path: &Path) -> std::io::Result<()> {
-    fs::metadata(path).map(|_| ())
-}
-
-/// Paths a `workdir = caller` launch is likely to need, for doctor probes.
-/// Always includes the caller's cwd; when `SUDO_USER` is set (re-exec from an
-/// operator), also their home directory.
-pub(crate) fn caller_probe_paths() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(c) = env::var("VAULTED_AGENT_CALLER_CWD") {
-        if !c.is_empty() {
-            out.push(PathBuf::from(c));
-        }
-    } else if let Ok(c) = env::current_dir() {
-        out.push(c);
-    }
-    // After sudo -u service, HOME is usually the service account's. SUDO_USER
-    // still names the operator; their home is the ordinary 0700 failure case.
-    if let Ok(user) = env::var("SUDO_USER") {
-        if let Some(home) = home_dir_for_user(&user) {
-            if !out.iter().any(|p| p == &home) {
-                out.push(home);
-            }
-        }
-    }
-    out
-}
-
-fn home_dir_for_user(user: &str) -> Option<PathBuf> {
-    let out = Command::new("getent")
-        .args(["passwd", user])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let line = String::from_utf8_lossy(&out.stdout);
-    // name:x:uid:gid:gecos:home:shell
-    let home = line.trim().split(':').nth(5)?;
-    if home.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(home))
-}
-
-/// Confirm the effective user can enter the resolved workdir before exec.
-/// Bare exec EACCES names neither the directory, the account, nor the remedy.
-pub(crate) fn ensure_workdir_usable(
-    workdir: &Path,
-    workdir_setting: Option<&str>,
-    service_user: Option<&str>,
-) -> Result<()> {
-    match fs::metadata(workdir) {
-        Ok(m) if !m.is_dir() => {
-            return Err(Error::Message(format!(
-                "workdir {} is not a directory",
-                workdir.display()
-            )));
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::Message(format!(
-                "workdir {} does not exist",
-                workdir.display()
-            )));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            // Fall through to the rich message below (cannot even stat).
-        }
-        Err(e) => {
-            return Err(Error::Message(format!(
-                "workdir {}: {e}",
-                workdir.display()
-            )));
-        }
-    }
-
-    if path_is_traversable(workdir).is_ok() {
-        return Ok(());
-    }
-
-    let who = privilege::current_user();
-    let who = if who.is_empty() {
-        "this process".to_string()
-    } else {
-        format!("`{who}`")
-    };
-    let mut msg = format!(
-        "{who} cannot enter {} (Permission denied)",
-        workdir.display()
-    );
-
-    let callerish = matches!(workdir_setting, None | Some("") | Some("caller"));
-    if callerish {
-        msg.push_str("\n  workdir resolved to your shell's cwd (workdir = caller)");
-    } else if let Some(setting) = workdir_setting {
-        msg.push_str(&format!("\n  workdir is set to `{setting}` in the harness"));
-    }
-
-    if let Some(svc) = service_user.filter(|s| !s.is_empty()) {
-        msg.push_str(&format!(
-            ", but agents run as `{svc}` (service_user), which has no traverse permission there.\n  \
-             Fix one of:\n    \
-             setfacl -m u:{svc}:x {wd}   # traverse only — does not allow listing\n    \
-             launch from a directory {svc} can enter\n    \
-             set an absolute `workdir` in the harness conf",
-            wd = workdir.display()
-        ));
-    } else {
-        msg.push_str(
-            ".\n  Fix: grant this account execute (traverse) on the directory, or set an absolute \
-             `workdir` the account can enter.",
-        );
-    }
-
-    Err(Error::Message(msg))
-}
+use crate::workdir::{self, CallerContext};
 
 /// How to hand off to the agent process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -274,14 +114,13 @@ pub fn build_launch_plan(
         env::remove_var(name);
     }
 
-    let caller_cwd = env::current_dir().map_err(|e| Error::Message(format!("cwd: {e}")))?;
-    let workdir = resolve_workdir(harness, &caller_cwd)?;
     // After the privilege hop (if any) this process *is* the effective launch
     // account. Fail here with a clear remedy rather than a bare exec EACCES
     // (issue #56).
-    ensure_workdir_usable(
-        &workdir,
+    let caller = CallerContext::from_env();
+    let workdir = workdir::preflight(
         harness.workdir.as_deref(),
+        &caller,
         load_service_user(paths).as_deref(),
     )?;
 
@@ -302,9 +141,10 @@ pub fn build_launch_plan(
         child_env.insert(OsString::from(k.as_str()), OsString::from(v.as_str()));
     }
 
+    let home = &caller.home;
     let mut cmdline = harness.command.clone();
     if let Some(bin) = &harness.bin_dir {
-        let bin = expand_home(bin);
+        let bin = expand_home(bin, home);
         let path = child_env
             .get(OsStr::new("PATH"))
             .map(|p| format!("{bin}:{}", p.to_string_lossy()))
@@ -315,7 +155,7 @@ pub fn build_launch_plan(
     if cmdline.is_empty() {
         return Err(Error::Message("empty command".into()));
     }
-    let program = expand_home(&cmdline.remove(0));
+    let program = expand_home(&cmdline.remove(0), home);
     let agent_base = Path::new(&program)
         .file_name()
         .and_then(|s| s.to_str())
@@ -456,56 +296,5 @@ mod tests {
         assert_eq!(plan.program, agent.display().to_string());
         assert!(env::var_os("BWS_ACCESS_TOKEN").is_none());
         let _ = SecretValue::new("x");
-    }
-
-    #[test]
-    fn ensure_workdir_usable_accepts_traversable_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        ensure_workdir_usable(tmp.path(), Some("caller"), None).unwrap();
-    }
-
-    #[test]
-    fn ensure_workdir_usable_reports_missing_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("nope");
-        let err = ensure_workdir_usable(&missing, Some("/srv/x"), None).unwrap_err();
-        assert!(err.to_string().contains("does not exist"), "{err}");
-    }
-
-    #[test]
-    fn ensure_workdir_usable_names_service_user_on_permission_denied() {
-        // Skip when root: chmod 000 does not stop root from traversing.
-        let uid = Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .unwrap_or(0);
-        if uid == 0 {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let blocked = tmp.path().join("blocked");
-        fs::create_dir(&blocked).unwrap();
-        let mut perms = fs::metadata(&blocked).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
-        perms.set_mode(0o000);
-        fs::set_permissions(&blocked, perms).unwrap();
-
-        let err = ensure_workdir_usable(&blocked, Some("caller"), Some("conductor")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("cannot enter"), "{msg}");
-        assert!(msg.contains("conductor"), "{msg}");
-        assert!(msg.contains("setfacl"), "{msg}");
-        assert!(msg.contains("workdir = caller"), "{msg}");
-
-        let mut perms = fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&blocked, perms).unwrap();
     }
 }

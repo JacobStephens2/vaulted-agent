@@ -17,7 +17,7 @@ Recognised keys, all optional except command and manifest:
                plainfile    a plain dotenv; the file IS the secrets
   bin      = directory prepended to PATH before exec; $HOME expands
   workdir  = directory for the agent process before exec:
-               (unset)  install WORKDIR (often the service account home)
+               (unset)  same as caller
                caller   the directory where you typed `va …` (best for
                         grok/claude --resume and project-scoped sessions)
                /path or $HOME/…  an explicit directory
