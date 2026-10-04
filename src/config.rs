@@ -491,6 +491,18 @@ pub fn load_auth_mode(paths: &Paths) -> AuthMode {
 }
 
 /// Service account for sudo re-exec (optional). Env VAULTED_AGENT_SERVICE_USER wins.
+/// Expand a leading `$HOME` or `${HOME}` in a harness value with `home`.
+/// Anything else, including `$HOME` later in the value, is left as written.
+pub(crate) fn expand_home(value: &str, home: &str) -> String {
+    match value
+        .strip_prefix("${HOME}")
+        .or_else(|| value.strip_prefix("$HOME"))
+    {
+        Some(rest) => format!("{home}{rest}"),
+        None => value.to_string(),
+    }
+}
+
 pub fn load_service_user(paths: &Paths) -> Option<String> {
     if let Ok(v) = std::env::var("VAULTED_AGENT_SERVICE_USER") {
         if !v.is_empty() {
@@ -588,6 +600,16 @@ pub fn parse_dotenv_var(text: &str, key: &str) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_home_replaces_only_a_leading_home() {
+        assert_eq!(expand_home("$HOME/bin", "/home/op"), "/home/op/bin");
+        assert_eq!(expand_home("${HOME}/bin", "/home/op"), "/home/op/bin");
+        assert_eq!(expand_home("$HOME", "/home/op"), "/home/op");
+        assert_eq!(expand_home("/opt/$HOME/bin", "/home/op"), "/opt/$HOME/bin");
+        assert_eq!(expand_home("claude", "/home/op"), "claude");
+        assert_eq!(expand_home("$HOME/bin", ""), "/bin");
+    }
 
     #[test]
     fn parse_harness_minimal() {

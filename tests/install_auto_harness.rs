@@ -194,7 +194,7 @@ exit 1
     )
     .unwrap();
     // getent passwd <user> served from $users/<user>.home; unknown users fail
-    // so user_home falls through exactly as it would for a stranger.
+    // so account_home falls through exactly as it would for a stranger.
     fs::write(
         shim.join("getent"),
         r#"#!/bin/bash

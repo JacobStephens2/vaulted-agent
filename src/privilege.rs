@@ -49,6 +49,34 @@ pub fn current_user() -> String {
         .unwrap_or_default()
 }
 
+/// The home directory the account database records for `user`, if it is
+/// absolute. `getent passwd` on Linux, `dscl` on macOS. The account name is
+/// passed as an argument, never interpolated into a shell command.
+pub fn account_home(user: &str) -> Option<PathBuf> {
+    let output = if cfg!(target_os = "macos") {
+        Command::new("dscl")
+            .args([".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"])
+            .output()
+            .ok()?
+    } else {
+        Command::new("getent")
+            .args(["passwd", user])
+            .output()
+            .ok()?
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let home = if cfg!(target_os = "macos") {
+        text.trim().strip_prefix("NFSHomeDirectory:")?.trim()
+    } else {
+        // name:x:uid:gid:gecos:home:shell
+        text.trim().split(':').nth(5)?
+    };
+    Path::new(home).is_absolute().then(|| PathBuf::from(home))
+}
+
 impl ReexecFacts {
     pub fn from_runtime(paths: &Paths, argv0: &str, orig_argv: &[String]) -> Self {
         let current_user = current_user();

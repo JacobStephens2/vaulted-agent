@@ -122,7 +122,7 @@ fn search_dirs(paths: &Paths, inventory: &Inventory) -> Vec<PathBuf> {
     });
     let other_account = account.as_deref().filter(|user| *user != current);
     let home = if let Some(user) = other_account {
-        account_home(user)
+        crate::privilege::account_home(user)
     } else {
         env::var_os("HOME").map(PathBuf::from)
     };
@@ -149,31 +149,6 @@ fn search_dirs(paths: &Paths, inventory: &Inventory) -> Vec<PathBuf> {
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
     dirs
-}
-
-fn account_home(user: &str) -> Option<PathBuf> {
-    // Pass account names as data, never interpolate them into a shell command.
-    let output = if cfg!(target_os = "macos") {
-        Command::new("dscl")
-            .args([".", "-read", &format!("/Users/{user}"), "NFSHomeDirectory"])
-            .output()
-            .ok()?
-    } else {
-        Command::new("getent")
-            .args(["passwd", user])
-            .output()
-            .ok()?
-    };
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let home = if cfg!(target_os = "macos") {
-        text.trim().strip_prefix("NFSHomeDirectory:")?.trim()
-    } else {
-        text.split(':').nth(5)?
-    };
-    Path::new(home).is_absolute().then(|| PathBuf::from(home))
 }
 
 fn find_binary(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
