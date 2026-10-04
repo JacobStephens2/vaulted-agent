@@ -86,6 +86,23 @@ fn main() {
             // reaches a harness launch: through the one Token source.
             let token_source = TokenSource::from_env(&paths, prompt_auth);
             let result = match verb {
+                Verb::Version => {
+                    commands::cmd_version();
+                    Ok(())
+                }
+                Verb::Help => {
+                    commands::usage(&paths);
+                    Ok(())
+                }
+                Verb::AuthMode => commands::cmd_auth_mode(&paths, &args),
+                Verb::Doctor => commands::cmd_doctor(&paths),
+                Verb::Secrets => commands::cmd_secrets(&paths, &args, token_source),
+                Verb::Setup => commands::cmd_setup(&paths, &args, token_source),
+                Verb::Refresh => commands::cmd_refresh(&paths, &args, token_source),
+                Verb::Uninstall => commands::cmd_uninstall(&args),
+                Verb::Update => vaulted_agent::update::cmd_update(&args),
+                Verb::Run => commands::cmd_run(&paths, &args, token_source),
+                Verb::EditManifest => commands::cmd_edit_manifest(&paths, &args),
                 Verb::Pick => pick(
                     &paths,
                     argv0,
@@ -94,7 +111,6 @@ fn main() {
                     token_source,
                     manifest.as_deref(),
                 ),
-                other => dispatch_mgmt(&paths, other, &args, token_source),
             };
             if let Err(e) = result {
                 fail(e);
@@ -127,32 +143,4 @@ fn pick(
         privilege::maybe_reexec_service_user(paths, argv0, &replay)?;
     }
     commands::cmd_launch_harness(paths, &chosen, args, token_source, manifest_override)
-}
-
-fn dispatch_mgmt(
-    paths: &Paths,
-    verb: Verb,
-    rest: &[String],
-    token_source: TokenSource,
-) -> Result<()> {
-    match verb {
-        Verb::Version => {
-            commands::cmd_version();
-            Ok(())
-        }
-        Verb::Help => {
-            commands::usage(paths);
-            Ok(())
-        }
-        Verb::AuthMode => commands::cmd_auth_mode(paths, rest),
-        Verb::Doctor => commands::cmd_doctor(paths),
-        Verb::Secrets => commands::cmd_secrets(paths, rest, token_source),
-        Verb::Setup => commands::cmd_setup(paths, rest, token_source),
-        Verb::Refresh => commands::cmd_refresh(paths, rest, token_source),
-        Verb::Uninstall => commands::cmd_uninstall(rest),
-        Verb::Update => vaulted_agent::update::cmd_update(rest),
-        Verb::Run => commands::cmd_run(paths, rest, token_source),
-        Verb::EditManifest => commands::cmd_edit_manifest(paths, rest),
-        Verb::Pick => unreachable!("pick is carried out by `pick`"),
-    }
 }

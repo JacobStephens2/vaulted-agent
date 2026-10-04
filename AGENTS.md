@@ -238,6 +238,8 @@ va -m readonly.env.tpl pick
 - **Refused** under `*-conductor`. Use direct `va` for `-m`.
 - With `service_user`, sudoers must match the line as typed (flags before harness
   name). Prefer conductor links for delegated grants, or extend sudoers.
+- `va -m x pick` hops after the menu as `va -m x <chosen>`, so sudoers needs
+  a rule for the Harness picked, never for `pick`.
 
 ### Diagnose before changing config
 
