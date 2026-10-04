@@ -16,6 +16,7 @@ use crate::config::{
     load_default_backend, load_service_user, parse_dotenv_keys, AuthMode, Backend, Harness, Paths,
 };
 use crate::error::{Error, Result};
+use crate::inventory::Inventory;
 use crate::launch::{self, auth_mode_from_env_or_config, force_prompt_from_env, LaunchOpts};
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
@@ -478,16 +479,22 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
         }
         "which" => {
             println!("Harness → variables (names only; values never printed)\n");
-            let names = list_harness_names(paths)?;
-            let be_default = default_backend(paths);
-            for name in names {
-                let h = Harness::load(paths, &name)?;
-                let be = h.backend.unwrap_or(be_default);
-                let man = &h.manifest;
+            // A read-only listing: one bad file is reported in its place
+            // rather than hiding every Harness after it.
+            for entry in Inventory::load(paths)?.harnesses() {
+                let name = &entry.name;
+                let v = match &entry.loaded {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!("{name}  (unreadable: {e})");
+                        continue;
+                    }
+                };
+                let (be, man) = (v.backend, &v.harness.manifest);
                 println!("{name}  (backend={be} manifest={man})");
-                let man_path = h.resolve_manifest_path(paths);
+                let man_path = &v.manifest;
                 if man_path.is_file() {
-                    if let Ok(text) = fs::read_to_string(&man_path) {
+                    if let Ok(text) = fs::read_to_string(man_path) {
                         if let Ok(map) = parse_dotenv_keys(&text) {
                             for k in map.keys() {
                                 println!("  {k}");
@@ -525,35 +532,28 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                     // the one nothing launches from, and a gate that walks
                     // launch profiles alone reports it green while the units
                     // that read it are down.
-                    let be_default = default_backend(paths);
-                    let mut targets: Vec<(String, Backend, PathBuf)> = Vec::new();
-                    for name in list_harness_names(paths)? {
-                        let h = Harness::load(paths, &name)?;
-                        let man_path = h.resolve_manifest_path(paths);
-                        // The manifest is named on every line because several
-                        // harnesses commonly share one file: six green
-                        // harnesses can be one file checked six times, and the
-                        // operator cannot see which files were covered
-                        // otherwise.
-                        let label = format!("{name} ({})", man_path.display());
-                        targets.push((label, h.backend.unwrap_or(be_default), man_path));
-                    }
-                    // Fails closed on an entry it cannot read: an unusable
-                    // line means a file the operator believes is checked is
-                    // not being checked.
-                    for extra in crate::config::load_extra_manifests(paths)? {
-                        let label = extra.path.display().to_string();
-                        targets.push((label, extra.backend.unwrap_or(be_default), extra.path));
-                    }
-
+                    let inventory = Inventory::load(paths)?;
                     let mut err = false;
-                    for (label, be, man_path) in targets {
-                        print!("{label}: ");
-                        match validate_manifest_against_vault(paths, be, &man_path, offline) {
+                    for target in inventory.validate_targets() {
+                        print!("{}: ", target.label);
+                        // A Harness or extra_manifest line that will not load
+                        // fails closed on its own line: a file the operator
+                        // believes is checked is not being checked. The rest
+                        // are still checked, so one typo does not hide whether
+                        // every other manifest is good.
+                        let (be, man_path) = match target.check {
+                            Ok(check) => check,
+                            Err(e) => {
+                                println!("FAIL ({e})");
+                                err = true;
+                                continue;
+                            }
+                        };
+                        match validate_manifest_against_vault(paths, be, man_path, offline) {
                             Ok(n) => println!("{}", format_validate_ok(n)),
                             Err(e) => {
                                 println!("FAIL ({e})");
-                                print_validate_blame(&man_path, &format!("{e}"), true);
+                                print_validate_blame(man_path, &format!("{e}"), true);
                                 err = true;
                             }
                         }
@@ -571,12 +571,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         let be = h.backend.unwrap_or_else(|| default_backend(paths));
                         (h.resolve_manifest_path(paths), be)
                     } else {
-                        let p = Path::new(man);
-                        let man_path = if p.is_absolute() {
-                            p.to_path_buf()
-                        } else {
-                            paths.manifest_dir.join(p)
-                        };
+                        let man_path = paths.resolve_manifest(man);
                         // positional, not args[2]: --offline may sit anywhere.
                         let be = match positional.get(1) {
                             Some(s) => s.parse()?,
@@ -1091,31 +1086,12 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     refresh_refs(paths, step, man_path, take_all, mode, prune)
 }
 
-/// Backend for a bare `refresh`: whichever refs-using backend the harnesses
-/// resolve to.
-///
-/// Falls back to Bitwarden, NOT to `default_backend`, when there is no positive
-/// signal. `refresh` meant Bitwarden for its whole history, while
-/// `load_default_backend` returns OnePassword when nothing is configured - so
-/// deferring to it here would silently retarget `refresh` on installs that have
-/// no harnesses and no defaults.conf. Ties break the same way.
+/// Backend for a bare `refresh` (see [`Inventory::refresh_backend`]). An
+/// unreadable harness directory gives no signal, so the Bitwarden fallback.
 fn refresh_backend(paths: &Paths) -> Backend {
-    let be_default = default_backend(paths);
-    let mut seen: Vec<Backend> = Vec::new();
-    if let Ok(names) = list_harness_names(paths) {
-        for name in names {
-            if let Ok(h) = Harness::load(paths, &name) {
-                let be = h.backend.unwrap_or(be_default);
-                if matches!(be, Backend::Bitwarden | Backend::OnePassword) && !seen.contains(&be) {
-                    seen.push(be);
-                }
-            }
-        }
-    }
-    match seen.as_slice() {
-        [one] => *one,
-        _ => Backend::Bitwarden,
-    }
+    Inventory::load(paths)
+        .map(|inv| inv.refresh_backend())
+        .unwrap_or(Backend::Bitwarden)
 }
 
 /// The Bitwarden Refs file `refresh` and `setup bitwarden` write when no
@@ -1664,24 +1640,20 @@ fn alias_warnings(
     vanishing: &[&refs::ScannedRef],
     consequence: &str,
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(names) = list_harness_names(paths) else {
-        return out;
+    let Ok(inventory) = Inventory::load(paths) else {
+        return Vec::new();
     };
-    for name in names {
-        let Ok(h) = Harness::load(paths, &name) else {
-            continue;
-        };
-        for (target, source) in &h.aliases {
-            if vanishing.iter().any(|r| r.var == *source) {
-                out.push(format!(
-                    "harness {name}: alias = {target} = {source} reads {consequence} \
-                     — edit the harness too."
-                ));
-            }
-        }
-    }
-    out
+    let vars: Vec<&str> = vanishing.iter().map(|r| r.var.as_str()).collect();
+    inventory
+        .aliases_reading(&vars)
+        .into_iter()
+        .map(|(name, target, source)| {
+            format!(
+                "harness {name}: alias = {target} = {source} reads {consequence} \
+                 — edit the harness too."
+            )
+        })
+        .collect()
 }
 
 /// Fail now if the refs file cannot be written later.
@@ -1935,32 +1907,9 @@ fn gather_onepassword(
 /// the manifest directory when none does, and a refusal naming the candidates
 /// when several do.
 fn default_refs_file(paths: &Paths, be: Backend, fallback: &str) -> Result<PathBuf> {
-    let be_default = default_backend(paths);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for name in list_harness_names(paths)? {
-        let h = Harness::load(paths, &name)?;
-        if h.backend.unwrap_or(be_default) == be {
-            candidates.push(h.resolve_manifest_path(paths));
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
-    match candidates.as_slice() {
-        [one] => Ok(one.clone()),
-        [] => Ok(paths.manifest_dir.join(fallback)),
-        many => Err(Error::Message(format!(
-            "multiple {} manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
-            be.as_str(),
-            many.iter()
-                .map(|p| p
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-                    .to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
+    Ok(Inventory::load(paths)?
+        .manifest_for(be)?
+        .unwrap_or_else(|| paths.manifest_dir.join(fallback)))
 }
 
 /// Legacy fallback for `Capture::UseExisting`: load the token the usual way
@@ -2427,11 +2376,7 @@ pub fn cmd_run(paths: &Paths, args: &[String], force_prompt: bool) -> Result<()>
         ));
     }
     let man = manifest.ok_or_else(|| Error::Message("run: need -m/--manifest".into()))?;
-    let man_path = if Path::new(&man).is_absolute() {
-        PathBuf::from(&man)
-    } else {
-        paths.manifest_dir.join(&man)
-    };
+    let man_path = paths.resolve_manifest(&man);
     launch::launch_run(
         paths,
         &man_path,
@@ -2443,8 +2388,9 @@ pub fn cmd_run(paths: &Paths, args: &[String], force_prompt: bool) -> Result<()>
 }
 
 pub fn cmd_pick(paths: &Paths) -> Result<String> {
-    let names = list_harness_names(paths)?;
-    if names.is_empty() {
+    let inventory = Inventory::load(paths)?;
+    let entries = inventory.harnesses();
+    if entries.is_empty() {
         return Err(Error::Message(format!(
             "no harnesses configured in {}",
             paths.harness_dir.display()
@@ -2456,15 +2402,15 @@ pub fn cmd_pick(paths: &Paths) -> Result<String> {
         ));
     }
     eprintln!();
-    for (i, n) in names.iter().enumerate() {
-        let h = Harness::load(paths, n).ok();
-        let cmd = h.as_ref().map(|h| h.command.join(" ")).unwrap_or_default();
-        let man = h.map(|h| h.manifest).unwrap_or_default();
-        eprintln!("  {:2}) {:16} {:38} {}", i + 1, n, cmd, man);
+    for (i, e) in entries.iter().enumerate() {
+        let h = e.loaded.as_ref().ok().map(|v| &v.harness);
+        let cmd = h.map(|h| h.command.join(" ")).unwrap_or_default();
+        let man = h.map(|h| h.manifest.as_str()).unwrap_or_default();
+        eprintln!("  {:2}) {:16} {:38} {}", i + 1, e.name, cmd, man);
     }
     eprintln!();
     loop {
-        eprint!("harness [1-{}, q to quit]: ", names.len());
+        eprint!("harness [1-{}, q to quit]: ", entries.len());
         let _ = io::stderr().flush();
         let mut line = String::new();
         let mut tty = match fs::File::open("/dev/tty") {
@@ -2482,8 +2428,8 @@ pub fn cmd_pick(paths: &Paths) -> Result<String> {
             std::process::exit(0);
         }
         if let Ok(n) = choice.parse::<usize>() {
-            if n >= 1 && n <= names.len() {
-                return Ok(names[n - 1].clone());
+            if n >= 1 && n <= entries.len() {
+                return Ok(entries[n - 1].name.clone());
             }
             eprintln!("  out of range");
         } else {
@@ -2576,16 +2522,15 @@ pub fn usage(paths: &Paths) {
         mode.as_str(),
         be
     );
-    if let Ok(names) = list_harness_names(paths) {
+    if let Ok(inventory) = Inventory::load(paths) {
         eprintln!("\nharnesses in {}:", paths.harness_dir.display());
-        if names.is_empty() {
+        if inventory.harnesses().is_empty() {
             eprintln!("  (none configured)");
         } else {
-            for n in names {
-                if let Ok(h) = Harness::load(paths, &n) {
-                    eprintln!("  {:16} {}", n, h.command.join(" "));
-                } else {
-                    eprintln!("  {n}");
+            for e in inventory.harnesses() {
+                match &e.loaded {
+                    Ok(v) => eprintln!("  {:16} {}", e.name, v.harness.command.join(" ")),
+                    Err(_) => eprintln!("  {}", e.name),
                 }
             }
         }
@@ -2683,11 +2628,8 @@ fn pick_manifest(paths: &Paths) -> Result<PathBuf> {
     }
     // Which harness uses which file is the fact that decides whether an edit is
     // safe, so it belongs in the menu rather than a page of documentation.
-    let harnesses: Vec<(String, String)> = list_harness_names(paths)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|n| Harness::load(paths, &n).ok().map(|h| (n, h.manifest)))
-        .collect();
+    // By resolved path: a Harness may name the file absolutely.
+    let inventory = Inventory::load(paths).ok();
 
     println!("Manifests in {}:", paths.manifest_dir.display());
     for (i, path) in candidates.iter().enumerate() {
@@ -2696,11 +2638,10 @@ fn pick_manifest(paths: &Paths) -> Result<PathBuf> {
             .ok()
             .and_then(|t| crate::config::parse_dotenv_keys(&t).ok())
             .map(|m| m.len());
-        let users: Vec<&str> = harnesses
-            .iter()
-            .filter(|(_, m)| m.as_str() == name)
-            .map(|(n, _)| n.as_str())
-            .collect();
+        let users = inventory
+            .as_ref()
+            .map(|inv| inv.harnesses_using(path))
+            .unwrap_or_default();
         let used = if users.is_empty() {
             "unused".to_string()
         } else {

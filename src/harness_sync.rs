@@ -7,8 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{self, Backend, Harness, Paths};
+use crate::config::{self, Backend, Paths};
 use crate::error::{Error, Result};
+use crate::inventory::Inventory;
 
 const AUTO_HARNESSES: &str = include_str!("../etc/auto-harnesses");
 
@@ -49,8 +50,17 @@ pub(crate) fn sync(paths: &Paths, dry_run: bool) -> Result<()> {
 }
 
 fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
-    let shared = shared_manifest(paths)?;
-    let dirs = search_dirs(paths)?;
+    let inventory = Inventory::load(paths)?;
+    let shared = match inventory.shared_binding() {
+        Ok(shared) => shared,
+        Err(name) => {
+            eprintln!(
+                "update: cannot read Harness {name}; new Harnesses will start without secrets"
+            );
+            None
+        }
+    };
+    let dirs = search_dirs(paths, &inventory);
     for command in AUTO_HARNESSES.lines().map(str::trim) {
         if command.is_empty() || command.starts_with('#') {
             continue;
@@ -68,11 +78,9 @@ fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
         let binding = if config::is_env_blind_agent(name) {
             None
         } else {
-            shared.as_ref()
+            shared
         };
-        let (backend, manifest) = binding
-            .map(|(backend, manifest)| (*backend, manifest.as_str()))
-            .unwrap_or((Backend::Plainfile, "empty.env"));
+        let (backend, manifest) = binding.unwrap_or((Backend::Plainfile, "empty.env"));
         let bin = binary.parent().unwrap().to_string_lossy();
         if bin.contains(['\n', '\r']) {
             return Err(Error::Message(
@@ -105,33 +113,7 @@ fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn shared_manifest(paths: &Paths) -> Result<Option<(Backend, String)>> {
-    let mut shared: Option<(Backend, String)> = None;
-    for name in config::list_harness_names(paths)? {
-        let Ok(harness) = Harness::load(paths, &name) else {
-            eprintln!(
-                "update: cannot read Harness {name}; new Harnesses will start without secrets"
-            );
-            return Ok(None);
-        };
-        let candidate = (
-            harness
-                .backend
-                .unwrap_or_else(|| config::load_default_backend(paths)),
-            harness.manifest,
-        );
-        if let Some(previous) = &shared {
-            if previous != &candidate {
-                return Ok(None);
-            }
-        } else {
-            shared = Some(candidate);
-        }
-    }
-    Ok(shared)
-}
-
-fn search_dirs(paths: &Paths) -> Result<Vec<PathBuf>> {
+fn search_dirs(paths: &Paths, inventory: &Inventory) -> Vec<PathBuf> {
     let current = crate::privilege::current_user();
     let account = config::load_default(paths, "service_user").or_else(|| {
         (current == "root")
@@ -153,22 +135,20 @@ fn search_dirs(paths: &Paths) -> Result<Vec<PathBuf>> {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".grok/bin"));
     }
-    for name in config::list_harness_names(paths)? {
-        if let Ok(harness) = Harness::load(paths, &name) {
-            if let Some(bin) = harness.bin_dir {
-                let expanded = if let Some(home) = &home {
-                    bin.replace("$HOME", &home.to_string_lossy())
-                } else {
-                    bin
-                };
-                if Path::new(&expanded).is_absolute() {
-                    dirs.push(expanded.into());
-                }
+    for view in inventory.loaded() {
+        if let Some(bin) = &view.harness.bin_dir {
+            let expanded = if let Some(home) = &home {
+                bin.replace("$HOME", &home.to_string_lossy())
+            } else {
+                bin.clone()
+            };
+            if Path::new(&expanded).is_absolute() {
+                dirs.push(expanded.into());
             }
         }
     }
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
-    Ok(dirs)
+    dirs
 }
 
 fn account_home(user: &str) -> Option<PathBuf> {

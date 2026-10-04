@@ -261,6 +261,7 @@ Interpret carefully:
 | `Renamed secrets in <file>` on refresh | Mappings whose `# uuid:…` recording names a secret now under a different key. `--prune` rewrites the reference and keeps the variable name |
 | `Refs refresh cannot judge (…)` | Shapes prune will not touch — an unreadable ref, a placeholder, a multi-line value. `secrets validate` owns those |
 | `no secret matched name:X (VAR in <file>)` | A dangling ref hit at launch. `va refresh --prune` removes the mapping — or repairs it, if the line records a `# uuid:…` and the secret was only renamed |
+| `secrets validate` prints `FAIL` for a Harness `.conf` or `extra_manifest` line | That file or line would not load; the error is named on the line. Every other Harness and Extra manifest is still checked and the run still exits non-zero. Fix the file, then re-run |
 | `secrets validate` needs token / fails without | Live gate by design; use `--offline` only for shape |
 | A manifest on a validate line you did not expect | An `extra_manifest` from `defaults.conf`: a file the machine reads that no harness launches from (ADR-0006). Fix it where it lives, not in `harnesses.d` |
 | Validate FAILs on a manifest that is not on disk | An `extra_manifest` path that no longer exists. Fail-closed on purpose: correct the path or drop the line |

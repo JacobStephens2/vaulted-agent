@@ -462,7 +462,7 @@ pub struct ExtraManifest {
 
 impl ExtraManifest {
     /// Parse one `extra_manifest =` value: `<path>` or `<path> = <backend>`.
-    fn parse(value: &str, paths: &Paths) -> Result<Self> {
+    pub(crate) fn parse(value: &str, paths: &Paths) -> Result<Self> {
         let (path, backend) = match value.split_once('=') {
             Some((p, b)) => (p.trim(), Some(b.trim().parse::<Backend>()?)),
             None => (value.trim(), None),
@@ -472,26 +472,11 @@ impl ExtraManifest {
                 "extra_manifest needs a path (defaults.conf)".into(),
             ));
         }
-        let p = Path::new(path);
-        let path = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            paths.manifest_dir.join(p)
-        };
-        Ok(Self { path, backend })
+        Ok(Self {
+            path: paths.resolve_manifest(path),
+            backend,
+        })
     }
-}
-
-/// The extra manifests this machine records, in defaults.conf order.
-///
-/// Fails closed on a line it cannot read: an unusable entry means the operator
-/// believes a file is being checked that is not, which is the fault this whole
-/// concept exists to prevent.
-pub fn load_extra_manifests(paths: &Paths) -> Result<Vec<ExtraManifest>> {
-    load_defaults_all(paths, "extra_manifest")
-        .iter()
-        .map(|v| ExtraManifest::parse(v, paths))
-        .collect()
 }
 
 pub fn load_auth_mode(paths: &Paths) -> AuthMode {
@@ -689,68 +674,30 @@ mod tests {
     }
 
     #[test]
-    fn extra_manifests_are_read_in_file_order_and_may_name_a_backend() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.config_dir).unwrap();
-        fs::write(
-            &paths.defaults_file,
-            "default_backend = onepassword
-             extra_manifest = /srv/orchestration/env.tpl
-             extra_manifest = /etc/other/refs.env = plainfile
-",
-        )
-        .unwrap();
-        let extras = load_extra_manifests(&paths).unwrap();
-        assert_eq!(extras.len(), 2);
-        assert_eq!(extras[0].path, PathBuf::from("/srv/orchestration/env.tpl"));
-        assert_eq!(extras[0].backend, None);
-        assert_eq!(extras[1].backend, Some(Backend::Plainfile));
+    fn an_extra_manifest_may_name_a_backend() {
+        let paths = Paths::from_config_dir("/etc/vaulted-agent");
+        let plain = ExtraManifest::parse("/srv/orchestration/env.tpl", &paths).unwrap();
+        assert_eq!(plain.path, PathBuf::from("/srv/orchestration/env.tpl"));
+        assert_eq!(plain.backend, None);
+        let named = ExtraManifest::parse("/etc/other/refs.env = plainfile", &paths).unwrap();
+        assert_eq!(named.path, PathBuf::from("/etc/other/refs.env"));
+        assert_eq!(named.backend, Some(Backend::Plainfile));
     }
 
     #[test]
     fn a_relative_extra_manifest_resolves_like_a_harness_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.config_dir).unwrap();
-        fs::write(
-            &paths.defaults_file,
-            "extra_manifest = other.env.tpl
-",
-        )
-        .unwrap();
-        let extras = load_extra_manifests(&paths).unwrap();
-        assert_eq!(extras[0].path, paths.manifest_dir.join("other.env.tpl"));
+        let paths = Paths::from_config_dir("/etc/vaulted-agent");
+        let extra = ExtraManifest::parse("other.env.tpl", &paths).unwrap();
+        assert_eq!(extra.path, paths.manifest_dir.join("other.env.tpl"));
     }
 
     #[test]
-    fn an_unreadable_extra_manifest_line_fails_closed() {
+    fn an_unreadable_extra_manifest_line_is_an_error() {
         // Reporting green because a line could not be parsed is the exact
         // shape of the fault this concept exists to prevent.
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.config_dir).unwrap();
-        fs::write(
-            &paths.defaults_file,
-            "extra_manifest = /x = nosuch
-",
-        )
-        .unwrap();
-        assert!(load_extra_manifests(&paths).is_err());
-    }
-
-    #[test]
-    fn no_extra_manifest_lines_means_no_extra_manifests() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.config_dir).unwrap();
-        fs::write(
-            &paths.defaults_file,
-            "auth_mode = file
-",
-        )
-        .unwrap();
-        assert!(load_extra_manifests(&paths).unwrap().is_empty());
+        let paths = Paths::from_config_dir("/etc/vaulted-agent");
+        assert!(ExtraManifest::parse("/x = nosuch", &paths).is_err());
+        assert!(ExtraManifest::parse(" = plainfile", &paths).is_err());
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod config;
 pub mod env_scrub;
 pub mod error;
 mod harness_sync;
+pub mod inventory;
 pub mod launch;
 pub mod manifest_entry;
 pub mod privilege;

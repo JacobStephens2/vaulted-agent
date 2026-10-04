@@ -234,5 +234,38 @@ fn a_bad_extra_manifest_line_is_rejected_rather_than_ignored() {
 
     let (ok, out) = validate(&seam, &[]);
     assert!(!ok, "{out}");
+    assert!(out.contains("FAIL"), "{out}");
     assert!(out.contains("nosuchbackend"), "{out}");
+    // Fail-closed on its own line; the harness is still checked.
+    assert!(out.contains("1 variable(s) resolved"), "{out}");
+}
+
+#[test]
+fn a_malformed_harness_conf_fails_its_own_line_and_the_rest_are_checked() {
+    // One typo in one .conf used to end the gate before anything was checked,
+    // so the operator could not tell whether every other manifest was good.
+    let seam = seam_with("A=op://Orchestrator/anthropic/conductor-api-key\n", "");
+    fs::write(
+        seam.config_dir.join("harnesses.d/broken.conf"),
+        "manifest = m.env.tpl\nwat = 1\ncommand = true\n",
+    )
+    .unwrap();
+
+    let (ok, out) = validate(&seam, &[]);
+    assert!(
+        !ok,
+        "a harness that will not load must still fail closed:\n{out}"
+    );
+    let broken = out
+        .lines()
+        .find(|l| l.starts_with("broken"))
+        .unwrap_or_else(|| panic!("no line for the broken harness:\n{out}"));
+    assert!(broken.contains("FAIL"), "{out}");
+    assert!(broken.contains("broken.conf"), "{out}");
+    assert!(broken.contains("unknown key 'wat'"), "{out}");
+    let probe = out
+        .lines()
+        .find(|l| l.starts_with("probe"))
+        .unwrap_or_else(|| panic!("no line for the healthy harness:\n{out}"));
+    assert!(probe.contains("1 variable(s) resolved"), "{out}");
 }
