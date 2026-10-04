@@ -490,9 +490,9 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         continue;
                     }
                 };
-                let (be, man) = (v.backend, &v.harness.manifest);
+                let (be, man) = (v.binding.backend, &v.harness.manifest);
                 println!("{name}  (backend={be} manifest={man})");
-                let man_path = &v.manifest;
+                let man_path = &v.binding.manifest;
                 if man_path.is_file() {
                     if let Ok(text) = fs::read_to_string(man_path) {
                         if let Ok(map) = parse_dotenv_keys(&text) {
@@ -542,7 +542,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                         // are still checked, so one typo does not hide whether
                         // every other manifest is good.
                         let (be, man_path) = match target.check {
-                            Ok(check) => check,
+                            Ok(b) => (b.backend, b.manifest.as_path()),
                             Err(e) => {
                                 println!("FAIL ({e})");
                                 err = true;
@@ -565,7 +565,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
                     }
                 }
                 Some(man) => {
-                    let conf = paths.harness_dir.join(format!("{man}.conf"));
+                    let conf = paths.harness_conf(man);
                     let (man_path, be) = if conf.is_file() {
                         let h = Harness::load(paths, man)?;
                         let be = h.backend.unwrap_or_else(|| default_backend(paths));
@@ -1647,10 +1647,11 @@ fn alias_warnings(
     inventory
         .aliases_reading(&vars)
         .into_iter()
-        .map(|(name, target, source)| {
+        .map(|a| {
             format!(
-                "harness {name}: alias = {target} = {source} reads {consequence} \
-                 — edit the harness too."
+                "harness {}: alias = {} = {} reads {consequence} \
+                 — edit the harness too.",
+                a.harness, a.target, a.source
             )
         })
         .collect()

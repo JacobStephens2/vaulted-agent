@@ -269,3 +269,27 @@ fn a_malformed_harness_conf_fails_its_own_line_and_the_rest_are_checked() {
         .unwrap_or_else(|| panic!("no line for the healthy harness:\n{out}"));
     assert!(probe.contains("1 variable(s) resolved"), "{out}");
 }
+
+#[test]
+fn secrets_which_reports_a_malformed_harness_conf_and_lists_the_rest() {
+    // A read-only listing: one bad file is no reason to hide the others.
+    let seam = seam_with("A=op://Orchestrator/anthropic/conductor-api-key\n", "");
+    fs::write(
+        seam.config_dir.join("harnesses.d/broken.conf"),
+        "manifest = m.env.tpl\nwat = 1\ncommand = true\n",
+    )
+    .unwrap();
+    let out = seam
+        .vaulted_agent()
+        .args(["secrets", "which"])
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .output()
+        .expect("which");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("broken  (unreadable:"), "{text}");
+    assert!(
+        text.contains("probe  (backend=onepassword manifest=m.env.tpl)"),
+        "{text}"
+    );
+    assert!(text.contains("  A"), "{text}");
+}

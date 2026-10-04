@@ -115,6 +115,11 @@ impl Paths {
         Self::from_config_dir(dir)
     }
 
+    /// Where the Harness named `name` is defined.
+    pub fn harness_conf(&self, name: &str) -> PathBuf {
+        self.harness_dir.join(format!("{name}.conf"))
+    }
+
     /// Where a Manifest named by `manifest` lives: an absolute path as given,
     /// anything else under the manifest directory. The rule for a Harness's
     /// `manifest =` line and for a manifest named on the command line.
@@ -154,7 +159,7 @@ impl Harness {
         {
             return Err(Error::InvalidHarnessName(name.to_string()));
         }
-        let conf = paths.harness_dir.join(format!("{name}.conf"));
+        let conf = paths.harness_conf(name);
         if !conf.is_file() {
             return Err(Error::UnknownHarness {
                 name: name.to_string(),

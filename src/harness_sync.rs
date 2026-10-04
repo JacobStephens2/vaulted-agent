@@ -66,7 +66,7 @@ fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
             continue;
         }
         let name = command.split_whitespace().next().unwrap();
-        let profile = paths.harness_dir.join(format!("{name}.conf"));
+        let profile = paths.harness_conf(name);
         // Includes dangling symlinks and directories: every existing entry is
         // operator-owned, even if it cannot currently be launched.
         if fs::symlink_metadata(&profile).is_ok() {

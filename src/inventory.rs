@@ -13,14 +13,21 @@ use std::path::{Path, PathBuf};
 use crate::config::{self, Backend, ExtraManifest, Harness, Paths};
 use crate::error::{Error, Result};
 
-/// A Harness that loaded, bound to what it would launch with.
+/// The Backend and resolved Manifest path a Harness launches with, or an
+/// Extra manifest is checked against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    /// The `backend =` (or `= <backend>`) given, else the machine default.
+    pub backend: Backend,
+    /// The Manifest named, under [`Paths::resolve_manifest`].
+    pub manifest: PathBuf,
+}
+
+/// A Harness that loaded, with its Binding.
 #[derive(Debug)]
 pub struct HarnessView {
     pub harness: Harness,
-    /// The Harness's `backend =`, else the machine default.
-    pub backend: Backend,
-    /// The `manifest =` line under [`Paths::resolve_manifest`].
-    pub manifest: PathBuf,
+    pub binding: Binding,
 }
 
 /// One `harnesses.d/*.conf`, loaded or not.
@@ -32,27 +39,28 @@ pub struct HarnessEntry {
     pub loaded: Result<HarnessView>,
 }
 
-/// An Extra manifest that parsed, bound to what it is checked against.
-#[derive(Debug)]
-pub struct ExtraView {
-    /// The line's `= <backend>`, else the machine default.
-    pub backend: Backend,
-    pub manifest: PathBuf,
-}
-
 /// One `extra_manifest =` value from defaults.conf, parsed or not.
 #[derive(Debug)]
 pub struct ExtraEntry {
     /// The value as written, named when it will not parse.
     pub value: String,
-    pub loaded: Result<ExtraView>,
+    pub loaded: Result<Binding>,
 }
 
 /// One line of `secrets validate` with no target.
+#[derive(Debug)]
 pub struct ValidateTarget<'a> {
     pub label: String,
     /// What to check, or why there is nothing to check (a `FAIL` line).
-    pub check: std::result::Result<(Backend, &'a Path), &'a Error>,
+    pub check: std::result::Result<&'a Binding, &'a Error>,
+}
+
+/// One `alias = target = source` line in a loaded Harness.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AliasUse<'a> {
+    pub harness: &'a str,
+    pub target: &'a str,
+    pub source: &'a str,
 }
 
 #[derive(Debug)]
@@ -71,12 +79,14 @@ impl Inventory {
             .into_iter()
             .map(|name| {
                 let loaded = Harness::load(paths, &name).map(|harness| HarnessView {
-                    backend: harness.backend.unwrap_or(default_backend),
-                    manifest: harness.resolve_manifest_path(paths),
+                    binding: Binding {
+                        backend: harness.backend.unwrap_or(default_backend),
+                        manifest: harness.resolve_manifest_path(paths),
+                    },
                     harness,
                 });
                 HarnessEntry {
-                    conf: paths.harness_dir.join(format!("{name}.conf")),
+                    conf: paths.harness_conf(&name),
                     name,
                     loaded,
                 }
@@ -85,7 +95,7 @@ impl Inventory {
         let extras = config::load_defaults_all(paths, "extra_manifest")
             .into_iter()
             .map(|value| {
-                let loaded = ExtraManifest::parse(&value, paths).map(|extra| ExtraView {
+                let loaded = ExtraManifest::parse(&value, paths).map(|extra| Binding {
                     backend: extra.backend.unwrap_or(default_backend),
                     manifest: extra.path,
                 });
@@ -115,8 +125,8 @@ impl Inventory {
             // checked six times, and the operator cannot see which files were
             // covered otherwise.
             Ok(v) => ValidateTarget {
-                label: format!("{} ({})", e.name, v.manifest.display()),
-                check: Ok((v.backend, &v.manifest)),
+                label: format!("{} ({})", e.name, v.binding.manifest.display()),
+                check: Ok(&v.binding),
             },
             Err(err) => ValidateTarget {
                 label: format!("{} ({})", e.name, e.conf.display()),
@@ -124,9 +134,9 @@ impl Inventory {
             },
         });
         let extras = self.extras.iter().map(|e| match &e.loaded {
-            Ok(v) => ValidateTarget {
-                label: v.manifest.display().to_string(),
-                check: Ok((v.backend, &v.manifest)),
+            Ok(b) => ValidateTarget {
+                label: b.manifest.display().to_string(),
+                check: Ok(b),
             },
             Err(err) => ValidateTarget {
                 label: format!("extra_manifest = {}", e.value),
@@ -146,8 +156,8 @@ impl Inventory {
                 .loaded
                 .as_ref()
                 .map_err(|err| Error::Message(err.to_string()))?;
-            if v.backend == backend {
-                candidates.push(&v.manifest);
+            if v.binding.backend == backend {
+                candidates.push(&v.binding.manifest);
             }
         }
         candidates.sort();
@@ -180,11 +190,9 @@ impl Inventory {
     /// have no harnesses and no defaults.conf. Ties break the same way.
     pub fn refresh_backend(&self) -> Backend {
         let mut seen: Vec<Backend> = Vec::new();
-        for v in self.loaded() {
-            if matches!(v.backend, Backend::Bitwarden | Backend::OnePassword)
-                && !seen.contains(&v.backend)
-            {
-                seen.push(v.backend);
+        for be in self.loaded().map(|v| v.binding.backend) {
+            if matches!(be, Backend::Bitwarden | Backend::OnePassword) && !seen.contains(&be) {
+                seen.push(be);
             }
         }
         match seen.as_slice() {
@@ -193,14 +201,17 @@ impl Inventory {
         }
     }
 
-    /// `(harness, target, source)` for each loaded Harness `alias =` whose
-    /// source is one of `vars`.
-    pub fn aliases_reading<'a>(&'a self, vars: &[&str]) -> Vec<(&'a str, &'a str, &'a str)> {
+    /// Each loaded Harness `alias =` whose source is one of `vars`.
+    pub fn aliases_reading(&self, vars: &[&str]) -> Vec<AliasUse<'_>> {
         let mut out = Vec::new();
         for v in self.loaded() {
             for (target, source) in &v.harness.aliases {
                 if vars.contains(&source.as_str()) {
-                    out.push((v.harness.name.as_str(), target.as_str(), source.as_str()));
+                    out.push(AliasUse {
+                        harness: &v.harness.name,
+                        target,
+                        source,
+                    });
                 }
             }
         }
@@ -210,7 +221,7 @@ impl Inventory {
     /// Names of the loaded Harnesses whose Manifest resolves to `manifest`.
     pub fn harnesses_using(&self, manifest: &Path) -> Vec<&str> {
         self.loaded()
-            .filter(|v| v.manifest == manifest)
+            .filter(|v| v.binding.manifest == manifest)
             .map(|v| v.harness.name.as_str())
             .collect()
     }
@@ -228,14 +239,14 @@ impl Inventory {
                 return Err(&e.name);
             };
             match shared {
-                Some(first) if (first.backend, &first.manifest) != (v.backend, &v.manifest) => {
+                Some(first) if first.binding != v.binding => {
                     return Ok(None);
                 }
                 Some(_) => {}
                 None => shared = Some(v),
             }
         }
-        Ok(shared.map(|v| (v.backend, v.harness.manifest.as_str())))
+        Ok(shared.map(|v| (v.binding.backend, v.harness.manifest.as_str())))
     }
 }
 
@@ -373,9 +384,9 @@ mod tests {
             targets[0].label
         );
         assert!(targets[0].check.is_err());
-        let (be, path) = targets[1].check.as_ref().unwrap();
-        assert_eq!(*be, Backend::Plainfile);
-        assert_eq!(*path, paths.manifest_dir.join("a.env"));
+        let b = targets[1].check.unwrap();
+        assert_eq!(b.backend, Backend::Plainfile);
+        assert_eq!(b.manifest, paths.manifest_dir.join("a.env"));
     }
 
     #[test]
@@ -390,24 +401,18 @@ mod tests {
         let inv = Inventory::load(&paths).unwrap();
         let targets = inv.validate_targets();
         assert_eq!(targets.len(), 4);
-        assert_eq!(
-            targets[1].check.as_ref().unwrap(),
-            &(
-                Backend::OnePassword,
-                Path::new("/srv/orchestration/env.tpl")
-            )
-        );
+        let b = targets[1].check.unwrap();
+        assert_eq!(b.backend, Backend::OnePassword);
+        assert_eq!(b.manifest, Path::new("/srv/orchestration/env.tpl"));
         assert!(targets[2].check.is_err());
         assert!(
             targets[2].label.contains("/x = nosuch"),
             "{}",
             targets[2].label
         );
-        let other = paths.manifest_dir.join("other.env");
-        assert_eq!(
-            targets[3].check.as_ref().unwrap(),
-            &(Backend::Plainfile, other.as_path())
-        );
+        let b = targets[3].check.unwrap();
+        assert_eq!(b.backend, Backend::Plainfile);
+        assert_eq!(b.manifest, paths.manifest_dir.join("other.env"));
     }
 
     #[test]
@@ -472,7 +477,11 @@ mod tests {
         let inv = Inventory::load(&paths).unwrap();
         assert_eq!(
             inv.aliases_reading(&["FW_KEY"]),
-            vec![("kimi", "OPENAI_API_KEY", "FW_KEY")]
+            vec![AliasUse {
+                harness: "kimi",
+                target: "OPENAI_API_KEY",
+                source: "FW_KEY"
+            }]
         );
         assert!(inv.aliases_reading(&["OTHER"]).is_empty());
     }
