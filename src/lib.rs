@@ -15,6 +15,7 @@ pub mod onepassword;
 pub mod privilege;
 pub mod refs;
 pub mod resume;
+pub mod route;
 pub mod secret;
 pub mod update;
 pub mod validate;

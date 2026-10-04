@@ -2258,7 +2258,8 @@ pub fn cmd_run(paths: &Paths, args: &[String], token_source: TokenSource) -> Res
     )
 }
 
-pub fn cmd_pick(paths: &Paths) -> Result<String> {
+/// The pick menu. `None` when the operator quits without choosing.
+pub fn cmd_pick(paths: &Paths) -> Result<Option<String>> {
     let inventory = Inventory::load(paths)?;
     let entries = inventory.harnesses();
     if entries.is_empty() {
@@ -2296,11 +2297,11 @@ pub fn cmd_pick(paths: &Paths) -> Result<String> {
         let choice = line.trim();
         if matches!(choice, "q" | "Q" | "quit" | "exit") {
             eprintln!("Nothing launched.");
-            std::process::exit(0);
+            return Ok(None);
         }
         if let Ok(n) = choice.parse::<usize>() {
             if n >= 1 && n <= entries.len() {
-                return Ok(entries[n - 1].name.clone());
+                return Ok(Some(entries[n - 1].name.clone()));
             }
             eprintln!("  out of range");
         } else {
@@ -2356,12 +2357,6 @@ pub fn cmd_launch_harness(
             handoff: None,
         },
     )
-}
-
-/// When service_user is configured and current uid differs, re-exec via sudo.
-/// Policy lives in `privilege`; this is a thin adapter for CLI/main.
-pub fn maybe_reexec_service_user(paths: &Paths, argv0: &str, orig_args: &[String]) -> Result<()> {
-    crate::privilege::maybe_reexec_service_user(paths, argv0, orig_args)
 }
 
 pub fn usage(paths: &Paths) {
@@ -2639,36 +2634,6 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
             return Ok(());
         }
     }
-}
-
-/// Reserved management command names (unless a harness .conf of that name exists).
-pub fn is_reserved(name: &str, paths: &Paths) -> bool {
-    let reserved = [
-        "version",
-        "--version",
-        "-V",
-        "setup",
-        "refresh",
-        "auth-mode",
-        "doctor",
-        "secrets",
-        "uninstall",
-        "update",
-        "pick",
-        "run",
-        "edit-manifest",
-        "help",
-        "--help",
-        "-h",
-    ];
-    if !reserved.contains(&name) {
-        return false;
-    }
-    // Real harness wins
-    if paths.harness_dir.join(format!("{name}.conf")).is_file() {
-        return false;
-    }
-    true
 }
 
 #[cfg(test)]

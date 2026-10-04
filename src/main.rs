@@ -1,6 +1,9 @@
 //! vaulted-agent — launch AI coding agents with vault-resolved secrets.
 //!
 //! Rust is the shipped runtime (v0.4.0+). See MIGRATION.md.
+//!
+//! The entry point is the one adapter for the Invocation route (`route`): it
+//! reads the process facts, asks for the route, then carries it out.
 
 use std::env;
 use std::path::Path;
@@ -9,7 +12,9 @@ use std::process;
 use vaulted_agent::auth::TokenSource;
 use vaulted_agent::commands;
 use vaulted_agent::config::Paths;
-use vaulted_agent::Error;
+use vaulted_agent::privilege;
+use vaulted_agent::route::{self, Action, Hop, Verb, Via};
+use vaulted_agent::{Error, Result};
 
 fn main() {
     // Preserve caller cwd for workdir=caller across sudo re-exec.
@@ -26,263 +31,116 @@ fn main() {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("vaulted-agent");
+    let args = argv.get(1..).unwrap_or_default();
 
     let paths = Paths::discover();
 
-    // Conductor symlink: claude-conductor → harness "claude"
-    let link_suffix = "-conductor";
-    let is_primary = matches!(invoked, "vaulted-agent" | "va");
-    if !is_primary {
-        if let Some(harness) = invoked.strip_suffix(link_suffix) {
-            // Honouring -H under a conductor symlink would let a caller entitled
-            // to a narrow harness borrow a wider harness's manifest (bash guard).
-            // -m reaches the same place by a shorter route — it names the
-            // manifest outright — so it is refused here for the same reason.
-            // The symlink exists so a sudoers rule can grant one harness and
-            // have that mean one set of credentials.
-            for a in argv.iter().skip(1) {
-                if a == "-H" || a == "--harness" || a.starts_with("--harness=") {
-                    eprintln!(
-                        "vaulted-agent: -H/--harness is not allowed when invoked as '{invoked}' (harness is fixed by the symlink)"
-                    );
-                    process::exit(1);
-                }
-                if a == "-m" || a == "--manifest" || a.starts_with("--manifest=") {
-                    eprintln!(
-                        "vaulted-agent: -m/--manifest is not allowed when invoked as '{invoked}' \
-                         (the harness fixes which credentials this entitlement carries)"
-                    );
-                    process::exit(1);
-                }
-            }
-            // Replay original argv exactly for sudoers (story #41).
-            let orig: Vec<String> = argv.iter().skip(1).cloned().collect();
-            if let Err(e) = commands::maybe_reexec_service_user(&paths, argv0, &orig) {
-                eprintln!("vaulted-agent: {e}");
-                process::exit(1);
-            }
-            // The link name fixes the harness, so there is no harness token to
-            // read flags in front of and every argument here belongs to the
-            // agent. `-p` above all: claude, codex and kimi each use it for a
-            // prompt, so eating it as --prompt-auth turned
-            //
-            //     kimi-conductor -p "explain this"
-            //
-            // into a request for a vault token, which then failed with
-            // "auth_mode=prompt needs a terminal" -- an error pointing nowhere
-            // near the cause, and the prompt silently dropped. Prompt auth stays
-            // reachable in this mode through VAULTED_AGENT_PROMPT_AUTH=1, which
-            // the Token source reads.
-            let token_source = TokenSource::from_env(&paths, false);
-            let mut extra: Vec<String> = argv.iter().skip(1).cloned().collect();
-            // A leading `--` stays an explicit "the rest is the agent's".
-            if extra.first().is_some_and(|s| s == "--") {
-                extra.remove(0);
-            }
-            if let Err(e) =
-                commands::cmd_launch_harness(&paths, harness, &extra, token_source, None)
-            {
-                eprintln!("vaulted-agent: {e}");
-                process::exit(1);
-            }
-            return;
-        }
-        eprintln!(
-            "vaulted-agent: symlink '{invoked}' does not end in '{link_suffix}' (and is not vaulted-agent or va)"
-        );
-        process::exit(1);
-    }
+    let route = route::route(args, invoked, |name| {
+        paths.harness_dir.join(format!("{name}.conf")).is_file()
+    })
+    .unwrap_or_else(|e| fail(e));
 
-    // Global version / help only in the command position (argv[1]).
-    if matches!(
-        argv.get(1).map(|s| s.as_str()),
-        Some("version") | Some("--version") | Some("-V")
-    ) {
-        commands::cmd_version();
-        return;
-    }
-    if matches!(
-        argv.get(1).map(|s| s.as_str()),
-        Some("help") | Some("--help") | Some("-h")
-    ) && argv.len() == 2
-    {
-        commands::usage(&paths);
-        process::exit(0);
-    }
-
-    // Pull launcher flags only until the first non-flag token (harness or
-    // management command). Flags after that belong to the agent (e.g.
-    // `va claude --version`, `va claude -p "explain this"`).
-    let mut prompt_flag = false;
-    let mut harness_flag: Option<String> = None;
-    let mut manifest_flag: Option<String> = None;
-    let mut rest: Vec<String> = Vec::new();
-    let mut args = argv.iter().skip(1).peekable();
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "-p" | "--prompt-auth" => prompt_flag = true,
-            "-m" | "--manifest" => {
-                let v = args.next().cloned().unwrap_or_else(|| {
-                    eprintln!("vaulted-agent: -m requires a value");
-                    process::exit(1);
-                });
-                if v.is_empty() {
-                    eprintln!("vaulted-agent: -m requires a non-empty path");
-                    process::exit(1);
-                }
-                manifest_flag = Some(v);
+    if let Hop::Replay { argv, fatal } = &route.hop {
+        if let Err(e) = privilege::maybe_reexec_service_user(&paths, argv0, argv) {
+            if *fatal {
+                fail(e);
             }
-            s if s.starts_with("--manifest=") => {
-                let v = s["--manifest=".len()..].to_string();
-                if v.is_empty() {
-                    eprintln!("vaulted-agent: --manifest= requires a non-empty path");
-                    process::exit(1);
-                }
-                manifest_flag = Some(v);
-            }
-            "-H" | "--harness" => {
-                harness_flag = Some(args.next().cloned().unwrap_or_else(|| {
-                    eprintln!("vaulted-agent: -H requires a value");
-                    process::exit(1);
-                }));
-            }
-            s if s.starts_with("--harness=") => {
-                harness_flag = Some(s["--harness=".len()..].to_string());
-            }
-            "--" => {
-                rest.extend(args.cloned());
-                break;
-            }
-            s if s.starts_with('-') => {
-                // Unknown leading flag: treat as start of positional/rest stream
-                // only if we already have a harness via -H; otherwise error.
-                if harness_flag.is_some() {
-                    rest.push(a.clone());
-                    rest.extend(args.cloned());
-                    break;
-                }
-                eprintln!("vaulted-agent: unknown option '{s}'");
-                process::exit(1);
-            }
-            _ => {
-                // First non-flag: harness/command name; everything after is agent argv.
-                rest.push(a.clone());
-                rest.extend(args.cloned());
-                break;
-            }
+            eprintln!("vaulted-agent: could not check as the service user: {e}");
         }
     }
 
-    let positional = if rest.first().map(|s| !s.starts_with('-')).unwrap_or(false) {
-        Some(rest.remove(0))
-    } else {
-        None
-    };
-
-    let mut harness = match (positional, harness_flag) {
-        (Some(a), Some(b)) => {
-            eprintln!("vaulted-agent: harness given twice: '{a}' and -H '{b}'");
-            process::exit(1);
-        }
-        (a, b) => a.or(b),
-    };
-
-    // No harness → usage
-    let Some(name) = harness.take() else {
-        commands::usage(&paths);
-        process::exit(1);
-    };
-
-    // Reserved management commands
-    if commands::is_reserved(&name, &paths) {
-        // `run` and `refresh` read their own -m from after the command name.
-        // A launcher-level -m in front of those would be read by neither.
-        // `pick` is a harness launch after the menu, so -m is allowed and
-        // applied to the chosen harness.
-        if manifest_flag.is_some() && name != "pick" {
-            eprintln!(
-                "vaulted-agent: -m/--manifest applies to a harness launch \
-                 (including pick), not to '{name}'"
-            );
-            process::exit(1);
-        }
-        // doctor reports on what a launch will find, and a launch runs as
-        // service_user. Take the same hop first so its filesystem checks are
-        // answered by the account that will actually run the agent; otherwise
-        // the report describes the caller and quietly contradicts reality.
-        // A failed hop is not fatal here: doctor still has something useful to
-        // say as the caller, and it labels which account answered.
-        if name == "doctor" {
-            let orig: Vec<String> = argv.iter().skip(1).cloned().collect();
-            if let Err(e) = commands::maybe_reexec_service_user(&paths, argv0, &orig) {
-                eprintln!("vaulted-agent: could not check as the service user: {e}");
-            }
-        }
-        // `-p` in front of a management command reaches it the same way it
-        // reaches a harness launch: through the one Token source.
-        let token_source = TokenSource::from_env(&paths, prompt_flag);
-        let code = dispatch_mgmt(&paths, &name, &rest, token_source, manifest_flag.as_deref());
-        process::exit(code);
-    }
-
-    // Replay original argv exactly so a sudoers rule matches the command line
-    // as typed (story #41). Do not rewrite into -H form or re-insert -p.
-    let orig: Vec<String> = argv.iter().skip(1).cloned().collect();
-    if let Err(e) = commands::maybe_reexec_service_user(&paths, argv0, &orig) {
-        eprintln!("vaulted-agent: {e}");
-        process::exit(1);
-    }
-
-    let token_source = TokenSource::from_env(&paths, prompt_flag);
-    if let Err(e) =
-        commands::cmd_launch_harness(&paths, &name, &rest, token_source, manifest_flag.as_deref())
-    {
-        eprintln!("vaulted-agent: {e}");
-        if matches!(e, Error::UnknownHarness { .. }) {
+    match route.action {
+        Action::Usage => {
             commands::usage(&paths);
+            process::exit(1);
         }
-        process::exit(1);
+        Action::Launch {
+            harness,
+            args,
+            prompt_auth,
+            manifest,
+            via,
+        } => {
+            let token_source = TokenSource::from_env(&paths, prompt_auth);
+            if let Err(e) = commands::cmd_launch_harness(
+                &paths,
+                &harness,
+                &args,
+                token_source,
+                manifest.as_deref(),
+            ) {
+                eprintln!("vaulted-agent: {e}");
+                if via == Via::Direct && matches!(e, Error::UnknownHarness { .. }) {
+                    commands::usage(&paths);
+                }
+                process::exit(1);
+            }
+        }
+        Action::Verb {
+            verb,
+            args,
+            prompt_auth,
+            manifest,
+        } => {
+            // `-p` in front of a management command reaches it the same way it
+            // reaches a harness launch: through the one Token source.
+            let token_source = TokenSource::from_env(&paths, prompt_auth);
+            let result = match verb {
+                Verb::Version => {
+                    commands::cmd_version();
+                    Ok(())
+                }
+                Verb::Help => {
+                    commands::usage(&paths);
+                    Ok(())
+                }
+                Verb::AuthMode => commands::cmd_auth_mode(&paths, &args),
+                Verb::Doctor => commands::cmd_doctor(&paths),
+                Verb::Secrets => commands::cmd_secrets(&paths, &args, token_source),
+                Verb::Setup => commands::cmd_setup(&paths, &args, token_source),
+                Verb::Refresh => commands::cmd_refresh(&paths, &args, token_source),
+                Verb::Uninstall => commands::cmd_uninstall(&args),
+                Verb::Update => vaulted_agent::update::cmd_update(&args),
+                Verb::Run => commands::cmd_run(&paths, &args, token_source),
+                Verb::EditManifest => commands::cmd_edit_manifest(&paths, &args),
+                Verb::Pick => pick(
+                    &paths,
+                    argv0,
+                    &route.hop,
+                    &args,
+                    token_source,
+                    manifest.as_deref(),
+                ),
+            };
+            if let Err(e) = result {
+                fail(e);
+            }
+        }
     }
 }
 
-fn dispatch_mgmt(
+fn fail(e: Error) -> ! {
+    eprintln!("vaulted-agent: {e}");
+    process::exit(1);
+}
+
+/// `pick` is a harness launch after the menu, and takes the Service-user hop
+/// there: as though the operator had typed the chosen Harness, so a sudoers
+/// grant matches that Harness and never `pick` itself.
+fn pick(
     paths: &Paths,
-    name: &str,
-    rest: &[String],
+    argv0: &str,
+    hop: &Hop,
+    args: &[String],
     token_source: TokenSource,
     manifest_override: Option<&str>,
-) -> i32 {
-    let result = match name {
-        "version" | "--version" | "-V" => {
-            commands::cmd_version();
-            Ok(())
-        }
-        "help" | "--help" | "-h" => {
-            commands::usage(paths);
-            Ok(())
-        }
-        "auth-mode" => commands::cmd_auth_mode(paths, rest),
-        "doctor" => commands::cmd_doctor(paths),
-        "secrets" => commands::cmd_secrets(paths, rest, token_source),
-        "setup" => commands::cmd_setup(paths, rest, token_source),
-        "refresh" => commands::cmd_refresh(paths, rest, token_source),
-        "uninstall" => commands::cmd_uninstall(rest),
-        "update" => vaulted_agent::update::cmd_update(rest),
-        "run" => commands::cmd_run(paths, rest, token_source),
-        "edit-manifest" => commands::cmd_edit_manifest(paths, rest),
-        "pick" => match commands::cmd_pick(paths) {
-            Ok(chosen) => {
-                commands::cmd_launch_harness(paths, &chosen, rest, token_source, manifest_override)
-            }
-            Err(e) => Err(e),
-        },
-        other => Err(Error::Message(format!("unknown command '{other}'"))),
+) -> Result<()> {
+    let Some(chosen) = commands::cmd_pick(paths)? else {
+        return Ok(());
     };
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("vaulted-agent: {e}");
-            1
-        }
+    if let Hop::AfterPick { launcher_flags } = hop {
+        let replay = route::pick_replay_argv(launcher_flags, &chosen, args);
+        privilege::maybe_reexec_service_user(paths, argv0, &replay)?;
     }
+    commands::cmd_launch_harness(paths, &chosen, args, token_source, manifest_override)
 }
