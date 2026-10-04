@@ -226,6 +226,20 @@ impl Inventory {
             .collect()
     }
 
+    /// The Backends of every loaded Harness and Extra manifest whose Manifest
+    /// resolves to `manifest`, each once, in Inventory order. Empty when
+    /// nothing that loaded reads it.
+    pub fn backends_reading(&self, manifest: &Path) -> Vec<Backend> {
+        let extras = self.extras.iter().filter_map(|e| e.loaded.as_ref().ok());
+        let mut out = Vec::new();
+        for b in self.loaded().map(|v| &v.binding).chain(extras) {
+            if b.manifest == manifest && !out.contains(&b.backend) {
+                out.push(b.backend);
+            }
+        }
+        out
+    }
+
     /// The Backend and `manifest =` text every Harness shares, for a new
     /// Harness to copy. Manifests compare by resolved path; the text is the
     /// first Harness's, so the operator's spelling is kept.
@@ -413,6 +427,37 @@ mod tests {
         let b = targets[3].check.unwrap();
         assert_eq!(b.backend, Backend::Plainfile);
         assert_eq!(b.manifest, paths.manifest_dir.join("other.env"));
+    }
+
+    #[test]
+    fn backends_reading_covers_harnesses_and_extra_manifests_once_each() {
+        let (_tmp, paths) = config(
+            "default_backend = bitwarden\n\
+             extra_manifest = a.env = onepassword\n\
+             extra_manifest = b.env = sops\n\
+             extra_manifest = /x = nosuch\n",
+            &[
+                ("claude", "manifest = a.env\ncommand = claude\n"),
+                ("codex", "manifest = a.env\ncommand = codex\n"),
+                (
+                    "kimi",
+                    "backend = plainfile\nmanifest = c.env\ncommand = kimi\n",
+                ),
+                ("broken", "manifest = a.env\nwat = 1\n"),
+            ],
+        );
+        let inv = Inventory::load(&paths).unwrap();
+        assert_eq!(
+            inv.backends_reading(&paths.manifest_dir.join("a.env")),
+            vec![Backend::Bitwarden, Backend::OnePassword]
+        );
+        assert_eq!(
+            inv.backends_reading(&paths.manifest_dir.join("b.env")),
+            vec![Backend::Sops]
+        );
+        assert!(inv
+            .backends_reading(&paths.manifest_dir.join("nobody.env"))
+            .is_empty());
     }
 
     #[test]
