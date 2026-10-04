@@ -16,7 +16,7 @@ use crate::config::{
 };
 use crate::error::{Error, Result};
 use crate::launch::{self, auth_mode_from_env_or_config, force_prompt_from_env, LaunchOpts};
-use crate::refs;
+use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
 
@@ -1004,7 +1004,7 @@ fn yn(b: bool) -> &'static str {
 pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
     let mut man_path: Option<String> = None;
     let mut take_all = false;
-    let mut mode: Option<&str> = None;
+    let mut mode: Option<WriteMode> = None;
     let mut backend_arg: Option<String> = None;
     let mut exclude: Vec<String> = Vec::new();
     let mut prune = false;
@@ -1052,8 +1052,8 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
             s if s.starts_with("--backend=") => {
                 backend_arg = Some(s["--backend=".len()..].to_string());
             }
-            "--merge" => mode = Some("merge"),
-            "--replace" | "--rewrite" => mode = Some("replace"),
+            "--merge" => mode = Some(WriteMode::Merge),
+            "--replace" | "--rewrite" => mode = Some(WriteMode::Replace),
             "-m" | "--manifest" => {
                 i += 1;
                 man_path = Some(
@@ -1142,7 +1142,7 @@ fn refresh_bitwarden(
     paths: &Paths,
     man_path: Option<String>,
     take_all: bool,
-    mode: Option<&str>,
+    mode: Option<WriteMode>,
     prune: bool,
 ) -> Result<()> {
     let token = load_bws(paths)?;
@@ -1165,11 +1165,11 @@ fn refresh_bitwarden(
         None => default_bitwarden_manifest(paths)?,
     };
 
-    let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
+    let mode = WriteMode::settle(mode, &path);
 
     ensure_manifest_writable(&path)?;
 
-    report_and_fix_refs(paths, &path, &secrets, mode == "replace", prune)?;
+    report_and_fix_refs(paths, &path, &secrets, mode == WriteMode::Replace, prune)?;
 
     let indices = if take_all {
         None // all
@@ -1196,33 +1196,34 @@ fn refresh_bitwarden(
         fs::create_dir_all(parent).ok();
     }
 
+    let mappings = Mapping::bitwarden_selection(&secrets, indices.as_deref());
+    let written = refs::write_refs(
+        &path,
+        &mappings,
+        mode,
+        RefsStyle::Bitwarden,
+        "vaulted-agent refresh",
+    )?;
     match mode {
-        "replace" => {
-            refs::write_refs_replace(&path, &secrets, indices.as_deref(), "vaulted-agent refresh")?;
+        WriteMode::Replace => {
             println!("Wrote refs file (replace): {}", path.display());
         }
-        _ => {
-            let merge = refs::write_refs_merge(
-                &path,
-                &secrets,
-                indices.as_deref(),
-                "vaulted-agent refresh",
-            )?;
-            if merge.recovered > 0 {
+        WriteMode::Merge => {
+            if written.recovered > 0 {
                 println!(
                     "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh): {}",
-                    merge.recovered,
+                    written.recovered,
                     path.display()
                 );
             }
-            if merge.added == 0 {
-                if merge.recovered == 0 {
+            if written.added == 0 {
+                if written.recovered == 0 {
                     println!("No new mappings to add: {}", path.display());
                 }
             } else {
                 println!(
                     "Updated refs file (+{} mapping(s)): {}",
-                    merge.added,
+                    written.added,
                     path.display()
                 );
             }
@@ -1578,7 +1579,7 @@ fn refresh_onepassword(
     paths: &Paths,
     man_path: Option<String>,
     take_all: bool,
-    mode: Option<&str>,
+    mode: Option<WriteMode>,
     exclude: &[String],
     prune: bool,
 ) -> Result<()> {
@@ -1600,7 +1601,7 @@ fn refresh_onepassword(
         }
         None => default_onepassword_manifest(paths)?,
     };
-    let mode = mode.unwrap_or(if path.is_file() { "merge" } else { "replace" });
+    let mode = WriteMode::settle(mode, &path);
 
     // Checked before the menu, not after the reads. Expanding every item costs
     // a round trip apiece (~a minute on a 65-item vault); discovering the file
@@ -1776,7 +1777,14 @@ fn refresh_onepassword(
     // After the reads, because the fields they returned are what makes a
     // field-level verdict possible; before the write, so a dangling line is
     // gone by the time merge decides what to append.
-    report_and_fix_op_refs(paths, &path, &world, &exclusions, mode == "replace", prune)?;
+    report_and_fix_op_refs(
+        paths,
+        &path,
+        &world,
+        &exclusions,
+        mode == WriteMode::Replace,
+        prune,
+    )?;
 
     if entries.is_empty() {
         return Err(Error::Message(if excluded.is_empty() {
@@ -1797,23 +1805,34 @@ fn refresh_onepassword(
         fs::create_dir_all(parent).ok();
     }
 
+    let mappings: Vec<Mapping> = entries
+        .iter()
+        .map(|(var, reference)| Mapping::onepassword(var, reference))
+        .collect();
+    let written = refs::write_refs(
+        &path,
+        &mappings,
+        mode,
+        RefsStyle::OnePassword {
+            exclusions: &exclusions,
+        },
+        "vaulted-agent refresh",
+    )?;
     match mode {
-        "replace" => {
-            refs::write_op_refs_replace(&path, &entries, &exclusions, "vaulted-agent refresh")?;
+        WriteMode::Replace => {
             println!(
                 "\nWrote refs file (replace, {} mapping(s)): {}",
                 entries.len(),
                 path.display()
             );
         }
-        _ => {
-            let added =
-                refs::write_op_refs_merge(&path, &entries, &exclusions, "vaulted-agent refresh")?;
-            if added == 0 {
+        WriteMode::Merge => {
+            if written.added == 0 {
                 println!("\nNo new mappings to add: {}", path.display());
             } else {
                 println!(
-                    "\nUpdated refs file (+{added} mapping(s)): {}",
+                    "\nUpdated refs file (+{} mapping(s)): {}",
+                    written.added,
                     path.display()
                 );
             }
@@ -1948,17 +1967,23 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
     println!("{} secret(s) visible.", secrets.len());
     let man_path = default_bitwarden_manifest(paths)?;
     fs::create_dir_all(&paths.manifest_dir).ok();
-    if man_path.is_file() {
-        let merge = refs::write_refs_merge(&man_path, &secrets, None, "vaulted-agent setup")?;
-        if merge.recovered > 0 {
+    let mode = WriteMode::settle(None, &man_path);
+    let written = refs::write_refs(
+        &man_path,
+        &Mapping::bitwarden_selection(&secrets, None),
+        mode,
+        RefsStyle::Bitwarden,
+        "vaulted-agent setup",
+    )?;
+    if mode == WriteMode::Merge {
+        if written.recovered > 0 {
             println!(
                 "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh)",
-                merge.recovered
+                written.recovered
             );
         }
-        println!("Merged into {} (+{})", man_path.display(), merge.added);
+        println!("Merged into {} (+{})", man_path.display(), written.added);
     } else {
-        refs::write_refs_replace(&man_path, &secrets, None, "vaulted-agent setup")?;
         println!("Wrote {}", man_path.display());
     }
     if let Some(name) = man_path.file_name().and_then(|s| s.to_str()) {

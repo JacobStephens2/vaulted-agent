@@ -224,3 +224,55 @@ fn refresh_rejects_a_backend_without_refs_files() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The #80 rule on 1Password: a merge whose file already ends in refresh's
+/// separator appends under it instead of opening another one every run.
+#[test]
+fn a_second_merge_that_adds_a_field_reuses_the_separator() {
+    let seam = CliSeam::new();
+    seam.install_fake_op();
+    let path = refs_path(&seam, "onepassword.refs");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "PINNED=op://Orchestrator/pinned/field\n").unwrap();
+
+    let run = || {
+        seam.vaulted_agent()
+            .args(["refresh", "--backend", "onepassword", "--all", "--merge"])
+            .env("OP_SERVICE_ACCOUNT_TOKEN", TOKEN)
+            .output()
+            .expect("run refresh")
+    };
+    let out = run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Take one generated mapping back out, so the next merge has a field to add.
+    let first = fs::read_to_string(&path).unwrap();
+    let dropped = "ANTHROPIC_CONDUCTOR_API_KEY=op://Orchestrator/anthropic/conductor-api-key\n";
+    assert!(first.contains(dropped), "{first}");
+    fs::write(&path, first.replace(dropped, "")).unwrap();
+
+    let out = run();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("Updated refs file (+1 mapping(s))"),
+        "{stdout}"
+    );
+
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains(dropped), "{body}");
+    assert_eq!(
+        body.matches("# --- appended by vaulted-agent refresh ---")
+            .count(),
+        1,
+        "{body}"
+    );
+}
