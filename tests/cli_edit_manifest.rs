@@ -181,3 +181,76 @@ fn without_a_terminal_it_says_to_name_one_rather_than_hanging() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no terminal"), "{err}");
 }
+
+#[test]
+fn a_placeholder_the_launch_refuses_is_reported_with_the_launch_s_wording() {
+    // Before issue #138 the editor judged without a Backend and called this
+    // clean, while every launch through the Bitwarden Harness refused it.
+    let seam = CliSeam::new();
+    fs::write(seam.config_dir.join("manifests/bw.env"), "X=name:x-key\n").unwrap();
+    fs::write(
+        seam.config_dir.join("harnesses.d/claude.conf"),
+        "backend = bitwarden\nmanifest = bw.env\ncommand = true\n",
+    )
+    .unwrap();
+    let editor = seam.work_dir.join("placeholder.sh");
+    fs::write(
+        &editor,
+        "#!/usr/bin/env bash\nprintf 'X=REPLACE_WITH_UUID\\n' > \"$1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = seam
+        .vaulted_agent()
+        .env("EDITOR", &editor)
+        .args(["edit-manifest", "bw.env"])
+        .output()
+        .expect("run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(!text.contains("no problems found"), "{text}");
+    assert!(
+        text.contains("line 1: X still has placeholder ref REPLACE_WITH_UUID"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_file_no_harness_reads_says_the_backend_checks_were_skipped() {
+    let seam = CliSeam::new();
+    seam_with_manifests(&seam);
+    let out = seam
+        .vaulted_agent()
+        .env("EDITOR", "true")
+        .args(["edit-manifest", "narrow.env.tpl"])
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Backend checks skipped"), "{text}");
+    assert!(text.contains("no Harness reads this file"), "{text}");
+}
+
+#[test]
+fn a_file_a_harness_reads_does_not_say_the_backend_checks_were_skipped() {
+    let seam = CliSeam::new();
+    seam_with_manifests(&seam);
+    let out = seam
+        .vaulted_agent()
+        .env("EDITOR", "true")
+        .args(["edit-manifest", "wide.env.tpl"])
+        .output()
+        .expect("run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("2 variable(s), no problems found."), "{text}");
+    assert!(!text.contains("skipped"), "{text}");
+}

@@ -1646,20 +1646,31 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
         }
     };
 
+    // Judge the file as everything that reads it would. The file is saved
+    // before we look, so an Inventory that will not load degrades to the
+    // Backend-blind check rather than refusing the edit.
+    let backends = Inventory::load(paths)
+        .map(|inv| inv.backends_reading(&path))
+        .unwrap_or_default();
+
     loop {
         open_in_editor(&path)?;
         let text = fs::read_to_string(&path).map_err(|e| Error::Io {
             path: path.clone(),
             source: e,
         })?;
-        let problems = crate::validate::manifest_problems(&text);
+        let checked = crate::validate::check_manifest(&text, &backends);
+        let problems = checked.problems;
         if problems.is_empty() {
-            let n = crate::config::parse_dotenv_keys(&text)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let skipped = if backends.is_empty() {
+                " Backend checks skipped: no Harness reads this file."
+            } else {
+                ""
+            };
             println!(
-                "{}: {n} variable(s), no problems found.",
-                path.file_name().unwrap_or_default().to_string_lossy()
+                "{}: {} variable(s), no problems found.{skipped}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                checked.entries.len()
             );
             return Ok(());
         }
