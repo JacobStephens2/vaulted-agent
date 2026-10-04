@@ -11,6 +11,7 @@ mod harness_sync;
 pub mod inventory;
 pub mod launch;
 pub mod manifest_entry;
+pub mod onepassword;
 pub mod privilege;
 pub mod refs;
 pub mod resume;

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::bitwarden::{BwListing, BwSecret, Lookup};
 use crate::error::{Error, Result};
+use crate::onepassword::{Lookup as OpLookup, OpListing};
 
 mod writer;
 pub use writer::{write_refs, Mapping, RefsStyle, RefsWrite, WriteMode};
@@ -519,223 +520,19 @@ fn write_atomic(path: &Path, body: &str) -> Result<()> {
     Ok(())
 }
 
-/// True for a section label 1Password supplied rather than the operator.
-///
-/// `add more` is the label the app gives the section holding custom fields
-/// added to an item without choosing a section, so it turns up across a vault
-/// without anyone having typed it. Folding it into a variable name gives
-/// ANTHROPIC_ADD_MORE_CONDUCTOR_API_KEY where ANTHROPIC_CONDUCTOR_API_KEY was
-/// meant, and it carries nothing a reader wants: a section disambiguates
-/// fields *within* an item, and this one collects everything never grouped.
-///
-/// This governs naming and dedupe only. A written reference always keeps the
-/// section it was built with, so what `op` is asked to resolve never changes.
-pub fn op_section_is_default(section: &str) -> bool {
-    section.trim().eq_ignore_ascii_case("add more")
-}
-
-/// True when a variable name still carries a default section label folded into
-/// it, the shape `refresh` generated before it learned to drop one. Derived
-/// from the label rather than spelled out, so the two cannot drift apart.
-pub fn name_folds_default_section(name: &str) -> bool {
-    let fragment = var_from_parts("", Some("add more"), "");
-    name.to_ascii_uppercase().contains(&format!("_{fragment}_"))
-}
-
-/// The section as it should count toward a variable name: absent when there is
-/// no section, or when 1Password named it rather than the operator.
-fn section_for_naming(section: Option<&str>) -> Option<&str> {
-    section.filter(|s| !s.is_empty() && !op_section_is_default(s))
-}
-
-/// VAR name for a 1Password field: "anthropic" + "conductor-api-key" becomes
-/// ANTHROPIC_CONDUCTOR_API_KEY. An operator-named section is included, because
-/// label alone is not unique within an item; a default section label is not
-/// (see `op_section_is_default`).
-///
-/// Dropping a default label can make two fields in one item want the same
-/// name. Only the caller can see that, because it holds the whole item; it
-/// resolves the clash with `op_ref_var_qualified`.
-pub fn op_ref_var(item: &str, section: Option<&str>, field: &str) -> String {
-    var_from_parts(item, section_for_naming(section), field)
-}
-
-/// `op_ref_var`, keeping a section label it would otherwise drop. For the one
-/// case that needs it: two fields in an item whose names would collide.
-pub fn op_ref_var_qualified(item: &str, section: Option<&str>, field: &str) -> String {
-    var_from_parts(item, section.filter(|s| !s.is_empty()), field)
-}
-
-fn var_from_parts(item: &str, section: Option<&str>, field: &str) -> String {
-    let joined = match section {
-        Some(s) => format!("{item}_{s}_{field}"),
-        None => format!("{item}_{field}"),
-    };
-    let mut s: String = joined
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_uppercase()
-            } else {
-                '_'
-            }
+/// Classify every mapping line in a 1Password refs file against the
+/// **1Password listing** this run fetched. No extra vault calls — same rule as
+/// Bitwarden, different listing. The fate is the lookup, read off: a reference
+/// into an item this run never expanded is unchecked, never dangling (ADR-0005).
+pub fn scan_op_refs(text: &str, listing: &OpListing) -> Vec<ScannedRef> {
+    scan_refs(text, |value| {
+        Verdict::of(match listing.lookup(value) {
+            OpLookup::Found(_) => RefFate::Resolvable,
+            OpLookup::Absent => RefFate::Dangling,
+            OpLookup::Unexpanded => RefFate::Unchecked,
+            OpLookup::NotARef => RefFate::Unjudged,
         })
-        .collect();
-    while s.contains("__") {
-        s = s.replace("__", "_");
-    }
-    let s = s.trim_matches('_').to_string();
-    let needs_prefix = !matches!(s.chars().next(), Some(c) if c.is_ascii_alphabetic());
-    if needs_prefix {
-        format!("SECRET_{s}")
-    } else {
-        s
-    }
-}
-
-/// `op://VAULT/ITEM/FIELD`, or `op://VAULT/ITEM/SECTION/FIELD` for a field in a
-/// section.
-///
-/// The section is not decoration. An item can carry several fields with the same
-/// label in different sections, holding different secrets; the unqualified form
-/// then resolves to whichever one `op` picks. Both forms were checked against a
-/// real vault, including that two section-qualified references return different
-/// values.
-///
-/// Spaces are fine: `op inject` reads a dotenv value to end of line.
-pub fn op_reference(vault: &str, item: &str, section: Option<&str>, field: &str) -> String {
-    match section {
-        Some(s) if !s.is_empty() => format!("op://{vault}/{item}/{s}/{field}"),
-        _ => format!("op://{vault}/{item}/{field}"),
-    }
-}
-
-/// True when a reference component survives `op inject`'s reference scanner.
-///
-/// The scanner ends a reference at a character it does not accept, so an item
-/// titled `db-admin jstephens MySQL (read-write)` is read as the truncated
-/// `op://Orchestrator/db-admin jstephens MySQL` and rejected with "too few
-/// '/'": one such item aborts the injection of the entire manifest. Spaces are
-/// accepted; parentheses and non-ASCII characters (an em dash in a title, say)
-/// are not. Quoting the value is not a workaround, because the scanner runs
-/// over the reference text itself rather than the shell-quoted line.
-pub fn op_component_is_safe(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' '))
-}
-
-/// True when `op` can read a whole reference: the scheme, then at least a
-/// vault, an item and a field, each built only from characters its scanner
-/// accepts. One reference that fails this aborts the injection of the entire
-/// manifest, so it is worth checking before a launch rather than during one.
-pub fn op_reference_is_parseable(reference: &str) -> bool {
-    let Some(rest) = reference.strip_prefix("op://") else {
-        return false;
-    };
-    let parts: Vec<&str> = rest.split('/').collect();
-    parts.len() >= 3 && parts.iter().all(|p| op_component_is_safe(p))
-}
-
-/// The item component of a reference: the readable title when `op` can parse
-/// it, otherwise the item's opaque ID, which always parses. Variable names are
-/// still derived from the title, so a fallback here costs readability only in
-/// the reference itself.
-pub fn op_item_component<'a>(title: &'a str, id: &'a str) -> &'a str {
-    if op_component_is_safe(title) {
-        title
-    } else {
-        id
-    }
-}
-
-/// Everything `refresh` learned about the 1Password side of this run, and the
-/// whole world an existing mapping is judged against.
-///
-/// Deliberately only what the run already paid for. `op item list` is one call
-/// and names every item; fields cost one `op item get` per item, which is why
-/// selection is at item level in the first place. So a mapping into an item
-/// this run expanded is judged down to the field, and a mapping into an item it
-/// did not is an **unchecked ref** — reported, never pruned (ADR-0005).
-pub struct OpWorld {
-    /// `op item list`: every item the token can see.
-    pub items: Vec<crate::backend::OpItem>,
-    /// Field identities by item id, for the items this run expanded.
-    pub fields: std::collections::HashMap<String, Vec<crate::backend::OpFieldRef>>,
-}
-
-impl OpWorld {
-    /// The listed item a reference's vault and item components name, if any.
-    fn item_of(&self, vault: &str, item: &str) -> Option<&crate::backend::OpItem> {
-        self.items.iter().find(|it| it.named_by(vault, item))
-    }
-}
-
-/// How one `op://` reference stands against what this run fetched.
-///
-/// Lenient by construction: every uncertainty resolves toward "not dangling".
-/// A wrong `Dangling` removes a line that launches today, and no report is
-/// worth that.
-fn op_ref_fate(reference: &str, world: &OpWorld) -> RefFate {
-    let r = reference.trim();
-    // Invariant 4 keeps placeholders loud, and `secrets validate` owns them.
-    if crate::validate::is_placeholder_ref(r) {
-        return RefFate::Unjudged;
-    }
-    // A literal beside the references (a region, a URL) is not refresh's to
-    // judge, and neither is a shape `op` itself cannot read.
-    if !r.starts_with("op://") || !op_reference_is_parseable(r) {
-        return RefFate::Unjudged;
-    }
-    let parts: Vec<&str> = r["op://".len()..].split('/').collect();
-    let (vault, item, section, field) = match parts.as_slice() {
-        [v, i, f] => (*v, *i, None, *f),
-        [v, i, s, f] => (*v, *i, Some(*s), *f),
-        // More components than `op`'s own form has: nothing to judge it by.
-        _ => return RefFate::Unjudged,
-    };
-    // A placeholder anywhere in the reference keeps the whole line unjudged.
-    // `is_placeholder_ref` anchors most of its spellings at the start of the
-    // string, which behind an `op://` prefix is the scheme, so the components
-    // have to be offered to it one at a time. Invariant 4 makes a placeholder
-    // fail closed and ADR-0003 keeps prune off it: removing one would take the
-    // variable out of the manifest and turn a loud misconfiguration into a
-    // secret that quietly stops being injected.
-    if [Some(item), section, Some(field)]
-        .into_iter()
-        .flatten()
-        .any(crate::validate::is_placeholder_ref)
-    {
-        return RefFate::Unjudged;
-    }
-    let Some(found) = world.item_of(vault, item) else {
-        // Neither an id nor a title in the listing: the item was deleted,
-        // renamed, or moved out of this token's reach. An `op` reference records
-        // no source id (ADR-0005), so a rename here is indistinguishable from a
-        // deletion and both are dangling.
-        return RefFate::Dangling;
-    };
-    let Some(fields) = world.fields.get(found.id.as_str()) else {
-        return RefFate::Unchecked;
-    };
-    // A default section label groups fields that were never grouped, and `op`
-    // resolves the unqualified form to the field inside it — the same
-    // equivalence `canonical_reference` relies on.
-    let section = section.filter(|s| !op_section_is_default(s));
-    let hit = fields
-        .iter()
-        .any(|f| f.named(field) && f.in_section(section));
-    if hit {
-        RefFate::Resolvable
-    } else {
-        RefFate::Dangling
-    }
-}
-
-/// Classify every mapping line in a 1Password refs file against what this run
-/// fetched. No extra vault calls — same rule as Bitwarden, different world.
-pub fn scan_op_refs(text: &str, world: &OpWorld) -> Vec<ScannedRef> {
-    scan_refs(text, |value| Verdict::of(op_ref_fate(value, world)))
+    })
 }
 
 /// Keyword of the comment recording a variable name `refresh` must never map
@@ -866,127 +663,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn op_var_uppercases_and_collapses_separators() {
-        assert_eq!(
-            op_ref_var("anthropic", None, "conductor-api-key"),
-            "ANTHROPIC_CONDUCTOR_API_KEY"
-        );
-        assert_eq!(
-            op_ref_var("github token", None, "fine-grained-token"),
-            "GITHUB_TOKEN_FINE_GRAINED_TOKEN"
-        );
-        // Leading/trailing junk must not produce __ or a trailing _.
-        assert_eq!(op_ref_var("  spaced  ", None, "-field-"), "SPACED_FIELD");
-    }
-
-    #[test]
-    fn op_var_prefixes_when_it_would_not_start_with_a_letter() {
-        // A bare digit start is not a valid shell identifier.
-        assert_eq!(op_ref_var("3cx", None, "api-key"), "SECRET_3CX_API_KEY");
-    }
-
-    #[test]
-    fn section_distinguishes_same_label_fields() {
-        // Without the section these collapse to one VAR and one ambiguous
-        // reference, silently dropping real secrets.
-        let a = op_ref_var("mysql8.etadventures.com", Some("mysql"), "password");
-        let b = op_ref_var("mysql8.etadventures.com", None, "password");
-        assert_eq!(a, "MYSQL8_ETADVENTURES_COM_MYSQL_PASSWORD");
-        assert_eq!(b, "MYSQL8_ETADVENTURES_COM_PASSWORD");
-        assert_ne!(a, b);
-
-        assert_eq!(
-            op_reference("V", "host", Some("mysql"), "password"),
-            "op://V/host/mysql/password"
-        );
-        assert_eq!(
-            op_reference("V", "host", None, "password"),
-            "op://V/host/password"
-        );
-        // An empty section must not produce a double slash.
-        assert_eq!(
-            op_reference("V", "host", Some(""), "password"),
-            "op://V/host/password"
-        );
-    }
-
-    #[test]
-    fn op_component_safety_matches_what_op_can_parse() {
-        // Spaces are accepted by op's reference scanner.
-        assert!(op_component_is_safe("db-admin jstephens MySQL"));
-        assert!(op_component_is_safe("mysql8.etadventures.com"));
-        assert!(op_component_is_safe("add more"));
-        // These end the reference early, so op reports "too few '/'".
-        assert!(!op_component_is_safe(
-            "db-admin jstephens MySQL (read-write)"
-        ));
-        assert!(!op_component_is_safe("Grafana — grafana.etadventures.com"));
-        assert!(!op_component_is_safe(""));
-    }
-
-    #[test]
-    fn unparseable_item_title_falls_back_to_the_id() {
-        let id = "7vjm6j5srnx2krtk5nvduzjjoe";
-        assert_eq!(op_item_component("plain-title", id), "plain-title");
-        assert_eq!(op_item_component("db-admin (read-write)", id), id);
-        // The variable name still comes from the title, so the fallback costs
-        // readability only inside the reference.
-        assert_eq!(
-            op_ref_var("db-admin (read-write)", None, "username"),
-            "DB_ADMIN_READ_WRITE_USERNAME"
-        );
-        assert_eq!(
-            op_reference(
-                "V",
-                op_item_component("db-admin (read-write)", id),
-                None,
-                "username"
-            ),
-            format!("op://V/{id}/username")
-        );
-    }
-
-    #[test]
-    fn reference_parseability_matches_op() {
-        assert!(op_reference_is_parseable("op://V/item/field"));
-        assert!(op_reference_is_parseable("op://V/item/add more/field"));
-        assert!(op_reference_is_parseable(
-            "op://V/db-admin jstephens/username"
-        ));
-        // Truncated by op's scanner, so op reports "too few '/'".
-        assert!(!op_reference_is_parseable(
-            "op://V/db-admin (read-write)/username"
-        ));
-        assert!(!op_reference_is_parseable("op://V/Grafana — host/username"));
-        // Genuinely too few components, before any character question.
-        assert!(!op_reference_is_parseable("op://V/item"));
-        // Not a 1Password reference at all.
-        assert!(!op_reference_is_parseable("name:some-secret"));
-        // Literals are not parseable references — callers must gate on the
-        // op:// prefix so doctor does not treat them as errors (issue #53).
-        assert!(!op_reference_is_parseable("us-east-1"));
-        assert!(!op_reference_is_parseable("https://example.com/v1"));
-    }
-
-    #[test]
-    fn doctor_style_filter_flags_only_malformed_op_refs() {
-        // Same rule the doctor call site uses: only values that claim to be
-        // references, and fail the scanner among those.
-        let lines = [
-            ("GOOD", "op://V/item/field"),
-            ("BAD_PARENS", "op://V/db-admin (rw)/user"),
-            ("LITERAL_REGION", "us-east-1"),
-            ("LITERAL_URL", "https://example.com/v1"),
-        ];
-        let flagged: Vec<&str> = lines
-            .iter()
-            .filter(|(_, v)| v.starts_with("op://") && !op_reference_is_parseable(v))
-            .map(|(k, _)| *k)
-            .collect();
-        assert_eq!(flagged, vec!["BAD_PARENS"]);
-    }
-
-    #[test]
     fn index_list_accepts_ranges_as_well_as_numbers() {
         // A 65-item vault makes "most of them" a line of sixty numbers.
         assert_eq!(parse_index_list("1-5", 65).unwrap(), vec![0, 1, 2, 3, 4]);
@@ -1011,77 +687,6 @@ mod tests {
         assert!(parse_index_list("1-2-3", 10).is_err()); // not a range
         assert!(parse_index_list("x", 10).is_err());
         assert!(parse_index_list("1-x", 10).is_err());
-    }
-
-    #[test]
-    fn default_section_label_does_not_reach_the_name() {
-        // 1Password labels the section holding ungrouped custom fields
-        // "add more". Nobody typed it, and it made every generated name carry
-        // it: ANTHROPIC_ADD_MORE_CONDUCTOR_API_KEY for a field whose own item
-        // and label already say everything.
-        assert_eq!(
-            op_ref_var("anthropic", Some("add more"), "conductor-api-key"),
-            "ANTHROPIC_CONDUCTOR_API_KEY"
-        );
-        assert_eq!(
-            op_ref_var("anthropic", None, "conductor-api-key"),
-            op_ref_var("anthropic", Some("add more"), "conductor-api-key")
-        );
-        // 1Password's own casing is not guaranteed.
-        assert!(op_section_is_default("Add More"));
-        assert!(op_section_is_default(" add more "));
-        // A section the operator named still distinguishes fields, which is the
-        // whole reason the section is in the name at all.
-        assert!(!op_section_is_default("mysql"));
-        assert_eq!(
-            op_ref_var("mysql8.etadventures.com", Some("mysql"), "password"),
-            "MYSQL8_ETADVENTURES_COM_MYSQL_PASSWORD"
-        );
-    }
-
-    #[test]
-    fn qualified_form_is_available_when_dropping_the_label_would_collide() {
-        // One item carrying `app-id` loose and `app-id` under "add more" holds
-        // two secrets. The caller sees the clash and asks for both qualified,
-        // rather than letting one name win and the other secret vanish.
-        let a = op_ref_var("eta-factory-github-app", None, "app-id");
-        let b = op_ref_var("eta-factory-github-app", Some("add more"), "app-id");
-        assert_eq!(a, b);
-        let b_q = op_ref_var_qualified("eta-factory-github-app", Some("add more"), "app-id");
-        assert_eq!(b_q, "ETA_FACTORY_GITHUB_APP_ADD_MORE_APP_ID");
-        assert_ne!(a, b_q);
-        // With no section there is nothing to add back.
-        assert_eq!(op_ref_var_qualified("item", None, "field"), "ITEM_FIELD");
-    }
-
-    #[test]
-    fn legacy_names_are_recognisable_for_doctor() {
-        assert!(name_folds_default_section(
-            "ETA_FACTORY_GITHUB_APP_ADD_MORE_APP_ID"
-        ));
-        assert!(name_folds_default_section(&op_ref_var_qualified(
-            "anthropic",
-            Some("add more"),
-            "conductor-api-key"
-        )));
-        // What refresh generates now must never look legacy.
-        assert!(!name_folds_default_section(&op_ref_var(
-            "anthropic",
-            Some("add more"),
-            "conductor-api-key"
-        )));
-        assert!(!name_folds_default_section("PLAIN_API_KEY"));
-        // A field genuinely named "add-more-seats" produces the same fragment,
-        // so this cannot be the whole test. Doctor pairs it with the reference,
-        // which only carries a default section when there really is one:
-        // op://V/zoom/add-more-seats-url has no section component at all.
-        assert!(name_folds_default_section("ZOOM_ADD_MORE_SEATS_URL"));
-        assert!(!"op://V/zoom/add-more-seats-url"
-            .split('/')
-            .any(op_section_is_default));
-        assert!("op://V/anthropic/add more/conductor-api-key"
-            .split('/')
-            .any(op_section_is_default));
     }
 
     #[test]
@@ -1499,87 +1104,36 @@ mod tests {
         );
     }
 
-    fn op_world() -> OpWorld {
-        let mut fields = std::collections::HashMap::new();
-        fields.insert(
-            "id-host".to_string(),
-            vec![
-                crate::backend::OpFieldRef {
-                    section: None,
-                    label: "password".into(),
-                    id: "f1".into(),
-                },
-                crate::backend::OpFieldRef {
-                    section: Some("mysql".into()),
-                    label: "password".into(),
-                    id: "f2".into(),
-                },
-                crate::backend::OpFieldRef {
-                    section: Some("add more".into()),
-                    label: "app-id".into(),
-                    id: "f3".into(),
-                },
-            ],
-        );
-        OpWorld {
-            items: vec![
-                crate::backend::OpItem {
-                    id: "id-host".into(),
-                    title: "db.example.com".into(),
-                    vault: "Orchestrator".into(),
-                    vault_id: "vault-id-1".into(),
-                },
-                crate::backend::OpItem {
-                    id: "id-other".into(),
-                    title: "github token".into(),
-                    vault: "Orchestrator".into(),
-                    vault_id: "vault-id-1".into(),
-                },
-            ],
-            fields,
-        }
+    /// `db.example.com` expanded with one `password` field; `github token`
+    /// listed but never expanded.
+    fn op_listing() -> OpListing {
+        let mut l = OpListing::from_json(
+            r#"[
+              {"id":"id-host","title":"db.example.com","vault":{"id":"v","name":"Orchestrator"}},
+              {"id":"id-other","title":"github token","vault":{"id":"v","name":"Orchestrator"}}
+            ]"#,
+        )
+        .unwrap();
+        l.expand(
+            "id-host",
+            r#"{"fields":[{"id":"f1","label":"password","type":"CONCEALED","value":"a"}]}"#,
+        )
+        .unwrap();
+        l
     }
 
     fn fate(reference: &str) -> RefFate {
-        let scan = scan_op_refs(&format!("VAR={reference}\n"), &op_world());
+        let scan = scan_op_refs(&format!("VAR={reference}\n"), &op_listing());
         assert_eq!(scan.len(), 1);
         scan[0].fate
     }
 
     #[test]
-    fn op_refs_are_judged_against_what_the_run_fetched() {
+    fn an_op_fate_is_the_listing_lookup_read_off() {
         assert_eq!(
             fate("op://Orchestrator/db.example.com/password"),
             RefFate::Resolvable
         );
-        assert_eq!(
-            fate("op://Orchestrator/db.example.com/mysql/password"),
-            RefFate::Resolvable
-        );
-        // The item component may be the opaque id, which is what refresh writes
-        // when the title is one `op` cannot parse.
-        assert_eq!(
-            fate("op://Orchestrator/id-host/password"),
-            RefFate::Resolvable
-        );
-        // A default section label groups fields that were never grouped, so the
-        // qualified and unqualified forms are the same reference.
-        assert_eq!(
-            fate("op://Orchestrator/id-host/add more/app-id"),
-            RefFate::Resolvable
-        );
-        assert_eq!(
-            fate("op://Orchestrator/id-host/app-id"),
-            RefFate::Resolvable
-        );
-        // `op` matches names case-insensitively; a manifest written in another
-        // case launches fine and must not be called dangling.
-        assert_eq!(
-            fate("op://orchestrator/DB.Example.com/PASSWORD"),
-            RefFate::Resolvable
-        );
-
-        // Item gone from the listing, and field gone from an item that was read.
         assert_eq!(
             fate("op://Orchestrator/vanished/password"),
             RefFate::Dangling
@@ -1588,49 +1142,31 @@ mod tests {
             fate("op://Orchestrator/db.example.com/api-key"),
             RefFate::Dangling
         );
-        // A vault this token cannot see holds nothing it can resolve.
-        assert_eq!(
-            fate("op://Other/db.example.com/password"),
-            RefFate::Dangling
-        );
-
-        // Item in the listing, fields never read: nothing was learned.
         assert_eq!(
             fate("op://Orchestrator/github token/api-key"),
             RefFate::Unchecked
         );
-
-        // `op` accepts a vault id in place of its name, so the listing has to
-        // match on either. Judging by name alone would prune a working line.
-        assert_eq!(
-            fate("op://vault-id-1/db.example.com/password"),
-            RefFate::Resolvable
-        );
-
-        // Shapes prune must not touch.
         assert_eq!(fate("us-east-1"), RefFate::Unjudged);
         assert_eq!(
             fate("op://Orchestrator/db-admin (rw)/password"),
             RefFate::Unjudged
         );
-        // A placeholder in any component, not only the spellings that survive
-        // being read behind the `op://` prefix: invariant 4 keeps them loud,
-        // and pruning one would take the variable out of the manifest.
-        for placeholder in [
-            "op://Orchestrator/db.example.com/REPLACE_WITH_FIELD",
-            "op://Orchestrator/db.example.com/CHANGE_ME",
-            "op://Orchestrator/YOUR_ITEM/password",
-            "op://Orchestrator/db.example.com/TODO/password",
-        ] {
-            assert_eq!(fate(placeholder), RefFate::Unjudged, "{placeholder}");
-        }
+        assert_eq!(
+            fate("op://Orchestrator/YOUR_ITEM/password"),
+            RefFate::Unjudged
+        );
+        // Read as the launch reads it: quotes gone.
+        assert_eq!(
+            fate("'op://Orchestrator/db.example.com/password'"),
+            RefFate::Resolvable
+        );
     }
 
     #[test]
     fn an_exclusion_does_not_make_a_working_mapping_prunable() {
         let text = "DB_EXAMPLE_COM_PASSWORD=op://Orchestrator/db.example.com/password\n\
                     GONE=op://Orchestrator/vanished/password\n";
-        let scan = scan_op_refs(text, &op_world());
+        let scan = scan_op_refs(text, &op_listing());
         let patterns = vec!["*_PASSWORD".to_string(), "GONE".to_string()];
 
         // Reported under its own heading, and absent from the edit list.
@@ -1677,7 +1213,7 @@ mod tests {
         // The launch reads all three lines as A's value. A `B=` mapping must not
         // appear, or prune could cut a line out of the middle of A.
         let text = "A=\"x\nB=op://V/gone/f\n\"\n";
-        let scan = scan_op_refs(text, &op_world());
+        let scan = scan_op_refs(text, &op_listing());
         let vars: Vec<&str> = scan.iter().map(|r| r.var.as_str()).collect();
         assert_eq!(vars, ["A"]);
         assert_eq!(scan[0].fate, RefFate::Unjudged);
