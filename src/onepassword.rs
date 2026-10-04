@@ -140,10 +140,24 @@ pub fn section_is_default(section: &str) -> bool {
     section.trim().eq_ignore_ascii_case("add more")
 }
 
-/// True when a variable name still carries a default section label folded into
-/// it, the shape `refresh` generated before it learned to drop one. Derived
-/// from the label rather than spelled out, so the two cannot drift apart.
-pub fn name_folds_default_section(name: &str) -> bool {
+/// True when a mapping still has the name `refresh` generated before it learned
+/// to drop a default section label: the reference sits in a default section,
+/// and the variable name carries that label folded into it.
+///
+/// Both halves, because the name alone is not enough: a field genuinely named
+/// `add-more-seats` produces the same fragment, and its reference has no
+/// section at all.
+pub fn has_legacy_name(var: &str, reference: &str) -> bool {
+    OpRef::parse(reference)
+        .and_then(|r| r.section)
+        .is_some_and(section_is_default)
+        && name_folds_default_section(var)
+}
+
+/// True when a variable name carries a default section label folded into it.
+/// Derived from the label rather than spelled out, so the two cannot drift
+/// apart.
+fn name_folds_default_section(name: &str) -> bool {
     let fragment = var_from_parts("", Some("add more"), "");
     name.to_ascii_uppercase().contains(&format!("_{fragment}_"))
 }
@@ -177,7 +191,7 @@ impl OpItem {
     /// parse it, otherwise the item's opaque ID, which always parses. Variable
     /// names are still derived from the title, so a fallback here costs
     /// readability only in the reference itself.
-    fn component(&self) -> &str {
+    fn reference_component(&self) -> &str {
         if component_is_safe(&self.title) {
             &self.title
         } else {
@@ -323,8 +337,10 @@ impl OpListing {
     /// line dangling. On a parse error nothing is recorded, so the item stays
     /// unexpanded.
     pub fn expand(&mut self, item_id: &str, item_json: &str) -> Result<Vec<OpField>> {
-        let fields = parse_fields(item_json)?;
-        let identities = parse_field_identities(item_json)?;
+        let item: serde_json::Value = serde_json::from_str(item_json)
+            .map_err(|e| Error::Message(format!("op item get JSON: {e}")))?;
+        let fields = referenceable_fields(&item);
+        let identities = field_identities(&item);
         self.fields.insert(item_id.to_string(), identities);
         Ok(fields)
     }
@@ -450,7 +466,7 @@ pub fn item_mappings(item: &OpItem, fields: Vec<OpField>) -> ItemMappings {
             };
             let reference = OpRef {
                 vault: &item.vault,
-                item: item.component(),
+                item: item.reference_component(),
                 section,
                 field: &f.label,
             };
@@ -515,9 +531,7 @@ fn var_from_parts(item: &str, section: Option<&str>, field: &str) -> String {
 /// the label, because a reference may name either.
 ///
 /// Metadata only — values are never read here, not even for presence.
-fn parse_field_identities(item_json: &str) -> Result<Vec<OpFieldIdentity>> {
-    let v: serde_json::Value = serde_json::from_str(item_json)
-        .map_err(|e| Error::Message(format!("op item get JSON: {e}")))?;
+fn field_identities(v: &serde_json::Value) -> Vec<OpFieldIdentity> {
     let mut out: Vec<OpFieldIdentity> = Vec::new();
     if let Some(fields) = v.get("fields").and_then(|f| f.as_array()) {
         for f in fields {
@@ -535,7 +549,7 @@ fn parse_field_identities(item_json: &str) -> Result<Vec<OpFieldIdentity>> {
                 continue;
             }
             out.push(OpFieldIdentity {
-                section: section_name(&v, f),
+                section: section_name(v, f),
                 label,
                 id,
             });
@@ -567,20 +581,18 @@ fn parse_field_identities(item_json: &str) -> Result<Vec<OpFieldIdentity>> {
             });
         }
     }
-    Ok(out)
+    out
 }
 
-/// Parse `op item get --format json` into referenceable fields.
+/// The fields of an `op item get --format json` worth mapping.
 ///
 /// Metadata only: a field is kept based on whether a value is PRESENT, and the
 /// value itself is never returned, stored, or logged. Refs files hold
 /// references, never secret material (CONTEXT.md invariant).
-fn parse_fields(item_json: &str) -> Result<Vec<OpField>> {
-    let v: serde_json::Value = serde_json::from_str(item_json)
-        .map_err(|e| Error::Message(format!("op item get JSON: {e}")))?;
+fn referenceable_fields(v: &serde_json::Value) -> Vec<OpField> {
     let mut out: Vec<OpField> = Vec::new();
     let Some(fields) = v.get("fields").and_then(|f| f.as_array()) else {
-        return Ok(out);
+        return out;
     };
     for f in fields {
         // OTP fields are time-based; a static reference to one is not useful.
@@ -627,7 +639,7 @@ fn parse_fields(item_json: &str) -> Result<Vec<OpField>> {
         if label.is_empty() {
             continue;
         }
-        let section = section_name(&v, f);
+        let section = section_name(v, f);
         // One item can hold several fields with the SAME label in different
         // sections - a real vault has three distinct `password` fields on one
         // host item. They are different secrets, so the pair identifies a field,
@@ -640,7 +652,7 @@ fn parse_fields(item_json: &str) -> Result<Vec<OpField>> {
             label: label.to_string(),
         });
     }
-    Ok(out)
+    out
 }
 
 /// Section name for a field: the label when set, else the section id, resolved
@@ -865,8 +877,7 @@ mod tests {
     }
 
     fn labels(json: &str) -> Vec<String> {
-        parse_fields(json)
-            .unwrap()
+        referenceable_fields(&serde_json::from_str(json).unwrap())
             .into_iter()
             .map(|f| match f.section {
                 Some(s) => format!("{s}/{}", f.label),
@@ -922,7 +933,7 @@ mod tests {
           {"id":"f2","label":"dup","type":"STRING","value":"b"}
         ]}"#;
         assert_eq!(labels(json), vec!["dup"]);
-        assert!(parse_fields(r#"{"id":"x"}"#).unwrap().is_empty());
+        assert!(referenceable_fields(&serde_json::json!({"id": "x"})).is_empty());
     }
 
     /// Two items in one vault: `db.example.com` expanded with a top-level
@@ -1118,16 +1129,21 @@ mod tests {
         )));
         assert!(!name_folds_default_section("PLAIN_API_KEY"));
         // A field genuinely named "add-more-seats" produces the same fragment,
-        // so this cannot be the whole test. Doctor pairs it with the
+        // so the name cannot be the whole test. The mapping pairs it with the
         // reference's section, which is only default when there really is one.
         assert!(name_folds_default_section("ZOOM_ADD_MORE_SEATS_URL"));
-        fn section(t: &str) -> Option<&str> {
-            OpRef::parse(t).and_then(|r| r.section)
-        }
-        assert_eq!(section("op://V/zoom/add-more-seats-url"), None);
-        assert!(
-            section("op://V/anthropic/add more/conductor-api-key").is_some_and(section_is_default)
-        );
+        assert!(!has_legacy_name(
+            "ZOOM_ADD_MORE_SEATS_URL",
+            "op://V/zoom/add-more-seats-url"
+        ));
+        assert!(has_legacy_name(
+            "ANTHROPIC_ADD_MORE_CONDUCTOR_API_KEY",
+            "op://V/anthropic/add more/conductor-api-key"
+        ));
+        assert!(!has_legacy_name(
+            "ANTHROPIC_CONDUCTOR_API_KEY",
+            "op://V/anthropic/add more/conductor-api-key"
+        ));
     }
 
     fn item(title: &str) -> OpItem {

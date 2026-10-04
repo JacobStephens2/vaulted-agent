@@ -18,7 +18,7 @@ use crate::config::{
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
 use crate::launch::{self, LaunchOpts};
-use crate::onepassword::{self, OpListing, OpRef};
+use crate::onepassword::{self, OpListing};
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
@@ -870,12 +870,7 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                     .and_then(|t| parse_dotenv_keys(&t).ok())
                     .map(|m| {
                         m.into_iter()
-                            .filter(|(k, v)| {
-                                OpRef::parse(v)
-                                    .and_then(|r| r.section)
-                                    .is_some_and(onepassword::section_is_default)
-                                    && onepassword::name_folds_default_section(k)
-                            })
+                            .filter(|(k, v)| onepassword::has_legacy_name(k, v))
                             .map(|(k, _)| k)
                             .collect()
                     })
@@ -1735,7 +1730,7 @@ fn gather_onepassword(
     };
 
     // Fields are fetched only for the items actually chosen.
-    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut entries: Vec<Mapping> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
     let mut unrepresentable: Vec<String> = Vec::new();
     let mut excluded: Vec<String> = Vec::new();
@@ -1773,7 +1768,7 @@ fn gather_onepassword(
                 excluded.push(m.var);
                 continue;
             }
-            entries.push((m.var, m.reference));
+            entries.push(Mapping::onepassword(&m.var, &m.reference));
         }
     }
     drop(token);
@@ -1825,10 +1820,7 @@ fn gather_onepassword(
         })
     });
     Ok(Gathered {
-        mappings: entries
-            .iter()
-            .map(|(var, reference)| Mapping::onepassword(var, reference))
-            .collect(),
+        mappings: entries,
         fetched: Fetched::OnePassword(listing),
         refusal,
     })
