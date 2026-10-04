@@ -260,22 +260,22 @@ pub fn resolve_sops(manifest: &Path, age_key: &Path) -> Result<HashMap<String, S
 }
 
 /// Resolve a Manifest into its variables. Loads the Manager token through
-/// `tokens` only for the Backends that need one, and drops it before
+/// `token_source` only for the Backends that need one, and drops it before
 /// returning: a resolved Manifest never carries it (invariant 1).
 pub fn resolve(
     backend: Backend,
     manifest: &Path,
     paths: &Paths,
-    tokens: &TokenSource,
+    token_source: TokenSource,
 ) -> Result<HashMap<String, SecretValue>> {
     match backend {
         Backend::Plainfile => resolve_plainfile(manifest),
         Backend::Bitwarden => {
-            let token = tokens.load(paths, TokenKind::Bws)?;
+            let token = token_source.load(paths, TokenKind::Bws)?;
             resolve_bitwarden(manifest, &token)
         }
         Backend::OnePassword => {
-            let token = tokens.load(paths, TokenKind::Op)?;
+            let token = token_source.load(paths, TokenKind::Op)?;
             resolve_onepassword(manifest, &token)
         }
         Backend::Pass => resolve_pass(manifest),

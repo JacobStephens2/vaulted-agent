@@ -649,11 +649,11 @@ impl TokenSource {
     /// Load a manager token of `kind` along this invocation's route.
     pub fn load(&self, paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
         let key = kind.env_var();
-        let env_token = std::env::var(key).ok().filter(|v| !v.is_empty());
-        match (self.route(env_token.is_some()), env_token) {
-            (TokenRoute::Env, Some(v)) => Ok(ManagerToken::new(v)),
-            (TokenRoute::Prompt, _) => prompt_token(kind),
-            _ => load_from_file(paths, kind),
+        let env_token = std::env::var(key).unwrap_or_default();
+        match self.route(!env_token.is_empty()) {
+            TokenRoute::Env => Ok(ManagerToken::new(env_token)),
+            TokenRoute::Prompt => prompt_token(kind),
+            TokenRoute::File => load_from_file(paths, kind),
         }
     }
 }
@@ -1000,20 +1000,11 @@ mod tests {
         assert!(TokenKind::Op.shape_problem("eyJhbGci").is_some());
     }
 
-    fn decide(
-        env_mode: Option<&str>,
-        env_prompt: Option<&str>,
-        flag: bool,
-        configured: AuthMode,
-    ) -> TokenSource {
-        TokenSource::decide(env_mode, env_prompt, flag, configured)
-    }
-
     #[test]
     fn env_token_wins_over_every_prompt_route() {
         for flag in [false, true] {
             for configured in [AuthMode::File, AuthMode::Prompt] {
-                let ts = decide(Some("prompt"), Some("1"), flag, configured);
+                let ts = TokenSource::decide(Some("prompt"), Some("1"), flag, configured);
                 assert_eq!(ts.route(true), TokenRoute::Env);
             }
         }
@@ -1021,7 +1012,7 @@ mod tests {
 
     #[test]
     fn prompt_flag_forces_prompt_over_file_mode() {
-        let ts = decide(None, None, true, AuthMode::File);
+        let ts = TokenSource::decide(None, None, true, AuthMode::File);
         assert_eq!(ts.route(false), TokenRoute::Prompt);
         assert_eq!(ts.auth_mode(), AuthMode::File);
     }
@@ -1029,12 +1020,12 @@ mod tests {
     #[test]
     fn prompt_env_forces_prompt_only_when_exactly_one() {
         assert_eq!(
-            decide(None, Some("1"), false, AuthMode::File).route(false),
+            TokenSource::decide(None, Some("1"), false, AuthMode::File).route(false),
             TokenRoute::Prompt
         );
         for other in ["0", "", "yes", "true"] {
             assert_eq!(
-                decide(None, Some(other), false, AuthMode::File).route(false),
+                TokenSource::decide(None, Some(other), false, AuthMode::File).route(false),
                 TokenRoute::File,
                 "{other:?}"
             );
@@ -1043,14 +1034,14 @@ mod tests {
 
     #[test]
     fn configured_prompt_mode_prompts() {
-        let ts = decide(None, None, false, AuthMode::Prompt);
+        let ts = TokenSource::decide(None, None, false, AuthMode::Prompt);
         assert_eq!(ts.auth_mode(), AuthMode::Prompt);
         assert_eq!(ts.route(false), TokenRoute::Prompt);
     }
 
     #[test]
     fn file_mode_without_forcing_reads_the_file() {
-        let ts = decide(None, None, false, AuthMode::File);
+        let ts = TokenSource::decide(None, None, false, AuthMode::File);
         assert_eq!(ts.auth_mode(), AuthMode::File);
         assert_eq!(ts.route(false), TokenRoute::File);
     }
@@ -1058,15 +1049,15 @@ mod tests {
     #[test]
     fn env_auth_mode_overrides_configured() {
         assert_eq!(
-            decide(Some("prompt"), None, false, AuthMode::File).auth_mode(),
+            TokenSource::decide(Some("prompt"), None, false, AuthMode::File).auth_mode(),
             AuthMode::Prompt
         );
         assert_eq!(
-            decide(Some("file"), None, false, AuthMode::Prompt).auth_mode(),
+            TokenSource::decide(Some("file"), None, false, AuthMode::Prompt).auth_mode(),
             AuthMode::File
         );
         assert_eq!(
-            decide(Some("file"), None, false, AuthMode::Prompt).route(false),
+            TokenSource::decide(Some("file"), None, false, AuthMode::Prompt).route(false),
             TokenRoute::File
         );
     }
@@ -1076,7 +1067,7 @@ mod tests {
         for configured in [AuthMode::File, AuthMode::Prompt] {
             for junk in ["", "disk", "PROMPT"] {
                 assert_eq!(
-                    decide(Some(junk), None, false, configured).auth_mode(),
+                    TokenSource::decide(Some(junk), None, false, configured).auth_mode(),
                     configured,
                     "{junk:?}"
                 );
@@ -1086,7 +1077,8 @@ mod tests {
 
     #[test]
     fn forced_prompt_survives_setup_mode_choice() {
-        let ts = decide(None, None, true, AuthMode::Prompt).with_auth_mode(AuthMode::File);
+        let ts =
+            TokenSource::decide(None, None, true, AuthMode::Prompt).with_auth_mode(AuthMode::File);
         assert_eq!(ts.auth_mode(), AuthMode::File);
         assert_eq!(ts.route(false), TokenRoute::Prompt);
     }

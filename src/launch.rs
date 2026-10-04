@@ -200,7 +200,7 @@ impl HandoffMode {
 
 pub struct LaunchOpts {
     /// How this invocation obtains the Manager token, if the Backend needs one.
-    pub tokens: TokenSource,
+    pub token_source: TokenSource,
     pub extra_args: Vec<String>,
     /// When set, overrides env-based handoff.
     pub handoff: Option<HandoffMode>,
@@ -244,7 +244,7 @@ pub fn build_launch_plan(
     // written: the reference stays well-formed and stops resolving, so nothing
     // offline can catch it.
     let mut secrets: HashMap<String, SecretValue> =
-        match backend::resolve(backend_name, &manifest, paths, &opts.tokens) {
+        match backend::resolve(backend_name, &manifest, paths, opts.token_source) {
             Ok(s) => s,
             Err(e) => {
                 let blamed = crate::validate::blame_manifest_lines(&manifest, &format!("{e}"));
@@ -376,7 +376,7 @@ pub fn launch_run(
     backend: Backend,
     workdir: Option<&str>,
     command: &[String],
-    tokens: TokenSource,
+    token_source: TokenSource,
 ) -> Result<()> {
     let h = Harness {
         name: "run".into(),
@@ -394,7 +394,7 @@ pub fn launch_run(
         paths,
         &h,
         &LaunchOpts {
-            tokens,
+            token_source,
             extra_args: vec![],
             handoff: None,
         },
@@ -441,7 +441,7 @@ mod tests {
             command: vec![agent.display().to_string()],
         };
         let opts = LaunchOpts {
-            tokens: TokenSource::decide(None, None, false, crate::config::AuthMode::File),
+            token_source: TokenSource::decide(None, None, false, crate::config::AuthMode::File),
             extra_args: vec![],
             handoff: None,
         };

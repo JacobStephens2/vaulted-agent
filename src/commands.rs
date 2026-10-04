@@ -125,14 +125,14 @@ fn prompt_auth_mode_choice(current: AuthMode) -> Result<AuthMode> {
 
 /// When interactive, ask how manager tokens are obtained and persist the choice.
 /// Non-interactive runs leave the existing defaults.conf value alone.
-fn ensure_auth_mode_for_setup(paths: &Paths, tokens: TokenSource) -> Result<TokenSource> {
+fn ensure_auth_mode_for_setup(paths: &Paths, token_source: TokenSource) -> Result<TokenSource> {
     if !can_prompt_user() {
-        return Ok(tokens);
+        return Ok(token_source);
     }
     let current = load_auth_mode(paths);
     let mode = prompt_auth_mode_choice(current)?;
     write_auth_mode(paths, mode)?;
-    Ok(tokens.with_auth_mode(mode))
+    Ok(token_source.with_auth_mode(mode))
 }
 
 fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
@@ -361,11 +361,11 @@ fn ensure_workdir_for_setup(paths: &Paths, service_user: Option<&str>) -> Result
 /// wrote secrets to a terminal would be a worse bug than the one it fixes.
 fn resolve_for_validation(
     paths: &Paths,
-    tokens: &TokenSource,
+    token_source: TokenSource,
     backend: Backend,
     manifest: &Path,
 ) -> Result<usize> {
-    let resolved = backend::resolve(backend, manifest, paths, tokens)?;
+    let resolved = backend::resolve(backend, manifest, paths, token_source)?;
     let n = resolved.len();
     drop(resolved);
     Ok(n)
@@ -377,7 +377,7 @@ fn resolve_for_validation(
 /// variables `backend::resolve` returned. Values themselves are never kept.
 fn validate_manifest_against_vault(
     paths: &Paths,
-    tokens: &TokenSource,
+    token_source: TokenSource,
     backend: Backend,
     manifest: &Path,
     offline: bool,
@@ -386,7 +386,7 @@ fn validate_manifest_against_vault(
     if offline {
         return Ok(None);
     }
-    resolve_for_validation(paths, tokens, backend, manifest).map(Some)
+    resolve_for_validation(paths, token_source, backend, manifest).map(Some)
 }
 
 fn format_validate_ok(resolved: Option<usize>) -> String {
@@ -413,7 +413,7 @@ fn print_validate_blame(manifest: &Path, error: &str, to_stdout: bool) {
     }
 }
 
-pub fn cmd_secrets(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result<()> {
+pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
         "" | "-h" | "--help" | "help" => {
@@ -428,9 +428,9 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], tokens: &TokenSource) -> Resu
             );
             Ok(())
         }
-        "refresh" => cmd_refresh(paths, &args[1..], tokens),
+        "refresh" => cmd_refresh(paths, &args[1..], token_source),
         "list" => {
-            let token = tokens.load(paths, TokenKind::Bws)?;
+            let token = token_source.load(paths, TokenKind::Bws)?;
             let listing = backend::bws_listing(&token)?;
             drop(token);
             println!("Secrets visible to this token:");
@@ -443,7 +443,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], tokens: &TokenSource) -> Resu
             let r = args
                 .get(1)
                 .ok_or_else(|| Error::Message("usage: vaulted-agent secrets get <ref>".into()))?;
-            let token = tokens.load(paths, TokenKind::Bws)?;
+            let token = token_source.load(paths, TokenKind::Bws)?;
             let id = backend::bws_resolve_ref(&token, r)?;
             let value = backend::bws_secret_value(&token, &id)?;
             drop(token);
@@ -522,8 +522,13 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], tokens: &TokenSource) -> Resu
                                 continue;
                             }
                         };
-                        match validate_manifest_against_vault(paths, tokens, be, man_path, offline)
-                        {
+                        match validate_manifest_against_vault(
+                            paths,
+                            token_source,
+                            be,
+                            man_path,
+                            offline,
+                        ) {
                             Ok(n) => println!("{}", format_validate_ok(n)),
                             Err(e) => {
                                 println!("FAIL ({e})");
@@ -553,7 +558,13 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], tokens: &TokenSource) -> Resu
                         };
                         (man_path, be)
                     };
-                    match validate_manifest_against_vault(paths, tokens, be, &man_path, offline) {
+                    match validate_manifest_against_vault(
+                        paths,
+                        token_source,
+                        be,
+                        &man_path,
+                        offline,
+                    ) {
                         Ok(n) => {
                             println!("{}: {}", man_path.display(), format_validate_ok(n));
                             Ok(())
@@ -967,7 +978,7 @@ fn yn(b: bool) -> &'static str {
     }
 }
 
-pub fn cmd_refresh(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result<()> {
+pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     let mut man_path: Option<String> = None;
     let mut take_all = false;
     let mut mode: Option<WriteMode> = None;
@@ -1057,7 +1068,7 @@ pub fn cmd_refresh(paths: &Paths, args: &[String], tokens: &TokenSource) -> Resu
     };
 
     let step = RefreshStep::new(be, exclude)?;
-    refresh_refs(paths, tokens, step, man_path, take_all, mode, prune)
+    refresh_refs(paths, token_source, step, man_path, take_all, mode, prune)
 }
 
 /// Backend for a bare `refresh` (see [`Inventory::refresh_backend`]). An
@@ -1170,14 +1181,14 @@ impl RefreshStep {
     fn gather(
         &self,
         paths: &Paths,
-        tokens: &TokenSource,
+        token_source: TokenSource,
         path: &Path,
         take_all: bool,
     ) -> Result<Gathered> {
         match self {
-            RefreshStep::Bitwarden => gather_bitwarden(paths, tokens, take_all),
+            RefreshStep::Bitwarden => gather_bitwarden(paths, token_source, take_all),
             RefreshStep::OnePassword { exclusions } => {
-                gather_onepassword(paths, tokens, path, take_all, exclusions)
+                gather_onepassword(paths, token_source, path, take_all, exclusions)
             }
         }
     }
@@ -1260,7 +1271,7 @@ impl Fetched {
 /// One `refresh`, whichever Backend `step` lists from.
 fn refresh_refs(
     paths: &Paths,
-    tokens: &TokenSource,
+    token_source: TokenSource,
     mut step: RefreshStep,
     man_path: Option<String>,
     take_all: bool,
@@ -1282,7 +1293,7 @@ fn refresh_refs(
 
     // The manager token is loaded and dropped inside this step: nothing after
     // it can reach the vault, and nothing after it holds the token at the write.
-    let gathered = step.gather(paths, tokens, &path, take_all)?;
+    let gathered = step.gather(paths, token_source, &path, take_all)?;
 
     // After the listing, because it is what makes a verdict possible; before
     // the write, so a pruned line is gone by the time merge decides what to
@@ -1322,8 +1333,8 @@ fn refresh_refs(
 }
 
 /// Bitwarden: pick from the secrets the token can see.
-fn gather_bitwarden(paths: &Paths, tokens: &TokenSource, take_all: bool) -> Result<Gathered> {
-    let token = tokens.load(paths, TokenKind::Bws)?;
+fn gather_bitwarden(paths: &Paths, token_source: TokenSource, take_all: bool) -> Result<Gathered> {
+    let token = token_source.load(paths, TokenKind::Bws)?;
     let listing = backend::bws_listing(&token)?;
     drop(token);
     if listing.is_empty() {
@@ -1689,12 +1700,12 @@ fn ensure_manifest_writable(path: &Path) -> Result<()> {
 /// (~50s on a 60-item vault). Only the chosen items are expanded.
 fn gather_onepassword(
     paths: &Paths,
-    tokens: &TokenSource,
+    token_source: TokenSource,
     path: &Path,
     take_all: bool,
     exclusions: &[String],
 ) -> Result<Gathered> {
-    let token = tokens.load(paths, TokenKind::Op)?;
+    let token = token_source.load(paths, TokenKind::Op)?;
     let items = backend::op_list_items(&token, None)?;
     if items.is_empty() {
         return Err(Error::Message(
@@ -1893,11 +1904,11 @@ fn default_refs_file(paths: &Paths, be: Backend, fallback: &str) -> Result<PathB
 fn store_existing_token(
     paths: &Paths,
     kind: TokenKind,
-    tokens: &TokenSource,
+    token_source: TokenSource,
 ) -> Result<ManagerToken> {
-    let token = tokens.load(paths, kind)?;
+    let token = token_source.load(paths, kind)?;
     let path = kind.file(paths).to_path_buf();
-    if tokens.auth_mode() == AuthMode::File {
+    if token_source.auth_mode() == AuthMode::File {
         let svc = service_user_for_token(paths);
         auth::write_token_file(&path, kind.env_var(), &token, svc.as_deref())?;
         println!("wrote {} (0640)", path.display());
@@ -1911,7 +1922,7 @@ fn store_existing_token(
     Ok(token)
 }
 
-fn setup_bitwarden(paths: &Paths, tokens: &TokenSource, set_token: bool) -> Result<()> {
+fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) -> Result<()> {
     println!("\nBitwarden Secrets Manager");
     println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
     println!("  not your personal vault master password or login API key.\n");
@@ -1927,12 +1938,12 @@ fn setup_bitwarden(paths: &Paths, tokens: &TokenSource, set_token: bool) -> Resu
     let token = match auth::capture_token(
         paths,
         TokenKind::Bws,
-        tokens.auth_mode(),
+        token_source.auth_mode(),
         set_token,
         &verify,
     )? {
         auth::Capture::Token(t) => t,
-        auth::Capture::UseExisting => store_existing_token(paths, TokenKind::Bws, tokens)?,
+        auth::Capture::UseExisting => store_existing_token(paths, TokenKind::Bws, token_source)?,
         auth::Capture::Skipped => {
             // Everything left here needs the token to talk to the vault.
             println!("Skipping vault work. When you have a token:");
@@ -1979,14 +1990,22 @@ fn setup_bitwarden(paths: &Paths, tokens: &TokenSource, set_token: bool) -> Resu
     Ok(())
 }
 
-fn setup_onepassword(paths: &Paths, tokens: &TokenSource, set_token: bool) -> Result<()> {
+fn setup_onepassword(paths: &Paths, token_source: TokenSource, set_token: bool) -> Result<()> {
     println!("\n1Password service account");
     println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
     // Token capture (issue #77); `op whoami` verifies before anything is written.
     let verify = |t: &ManagerToken| backend::op_whoami(t);
-    match auth::capture_token(paths, TokenKind::Op, tokens.auth_mode(), set_token, &verify)? {
+    match auth::capture_token(
+        paths,
+        TokenKind::Op,
+        token_source.auth_mode(),
+        set_token,
+        &verify,
+    )? {
         auth::Capture::Token(token) => drop(token),
-        auth::Capture::UseExisting => drop(store_existing_token(paths, TokenKind::Op, tokens)?),
+        auth::Capture::UseExisting => {
+            drop(store_existing_token(paths, TokenKind::Op, token_source)?)
+        }
         // A declined paste skips the token, not the rest of setup: the guidance
         // below is what tells the operator how to wire a harness (install.sh
         // parity — its skip is a skip of the token write only).
@@ -1997,14 +2016,14 @@ fn setup_onepassword(paths: &Paths, tokens: &TokenSource, set_token: bool) -> Re
     Ok(())
 }
 
-pub fn cmd_setup(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result<()> {
+pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     println!("vaulted-agent setup");
     println!("config: {}", paths.config_dir.display());
 
     // Ask how manager tokens are obtained (file on disk vs paste each launch)
     // before any backend work that may write op.env / bws.env.
-    let tokens = ensure_auth_mode_for_setup(paths, *tokens)?;
-    println!("auth_mode: {}", tokens.auth_mode().as_str());
+    let token_source = ensure_auth_mode_for_setup(paths, token_source)?;
+    println!("auth_mode: {}", token_source.auth_mode().as_str());
 
     // Who agents run as, and where they start — both shape every later launch,
     // and interact (service_user + workdir=caller on a 0700 home). Ask before
@@ -2024,8 +2043,8 @@ pub fn cmd_setup(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result
 
     let choose = |name: &str| -> Result<()> {
         match name {
-            "bitwarden" | "bws" => setup_bitwarden(paths, &tokens, set_token),
-            "onepassword" | "op" | "1password" => setup_onepassword(paths, &tokens, set_token),
+            "bitwarden" | "bws" => setup_bitwarden(paths, token_source, set_token),
+            "onepassword" | "op" | "1password" => setup_onepassword(paths, token_source, set_token),
             "pass" | "sops" if set_token => Err(Error::Message(format!(
                 "setup --set-token: {name} has no manager token file \
                  (pass uses GPG, sops uses an age key)"
@@ -2055,10 +2074,10 @@ pub fn cmd_setup(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result
 
     // Auto: prefer whichever token is already available (env or file).
     if env::var_os("BWS_ACCESS_TOKEN").is_some() || paths.bws_env_file.is_file() {
-        return setup_bitwarden(paths, &tokens, set_token);
+        return setup_bitwarden(paths, token_source, set_token);
     }
     if env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || paths.op_env_file.is_file() {
-        return setup_onepassword(paths, &tokens, set_token);
+        return setup_onepassword(paths, token_source, set_token);
     }
 
     // Nothing on disk or in env to infer from: a piped token has no backend to
@@ -2294,7 +2313,7 @@ fn run_refusal(service_user: Option<&str>, allow_run: bool) -> Option<String> {
     }
 }
 
-pub fn cmd_run(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result<()> {
+pub fn cmd_run(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     if let Some(msg) = run_refusal(load_service_user(paths).as_deref(), load_allow_run(paths)) {
         return Err(Error::Message(msg));
     }
@@ -2362,7 +2381,14 @@ pub fn cmd_run(paths: &Paths, args: &[String], tokens: &TokenSource) -> Result<(
     }
     let man = manifest.ok_or_else(|| Error::Message("run: need -m/--manifest".into()))?;
     let man_path = paths.resolve_manifest(&man);
-    launch::launch_run(paths, &man_path, backend, workdir.as_deref(), &cmd, *tokens)
+    launch::launch_run(
+        paths,
+        &man_path,
+        backend,
+        workdir.as_deref(),
+        &cmd,
+        token_source,
+    )
 }
 
 pub fn cmd_pick(paths: &Paths) -> Result<String> {
@@ -2428,7 +2454,7 @@ pub fn cmd_launch_harness(
     paths: &Paths,
     name: &str,
     extra_args: &[String],
-    tokens: &TokenSource,
+    token_source: TokenSource,
     manifest_override: Option<&str>,
 ) -> Result<()> {
     let mut harness = Harness::load(paths, name)?;
@@ -2458,7 +2484,7 @@ pub fn cmd_launch_harness(
         paths,
         &harness,
         &LaunchOpts {
-            tokens: *tokens,
+            token_source,
             extra_args: extra_args.to_vec(),
             handoff: None,
         },

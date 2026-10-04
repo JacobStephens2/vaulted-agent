@@ -73,13 +73,15 @@ fn main() {
             // near the cause, and the prompt silently dropped. Prompt auth stays
             // reachable in this mode through VAULTED_AGENT_PROMPT_AUTH=1, which
             // the Token source reads.
-            let tokens = TokenSource::from_env(&paths, false);
+            let token_source = TokenSource::from_env(&paths, false);
             let mut extra: Vec<String> = argv.iter().skip(1).cloned().collect();
             // A leading `--` stays an explicit "the rest is the agent's".
             if extra.first().is_some_and(|s| s == "--") {
                 extra.remove(0);
             }
-            if let Err(e) = commands::cmd_launch_harness(&paths, harness, &extra, &tokens, None) {
+            if let Err(e) =
+                commands::cmd_launch_harness(&paths, harness, &extra, token_source, None)
+            {
                 eprintln!("vaulted-agent: {e}");
                 process::exit(1);
             }
@@ -218,8 +220,8 @@ fn main() {
         }
         // `-p` in front of a management command reaches it the same way it
         // reaches a harness launch: through the one Token source.
-        let tokens = TokenSource::from_env(&paths, prompt_flag);
-        let code = dispatch_mgmt(&paths, &name, &rest, &tokens, manifest_flag.as_deref());
+        let token_source = TokenSource::from_env(&paths, prompt_flag);
+        let code = dispatch_mgmt(&paths, &name, &rest, token_source, manifest_flag.as_deref());
         process::exit(code);
     }
 
@@ -231,9 +233,9 @@ fn main() {
         process::exit(1);
     }
 
-    let tokens = TokenSource::from_env(&paths, prompt_flag);
+    let token_source = TokenSource::from_env(&paths, prompt_flag);
     if let Err(e) =
-        commands::cmd_launch_harness(&paths, &name, &rest, &tokens, manifest_flag.as_deref())
+        commands::cmd_launch_harness(&paths, &name, &rest, token_source, manifest_flag.as_deref())
     {
         eprintln!("vaulted-agent: {e}");
         if matches!(e, Error::UnknownHarness { .. }) {
@@ -247,7 +249,7 @@ fn dispatch_mgmt(
     paths: &Paths,
     name: &str,
     rest: &[String],
-    tokens: &TokenSource,
+    token_source: TokenSource,
     manifest_override: Option<&str>,
 ) -> i32 {
     let result = match name {
@@ -261,16 +263,16 @@ fn dispatch_mgmt(
         }
         "auth-mode" => commands::cmd_auth_mode(paths, rest),
         "doctor" => commands::cmd_doctor(paths),
-        "secrets" => commands::cmd_secrets(paths, rest, tokens),
-        "setup" => commands::cmd_setup(paths, rest, tokens),
-        "refresh" => commands::cmd_refresh(paths, rest, tokens),
+        "secrets" => commands::cmd_secrets(paths, rest, token_source),
+        "setup" => commands::cmd_setup(paths, rest, token_source),
+        "refresh" => commands::cmd_refresh(paths, rest, token_source),
         "uninstall" => commands::cmd_uninstall(rest),
         "update" => vaulted_agent::update::cmd_update(rest),
-        "run" => commands::cmd_run(paths, rest, tokens),
+        "run" => commands::cmd_run(paths, rest, token_source),
         "edit-manifest" => commands::cmd_edit_manifest(paths, rest),
         "pick" => match commands::cmd_pick(paths) {
             Ok(chosen) => {
-                commands::cmd_launch_harness(paths, &chosen, rest, tokens, manifest_override)
+                commands::cmd_launch_harness(paths, &chosen, rest, token_source, manifest_override)
             }
             Err(e) => Err(e),
         },
