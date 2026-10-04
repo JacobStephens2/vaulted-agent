@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::validate::validate_var_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
@@ -553,38 +552,6 @@ pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Strip a single layer of surrounding single or double quotes (bash `source` parity).
-fn unquote_dotenv_value(v: &str) -> String {
-    let v = v.trim();
-    let b = v.as_bytes();
-    if b.len() >= 2 {
-        let (first, last) = (b[0], b[b.len() - 1]);
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return v[1..v.len() - 1].to_string();
-        }
-    }
-    v.to_string()
-}
-
-fn double_quoted_closed(s: &str) -> bool {
-    if !s.starts_with('"') || s.len() < 2 {
-        return false;
-    }
-    // Ends with an unescaped "
-    let b = s.as_bytes();
-    if b[b.len() - 1] != b'"' {
-        return false;
-    }
-    // Count trailing backslashes before the final quote
-    let mut i = b.len() - 1;
-    let mut bs = 0usize;
-    while i > 0 && b[i - 1] == b'\\' {
-        bs += 1;
-        i -= 1;
-    }
-    bs.is_multiple_of(2)
-}
-
 /// Ordered KEY=value pairs (shared policy for validate + resolve).
 /// Fails closed on invalid variable names (story #37). Strips surrounding quotes
 /// and supports double-quoted multi-line values (bash `source` parity for common cases).
@@ -596,74 +563,19 @@ fn double_quoted_closed(s: &str) -> bool {
 /// that value. This is the rule the conductor shell wrappers already used.
 /// Without it a single multi-line secret anywhere in a manifest aborts the whole
 /// launch, including for harnesses that never read that variable.
+///
+/// The line rules live in [`crate::manifest_entry`]; this is the launch's
+/// projection of them, failing closed on the first fault.
 pub fn parse_dotenv_pairs(text: &str) -> Result<Vec<(String, String)>> {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    let mut lines = text.lines().peekable();
-    let mut lineno = 0usize;
-    // Whether the value pushed most recently may still take continuation lines.
-    // A blank line or a comment closes it, so a stray line further down the file
-    // cannot silently graft itself onto an earlier secret.
-    let mut open = false;
-    while let Some(raw) = lines.next() {
-        lineno += 1;
-        let line = raw.trim_end_matches('\r');
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            open = false;
-            continue;
-        }
-        // A line only starts a new pair when the text before its first '=' is a
-        // legal variable name. That keeps a continuation line that happens to
-        // contain '=' -- a JSON field, base64 padding -- attached to the value it
-        // belongs to instead of being misread as an assignment.
-        let assignment = trimmed
-            .split_once('=')
-            .filter(|(k, _)| validate_var_name(k.trim()));
-        let Some((k, v)) = assignment else {
-            if open {
-                // `open` is only set just after a push, so there is always a
-                // previous pair here; fall through to the error rather than
-                // unwrap if that ever stops holding.
-                if let Some(last) = pairs.last_mut() {
-                    last.1.push('\n');
-                    last.1.push_str(line);
-                    continue;
-                }
-            }
-            // Nothing to continue, so report how this line actually fails.
-            return Err(match trimmed.split_once('=') {
-                Some((k, _)) => {
-                    Error::Message(format!("line {lineno}: bad variable name {}", k.trim()))
-                }
-                None => Error::Message(format!("line {lineno}: expected KEY=value")),
-            });
-        };
-        let key = k.trim();
-        let mut val = v.trim().to_string();
-        // Multi-line double-quoted value
-        if val.starts_with('"') && !double_quoted_closed(&val) {
-            loop {
-                let Some(cont) = lines.next() else {
-                    return Err(Error::Message(format!(
-                        "line {lineno}: unclosed double-quoted value for {key}"
-                    )));
-                };
-                lineno += 1;
-                val.push('\n');
-                val.push_str(cont.trim_end_matches('\r'));
-                if double_quoted_closed(&val) {
-                    break;
-                }
-            }
-            // The closing quote ended the value; later lines are not part of it.
-            pairs.push((key.to_string(), unquote_dotenv_value(&val)));
-            open = false;
-            continue;
-        }
-        pairs.push((key.to_string(), unquote_dotenv_value(&val)));
-        open = true;
+    let parsed = crate::manifest_entry::parse(text);
+    if let Some(fault) = parsed.faults.into_iter().next() {
+        return Err(Error::Message(fault.message));
     }
-    Ok(pairs)
+    Ok(parsed
+        .entries
+        .into_iter()
+        .map(|e| (e.var, e.value))
+        .collect())
 }
 
 /// Parse KEY=value dotenv-style lines into a map (last key wins).

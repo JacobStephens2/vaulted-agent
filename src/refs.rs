@@ -107,16 +107,12 @@ fn var_from_line(line: &str) -> Option<&str> {
 }
 
 /// True if the refs file already maps this secret by reference (id / name:KEY / project:…/KEY).
+///
+/// Reads values as the launch does, so `A="name:KEY"` counts as mapping `KEY`.
 fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let Some((_, v)) = line.split_once('=') else {
-            continue;
-        };
-        let (r, _) = split_annotation(v.trim());
+    for e in crate::manifest_entry::parse(text).entries {
+        let v = e.value.as_str();
+        let (r, _) = split_annotation(v);
         // A recorded UUID is the secret's identity, so a line still mapping it
         // under its old key counts as mapped. Without this the rename would
         // come back as "1 dangling, 1 new" — the outcome ADR-0004 exists to
@@ -144,16 +140,10 @@ fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
 
 /// True if a VAR= line already exists (protects hand-edited custom mappings; story #14).
 fn text_has_var(text: &str, var: &str) -> bool {
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        if var_from_line(line) == Some(var) {
-            return true;
-        }
-    }
-    false
+    crate::manifest_entry::parse(text)
+        .entries
+        .iter()
+        .any(|e| e.var == var)
 }
 
 pub fn write_refs_replace(
@@ -411,8 +401,10 @@ pub enum RefFate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScannedRef {
     pub var: String,
+    /// The value with surrounding quotes removed, as the launch reads it.
     pub reference: String,
-    /// The line exactly as it stands in the file, newline excluded. Prune
+    /// The entry's first physical line exactly as it stands in the file,
+    /// newline excluded. Prune
     /// matches on this, and it is what gets printed when a line is removed —
     /// scrollback is the recovery path.
     pub line: String,
@@ -479,10 +471,11 @@ fn renamed_key(value: &str, secrets: &[(String, String, String)]) -> Option<Stri
 /// Classify every mapping line in a Bitwarden refs file against the listing
 /// `refresh` already holds. No vault calls: the listing is the whole world.
 ///
-/// Line-based on purpose — prune has to put the file back byte for byte, and
-/// only a physical line can be dropped from it. A value carried across lines is
-/// never a Bitwarden reference, so it is marked `Unjudged` rather than risking
-/// a partial removal.
+/// Values are read as the launch reads them, so a quoted `A="name:KEY"` is
+/// judged by `name:KEY`. Prune still works on physical lines — it has to put the
+/// file back byte for byte, and only a physical line can be dropped from it. A
+/// value carried across lines is never a Bitwarden reference, so it is marked
+/// `Unjudged` rather than risking a partial removal.
 pub fn scan_bitwarden_refs(text: &str, secrets: &[(String, String, String)]) -> Vec<ScannedRef> {
     scan_refs(text, |value| {
         match bitwarden_ref_matches(reference_of(value), secrets) {
@@ -496,48 +489,37 @@ pub fn scan_bitwarden_refs(text: &str, secrets: &[(String, String, String)]) -> 
     })
 }
 
-/// Walk a refs file's mapping lines, letting the backend say what each value
-/// means. The walk is the part both backends must agree on: prune puts the file
-/// back byte for byte, so what counts as one mapping line cannot differ by
-/// backend even where "does not resolve" does.
+/// Walk a refs file's entries, letting the backend say what each value means.
+/// The walk is the part both backends must agree on: prune puts the file back
+/// byte for byte, so what counts as one mapping line cannot differ by backend
+/// even where "does not resolve" does. Entries come from the parser the launch
+/// uses, so a line inside another entry's multi-line value is never mistaken
+/// for a mapping of its own.
 fn scan_refs(text: &str, classify: impl Fn(&str) -> (RefFate, Option<String>)) -> Vec<ScannedRef> {
-    let mut out: Vec<ScannedRef> = Vec::new();
-    // Whether the previous mapping's value may still take continuation lines,
-    // matching `parse_dotenv_pairs`: a blank line or a comment closes it.
-    let mut open = false;
-    for raw in text.lines() {
-        let line = raw.trim_end_matches('\r');
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            open = false;
-            continue;
-        }
-        let assignment = trimmed
-            .split_once('=')
-            .filter(|(k, _)| crate::validate::validate_var_name(k.trim()));
-        let Some((var, value)) = assignment else {
-            // A continuation of the value above, or a line nothing can parse.
-            // Either way the mapping it belongs to is not a single line, so it
-            // must not be pruned.
-            if let Some(last) = out.last_mut() {
-                if open {
-                    last.fate = RefFate::Unjudged;
-                }
+    let lines: Vec<&str> = text.lines().collect();
+    crate::manifest_entry::parse(text)
+        .entries
+        .into_iter()
+        .map(|e| {
+            // Any entry spanning several physical lines must not be pruned:
+            // removing its first line would leave the rest behind.
+            let (fate, renamed_to) = if e.is_multiline() {
+                (RefFate::Unjudged, None)
+            } else {
+                classify(&e.value)
+            };
+            let line = lines
+                .get(e.first_line - 1)
+                .map_or("", |l| l.trim_end_matches('\r'));
+            ScannedRef {
+                var: e.var,
+                reference: e.value,
+                line: line.to_string(),
+                fate,
+                renamed_to,
             }
-            continue;
-        };
-        let value = value.trim();
-        let (fate, renamed_to) = classify(value);
-        out.push(ScannedRef {
-            var: var.trim().to_string(),
-            reference: value.to_string(),
-            line: line.to_string(),
-            fate,
-            renamed_to,
-        });
-        open = true;
-    }
-    out
+        })
+        .collect()
 }
 
 /// The dangling lines from a scan, in file order.
@@ -694,13 +676,27 @@ pub fn edit_refs_lines(path: &Path, edits: &[(String, RefEdit)]) -> Result<Vec<(
     })?;
     let planned: std::collections::HashMap<&str, &RefEdit> =
         edits.iter().map(|(l, e)| (l.as_str(), e)).collect();
+    // Only a line that is a whole entry by itself may be edited. A line inside
+    // another entry's multi-line value can read exactly like a mapping, and
+    // dropping it would cut that value apart.
+    let editable: std::collections::HashSet<usize> = crate::manifest_entry::parse(&text)
+        .entries
+        .iter()
+        .filter(|e| !e.is_multiline())
+        .map(|e| e.first_line)
+        .collect();
     let mut body = String::with_capacity(text.len());
     // What actually changed, in file order — a line the operator wrote twice is
     // edited twice, and the report has to say so.
     let mut applied: Vec<(String, RefEdit)> = Vec::new();
-    for chunk in text.split_inclusive('\n') {
+    for (n, chunk) in text.split_inclusive('\n').enumerate() {
         let line = chunk.strip_suffix('\n').unwrap_or(chunk);
-        match planned.get(line.trim_end_matches('\r')) {
+        let edit = if editable.contains(&(n + 1)) {
+            planned.get(line.trim_end_matches('\r'))
+        } else {
+            None
+        };
+        match edit {
             Some(RefEdit::Remove) => {
                 applied.push((line.to_string(), RefEdit::Remove));
                 continue;
@@ -915,18 +911,10 @@ fn canonical_reference(reference: &str) -> String {
 /// through either the section-qualified or the unqualified form.
 fn text_has_reference(text: &str, reference: &str) -> bool {
     let want = canonical_reference(reference);
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((_, v)) = line.split_once('=') {
-            if canonical_reference(v.trim()) == want {
-                return true;
-            }
-        }
-    }
-    false
+    crate::manifest_entry::parse(text)
+        .entries
+        .iter()
+        .any(|e| canonical_reference(&e.value) == want)
 }
 
 /// Everything `refresh` learned about the 1Password side of this run, and the
@@ -2297,5 +2285,94 @@ mod tests {
         let edits = plan_ref_edits(&scan);
         assert_eq!(edits.len(), 1);
         assert!(edits[0].0.starts_with("GONE="));
+    }
+
+    // ---- quoted and multi-line entries (issue #112) ----
+
+    #[test]
+    fn a_quoted_bitwarden_ref_is_judged_by_its_unquoted_value() {
+        // Validate and resolve read `A="name:KEY"` as `name:KEY`; refresh must too.
+        let scan = scan_bitwarden_refs("A=\"name:ASSEMBLY_AI_API_KEY\"\n", &listing());
+        assert_eq!(scan.len(), 1);
+        assert_eq!(scan[0].fate, RefFate::Resolvable);
+        assert_eq!(scan[0].reference, "name:ASSEMBLY_AI_API_KEY");
+
+        let scan = scan_bitwarden_refs("A=\"name:GONE\"\n", &listing());
+        assert_eq!(scan[0].fate, RefFate::Dangling);
+        assert_eq!(scan[0].line, "A=\"name:GONE\"");
+    }
+
+    #[test]
+    fn a_quoted_dangling_ref_is_pruned_as_one_physical_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bws.refs");
+        let before = "KEEP=name:OPENAI_API_KEY\nA=\"name:GONE\"\nB=2\n";
+        fs::write(&p, before).unwrap();
+        let edits = plan_ref_edits(&scan_bitwarden_refs(before, &listing()));
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        edit_refs_lines(&p, &edits).unwrap();
+        assert_eq!(
+            fs::read_to_string(&p).unwrap(),
+            "KEEP=name:OPENAI_API_KEY\nB=2\n"
+        );
+    }
+
+    #[test]
+    fn a_double_quoted_multiline_value_hides_mapping_lines_inside_it() {
+        // The launch reads all three lines as A's value. A `B=` mapping must not
+        // appear, or prune could cut a line out of the middle of A.
+        let text = "A=\"x\nB=op://V/gone/f\n\"\n";
+        let scan = scan_op_refs(text, &op_world());
+        let vars: Vec<&str> = scan.iter().map(|r| r.var.as_str()).collect();
+        assert_eq!(vars, ["A"]);
+        assert_eq!(scan[0].fate, RefFate::Unjudged);
+    }
+
+    #[test]
+    fn edits_never_touch_a_line_inside_a_multiline_value() {
+        // Even an edit naming that exact text: the line is part of A.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("op.refs");
+        let before = "A=\"x\nB=op://V/gone/f\n\"\n";
+        fs::write(&p, before).unwrap();
+        let applied = edit_refs_lines(&p, &[("B=op://V/gone/f".into(), RefEdit::Remove)]).unwrap();
+        assert!(applied.is_empty(), "{applied:?}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn bitwarden_merge_does_not_duplicate_a_quoted_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bws.refs");
+        let before = "MINE=\"name:ASSEMBLY_AI_API_KEY\"\n";
+        fs::write(&p, before).unwrap();
+        let secrets = vec![(
+            "ea6db86f-0000-0000-0000-000000000001".to_string(),
+            "ASSEMBLY_AI_API_KEY".to_string(),
+            "tools".to_string(),
+        )];
+        assert_eq!(write_refs_merge(&p, &secrets, None, "t").unwrap().added, 0);
+        assert_eq!(fs::read_to_string(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn op_merge_does_not_duplicate_a_quoted_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("op.refs");
+        let before = "MINE='op://Orchestrator/db.example.com/password'\n";
+        fs::write(&p, before).unwrap();
+        let entries = vec![(
+            "DB_EXAMPLE_COM_PASSWORD".to_string(),
+            "op://Orchestrator/db.example.com/password".to_string(),
+        )];
+        assert_eq!(write_op_refs_merge(&p, &entries, &[], "t").unwrap(), 0);
+        assert_eq!(fs::read_to_string(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn a_quoted_variable_is_already_claimed() {
+        assert!(text_has_var("A=\"name:X\"\n", "A"));
+        // A line inside a multi-line value is not a variable of its own.
+        assert!(!text_has_var("A=\"x\nB=1\n\"\n", "B"));
     }
 }
