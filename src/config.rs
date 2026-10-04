@@ -553,19 +553,10 @@ pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
 }
 
 /// Ordered KEY=value pairs (shared policy for validate + resolve).
-/// Fails closed on invalid variable names (story #37). Strips surrounding quotes
-/// and supports double-quoted multi-line values (bash `source` parity for common cases).
 ///
-/// Bare, unquoted multi-line values are carried too. A PEM or a pretty-printed
-/// JSON service-account key comes back from `op inject` spread over many lines
-/// with no quoting to hold it together, so a line that is not itself an
-/// assignment continues the value above it, and a blank line or a comment ends
-/// that value. This is the rule the conductor shell wrappers already used.
-/// Without it a single multi-line secret anywhere in a manifest aborts the whole
-/// launch, including for harnesses that never read that variable.
-///
-/// The line rules live in [`crate::manifest_entry`]; this is the launch's
-/// projection of them, failing closed on the first fault.
+/// The launch's projection of [`crate::manifest_entry`], where the line rules
+/// (quotes, multi-line values, variable names) live. Fails closed on the first
+/// fault (story #37).
 pub fn parse_dotenv_pairs(text: &str) -> Result<Vec<(String, String)>> {
     let parsed = crate::manifest_entry::parse(text);
     if let Some(fault) = parsed.faults.into_iter().next() {

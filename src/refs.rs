@@ -404,9 +404,8 @@ pub struct ScannedRef {
     /// The value with surrounding quotes removed, as the launch reads it.
     pub reference: String,
     /// The entry's first physical line exactly as it stands in the file,
-    /// newline excluded. Prune
-    /// matches on this, and it is what gets printed when a line is removed —
-    /// scrollback is the recovery path.
+    /// newline excluded. Prune matches on this, and it is what gets printed
+    /// when a line is removed — scrollback is the recovery path.
     pub line: String,
     pub fate: RefFate,
     /// For `Renamed`: the key the recorded secret carries now.
