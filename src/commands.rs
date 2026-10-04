@@ -1121,6 +1121,10 @@ fn refresh_backend(paths: &Paths) -> Backend {
     }
 }
 
+/// The Bitwarden Refs file `refresh` and `setup bitwarden` write when no
+/// Harness names one.
+const BITWARDEN_FALLBACK_REFS: &str = "openai.env.refs";
+
 /// The part of `refresh` that differs per Backend: the listing, the selection
 /// menu, turning the selection into mappings, and the facts the lines already
 /// in the file are judged against. Everything else is `refresh_refs`, once.
@@ -1167,7 +1171,7 @@ impl RefreshStep {
     /// The Refs file a bare `refresh` writes when no Harness names one.
     fn fallback_refs_file(&self) -> &'static str {
         match self {
-            RefreshStep::Bitwarden => "openai.env.refs",
+            RefreshStep::Bitwarden => BITWARDEN_FALLBACK_REFS,
             RefreshStep::OnePassword { .. } => "onepassword.refs",
         }
     }
@@ -1177,6 +1181,13 @@ impl RefreshStep {
             RefreshStep::Bitwarden => RefsStyle::Bitwarden,
             RefreshStep::OnePassword { exclusions } => RefsStyle::OnePassword { exclusions },
         }
+    }
+
+    /// Whether a renamed ref can be repaired in place. An `op://` line records
+    /// no source id, so a renamed item is indistinguishable from a deleted one
+    /// (ADR-0005).
+    fn repairs(&self) -> bool {
+        matches!(self, RefreshStep::Bitwarden)
     }
 
     fn exclusions(&self) -> Option<&[String]> {
@@ -1269,14 +1280,14 @@ impl RefreshStep {
 /// What a Backend's step hands back to the flow.
 struct Gathered {
     mappings: Vec<Mapping>,
-    judge: Judge,
-    /// Set when nothing is left to write and that is a refusal, not a merge
-    /// with nothing new (1Password only).
-    nothing_to_write: Option<Error>,
+    fetched: Fetched,
+    /// Why there is nothing to write, when that is a refusal rather than a
+    /// merge with nothing new (1Password only).
+    refusal: Option<Error>,
 }
 
 /// What the lines already in the file are judged against.
-enum Judge {
+enum Fetched {
     /// The `bws` listing.
     Bitwarden(Vec<(String, String, String)>),
     /// The item listing plus the fields of the items this run expanded, and
@@ -1284,19 +1295,12 @@ enum Judge {
     OnePassword(refs::OpWorld),
 }
 
-impl Judge {
+impl Fetched {
     fn scan(&self, text: &str) -> Vec<refs::ScannedRef> {
         match self {
-            Judge::Bitwarden(secrets) => refs::scan_bitwarden_refs(text, secrets),
-            Judge::OnePassword(world) => refs::scan_op_refs(text, world),
+            Fetched::Bitwarden(secrets) => refs::scan_bitwarden_refs(text, secrets),
+            Fetched::OnePassword(world) => refs::scan_op_refs(text, world),
         }
-    }
-
-    /// Whether a renamed ref can be repaired in place. An `op://` line records
-    /// no source id, so a renamed item is indistinguishable from a deleted one
-    /// (ADR-0005).
-    fn repairs(&self) -> bool {
-        matches!(self, Judge::Bitwarden(_))
     }
 }
 
@@ -1334,18 +1338,18 @@ fn refresh_refs(
             path: path.clone(),
             source: e,
         })?;
-        let scan = gathered.judge.scan(&text);
+        let scan = gathered.fetched.scan(&text);
         report_and_fix_refs(
             paths,
             &path,
             &scan,
             step.exclusions(),
-            gathered.judge.repairs(),
+            step.repairs(),
             mode == WriteMode::Replace,
             prune,
         )?;
     }
-    if let Some(refusal) = gathered.nothing_to_write {
+    if let Some(refusal) = gathered.refusal {
         return Err(refusal);
     }
 
@@ -1397,10 +1401,11 @@ fn gather_bitwarden(paths: &Paths, take_all: bool) -> Result<Gathered> {
 
     Ok(Gathered {
         mappings: Mapping::bitwarden_selection(&secrets, indices.as_deref()),
-        judge: Judge::Bitwarden(secrets),
-        nothing_to_write: None,
+        fetched: Fetched::Bitwarden(secrets),
+        refusal: None,
     })
 }
+
 /// Report what the scan found, and act on it when the operator has said to:
 /// dangling refs removed, renamed refs repaired.
 ///
@@ -1880,7 +1885,7 @@ fn gather_onepassword(
         );
     }
 
-    let nothing_to_write = entries.is_empty().then(|| {
+    let refusal = entries.is_empty().then(|| {
         Error::Message(if excluded.is_empty() {
             "Nothing selected has a referenceable field.".into()
         } else {
@@ -1899,8 +1904,8 @@ fn gather_onepassword(
             .iter()
             .map(|(var, reference)| Mapping::onepassword(var, reference))
             .collect(),
-        judge: Judge::OnePassword(world),
-        nothing_to_write,
+        fetched: Fetched::OnePassword(world),
+        refusal,
     })
 }
 
@@ -1992,11 +1997,7 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
         return Ok(());
     }
     println!("{} secret(s) visible.", secrets.len());
-    let man_path = default_refs_file(
-        paths,
-        Backend::Bitwarden,
-        RefreshStep::Bitwarden.fallback_refs_file(),
-    )?;
+    let man_path = default_refs_file(paths, Backend::Bitwarden, BITWARDEN_FALLBACK_REFS)?;
     fs::create_dir_all(&paths.manifest_dir).ok();
     let mode = WriteMode::settle(None, &man_path);
     let written = refs::write_refs(
