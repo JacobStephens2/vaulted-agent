@@ -1,27 +1,33 @@
 //! Vault backends: resolve a manifest into env var → SecretValue.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 use crate::auth::{TokenKind, TokenSource};
 use crate::bitwarden::{BwListing, BwRef, Lookup};
 use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
-use crate::onepassword::OpListing;
+use crate::onepassword::{self, OpListing};
 use crate::secret::{ManagerToken, SecretValue};
 use crate::validate::{is_placeholder_secret_value, is_uuid, validate_manifest_file};
 
-fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+/// Run `program` to completion. Failing to start it is an error; a non-zero
+/// exit is the caller's to judge.
+fn run_output(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Output> {
     let mut cmd = Command::new(program);
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| Error::Message(format!("{program}: {e}")))?;
+    cmd.output()
+        .map_err(|e| Error::Message(format!("{program}: {e}")))
+}
+
+fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let out = run_output(program, args, env)?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(Error::Message(format!(
@@ -30,6 +36,69 @@ fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Str
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What a Backend reports when a Manifest will not resolve: the Manifest, the
+/// Backend's own message, and the Manifest entries it implicates.
+///
+/// Built where the Backend learns of the failure, so the launch and `secrets
+/// validate` render it without reading the Manifest again or searching its
+/// text. Its display text is the error the operator has always seen.
+#[derive(Debug)]
+pub struct ResolveFailure {
+    pub manifest: PathBuf,
+    pub cause: ResolveCause,
+}
+
+/// Why a Manifest did not resolve, one variant per Backend that reports it.
+/// The plainfile, pass and sops resolves keep their plain errors: nothing
+/// blames them.
+#[derive(Debug)]
+pub enum ResolveCause {
+    /// Bitwarden resolves one reference at a time, so it knows the variable
+    /// whose reference matched no listed secret: a **Dangling ref**.
+    NoMatch { var: String, reference: String },
+    /// `op inject` exited non-zero. It fails the whole file and names only an
+    /// item, so the entries are inferred from its message; there may be none
+    /// (an authentication error, say).
+    Inject {
+        message: String,
+        implicated: Vec<(String, String)>,
+    },
+}
+
+impl ResolveFailure {
+    /// One `VAR\n      <reference>` line per implicated entry.
+    ///
+    /// None for a no-match: its display text already names the variable, the
+    /// file and the remedy. The blame block is for failures whose message does
+    /// not name the variable.
+    pub fn blame_lines(&self) -> Vec<String> {
+        match &self.cause {
+            ResolveCause::NoMatch { .. } => Vec::new(),
+            ResolveCause::Inject { implicated, .. } => implicated
+                .iter()
+                .map(|(var, reference)| format!("{var}\n      {reference}"))
+                .collect(),
+        }
+    }
+}
+
+impl fmt::Display for ResolveFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let manifest = self.manifest.display();
+        match &self.cause {
+            ResolveCause::NoMatch { var, reference } => write!(
+                f,
+                "no secret matched {reference} ({var} in {manifest})\n  \
+                 The secret may have been renamed or removed. Remove the dangling \
+                 mapping with: vaulted-agent refresh --prune"
+            ),
+            ResolveCause::Inject { message, .. } => {
+                write!(f, "op inject -i {manifest} failed: {message}")
+            }
+        }
+    }
 }
 
 pub fn resolve_plainfile(manifest: &Path) -> Result<HashMap<String, SecretValue>> {
@@ -54,14 +123,17 @@ fn bws_list_json(token: &ManagerToken) -> Result<String> {
 }
 
 /// The secret id a launch injects for `r`, judged against the listing.
+/// `None` when the reference matched nothing; each caller says so in its own
+/// words.
 ///
-/// The one place a lookup becomes the launch's errors. `refresh` judges the
-/// same lookup, so a line it calls resolvable is exactly a line this accepts.
-pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<String> {
+/// The one place a lookup is judged for the launch; an absent reference
+/// becomes the launch's **Resolve failure** in `resolve_bitwarden`. `refresh`
+/// judges the same lookup, so a line it calls resolvable is exactly a line this
+/// accepts.
+pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<Option<String>> {
     match listing.lookup(r) {
-        Lookup::Found(s) => Ok(s.id.clone()),
-        // `name_the_manifest` recognises this wording; keep them in step.
-        Lookup::Absent => Err(Error::Message(format!("no secret matched {r}"))),
+        Lookup::Found(s) => Ok(Some(s.id.clone())),
+        Lookup::Absent => Ok(None),
         Lookup::Ambiguous(_) => Err(match BwRef::parse(r) {
             Some(BwRef::Name(key)) => Error::Message(format!(
                 "multiple secrets named {key}; use project:PROJECT/{key}"
@@ -96,7 +168,8 @@ impl<'a> BwsRefResolver<'a> {
         }
     }
 
-    fn resolve_id(&mut self, r: &str) -> Result<String> {
+    /// `None` when `r` matched no listed secret.
+    fn resolve_id(&mut self, r: &str) -> Result<Option<String>> {
         // Saves one `bws secret list` per manifest of UUID refs. The answer is
         // the same: `bws secret get` on an id the token cannot see fails just
         // as a listing miss would.
@@ -106,7 +179,7 @@ impl<'a> BwsRefResolver<'a> {
         // validate pass has already refused it.
         let bare = r.strip_prefix("uuid:").unwrap_or(r);
         if is_uuid(bare) {
-            return Ok(bare.to_string());
+            return Ok(Some(bare.to_string()));
         }
         let listing = match self.listing {
             Some(ref listing) => listing,
@@ -139,7 +212,9 @@ fn bws_get_value(token: &ManagerToken, id: &str) -> Result<String> {
 
 /// Resolve a bitwarden ref to secret id (for secrets get).
 pub fn bws_resolve_ref(token: &ManagerToken, r: &str) -> Result<String> {
-    BwsRefResolver::new(token).resolve_id(r)
+    BwsRefResolver::new(token)
+        .resolve_id(r)?
+        .ok_or_else(|| Error::Message(format!("no secret matched {r}")))
 }
 
 /// Fetch secret value by id (for secrets get).
@@ -155,46 +230,40 @@ pub fn resolve_bitwarden(
     let mut out = HashMap::new();
     let mut resolver = BwsRefResolver::new(token);
     for (var, r) in pairs {
-        let id = resolver
-            .resolve_id(&r)
-            .map_err(|e| name_the_manifest(manifest, &var, e))?;
+        let Some(id) = resolver.resolve_id(&r)? else {
+            return Err(Error::Resolve(ResolveFailure {
+                manifest: manifest.to_path_buf(),
+                cause: ResolveCause::NoMatch { var, reference: r },
+            }));
+        };
         let value = bws_get_value(token, &id)?;
         out.insert(var, SecretValue::new(value));
     }
     Ok(out)
 }
 
-/// Give a "no secret matched" its context: the resolver knows only the
-/// reference, and the operator needs the variable, the file, and the way out.
-///
-/// Wrapped here rather than in the resolver, which is deliberately ignorant of
-/// manifests — threading a path down into it would make every future backend
-/// carry an argument it never uses. Other resolver failures pass through
-/// untouched; only this one has a manifest-level fix (issue #80).
-fn name_the_manifest(manifest: &Path, var: &str, e: Error) -> Error {
-    let msg = e.to_string();
-    if !msg.starts_with("no secret matched") {
-        return e;
-    }
-    Error::Message(format!(
-        "{msg} ({var} in {})\n  \
-         The secret may have been renamed or removed. Remove the dangling \
-         mapping with: vaulted-agent refresh --prune",
-        manifest.display()
-    ))
-}
-
 pub fn resolve_onepassword(
     manifest: &Path,
     token: &ManagerToken,
 ) -> Result<HashMap<String, SecretValue>> {
-    let _ = validate_manifest_file(manifest, Backend::OnePassword)?;
-    let stdout = run_capture(
+    let entries = validate_manifest_file(manifest, Backend::OnePassword)?;
+    let out = run_output(
         "op",
         &["inject", "-i", &manifest.to_string_lossy()],
         &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())],
     )?;
-    let raw = parse_dotenv_keys(&stdout)?;
+    if !out.status.success() {
+        let message = String::from_utf8_lossy(&out.stderr).into_owned();
+        let implicated = onepassword::implicated_entries(&entries, &message);
+        return Err(Error::Resolve(ResolveFailure {
+            manifest: manifest.to_path_buf(),
+            cause: ResolveCause::Inject {
+                message,
+                implicated,
+            },
+        }));
+    }
+    let raw = parse_dotenv_keys(&String::from_utf8_lossy(&out.stdout))?;
     Ok(raw
         .into_iter()
         .map(|(k, v)| (k, SecretValue::new(v)))
@@ -343,7 +412,7 @@ mod tests {
         let listing = BwListing::from_json(j).unwrap();
         assert_eq!(
             id_from_listing(&listing, "name:openai-api-key").unwrap(),
-            "id1"
+            Some("id1".to_string())
         );
     }
 
@@ -355,7 +424,8 @@ mod tests {
         )
         .unwrap();
         let err = |r: &str| id_from_listing(&listing, r).unwrap_err().to_string();
-        assert_eq!(err("name:GONE"), "no secret matched name:GONE");
+        // Absent is not an error here: the launch and `secrets get` word it.
+        assert_eq!(id_from_listing(&listing, "name:GONE").unwrap(), None);
         assert_eq!(
             err("name:DUP"),
             "multiple secrets named DUP; use project:PROJECT/DUP"
@@ -372,6 +442,51 @@ mod tests {
         assert_eq!(err("project:/DUP"), "no secret matched project:/DUP");
         assert_eq!(err("name:"), "no secret matched name:");
         assert_eq!(err("junk"), "bad bitwarden ref junk");
+    }
+
+    fn failure(cause: ResolveCause) -> ResolveFailure {
+        ResolveFailure {
+            manifest: PathBuf::from("/etc/va/manifests/m.env"),
+            cause,
+        }
+    }
+
+    #[test]
+    fn a_no_match_names_the_variable_the_file_and_the_remedy() {
+        let f = failure(ResolveCause::NoMatch {
+            var: "OPENAI_API_KEY".into(),
+            reference: "name:gone".into(),
+        });
+        assert_eq!(
+            f.to_string(),
+            "no secret matched name:gone (OPENAI_API_KEY in /etc/va/manifests/m.env)\n  \
+             The secret may have been renamed or removed. Remove the dangling \
+             mapping with: vaulted-agent refresh --prune"
+        );
+        // The display text already names the variable: no blame block.
+        assert!(f.blame_lines().is_empty());
+    }
+
+    #[test]
+    fn an_inject_failure_shows_op_and_blames_each_implicated_entry() {
+        let f = failure(ResolveCause::Inject {
+            message: "could not find item gone in vault V\n".into(),
+            implicated: vec![
+                ("A".into(), "op://V/gone/f".into()),
+                ("B".into(), "op://V/gone/g".into()),
+            ],
+        });
+        assert_eq!(
+            f.to_string(),
+            "op inject -i /etc/va/manifests/m.env failed: could not find item gone in vault V\n"
+        );
+        assert_eq!(
+            f.blame_lines(),
+            vec![
+                "A\n      op://V/gone/f".to_string(),
+                "B\n      op://V/gone/g".to_string(),
+            ]
+        );
     }
 
     #[test]

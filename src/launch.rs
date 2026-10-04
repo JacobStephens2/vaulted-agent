@@ -87,7 +87,10 @@ pub fn build_launch_plan(
         match backend::resolve(backend_name, &manifest, paths, opts.token_source) {
             Ok(s) => s,
             Err(e) => {
-                let blamed = crate::validate::blame_manifest_lines(&manifest, &format!("{e}"));
+                let blamed = match &e {
+                    Error::Resolve(failure) => failure.blame_lines(),
+                    _ => Vec::new(),
+                };
                 if !blamed.is_empty() {
                     eprintln!(
                         "vaulted-agent: could not resolve {} reference(s) in {}:",

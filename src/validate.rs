@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::bitwarden::BwRef;
 use crate::config::Backend;
 use crate::error::{Error, Result};
-use crate::onepassword::{self, OpRef};
+use crate::onepassword;
 
 pub fn is_uuid(s: &str) -> bool {
     let b = s.as_bytes();
@@ -194,53 +194,6 @@ pub fn comment_lines_with_op_refs(text: &str) -> Vec<usize> {
         }
     }
     lines
-}
-
-/// Name the variables whose reference mentions something in a resolver error.
-///
-/// `op inject` fails the whole file at the first reference it cannot read and
-/// reports the item, not the variable. The operator needs the variable: that is
-/// what they will grep the manifest for. Matching the item name back to the
-/// lines that use it turns "could not find item X" into the two or three
-/// entries actually at fault, without a round trip per reference.
-pub fn blame_manifest_lines(manifest: &Path, error: &str) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(manifest) else {
-        return Vec::new();
-    };
-    let mut blamed = Vec::new();
-    // Values as the launch read them: quotes gone, multi-line values whole.
-    for entry in crate::manifest_entry::parse(&text).entries {
-        let (var, value) = (entry.var.as_str(), entry.value.as_str());
-        // The item component is what op names when it cannot resolve one.
-        let Some(OpRef { item, .. }) = OpRef::parse(value) else {
-            continue;
-        };
-        // Match "item <title>" as op phrases it, not a bare substring of the
-        // title: a short name must not hitch a ride on a longer title's error.
-        if error_names_op_item(error, item) {
-            blamed.push(format!("{var}\n      {value}"));
-        }
-    }
-    blamed
-}
-
-/// True when `error` names this 1Password item the way `op` does.
-fn error_names_op_item(error: &str, item: &str) -> bool {
-    let needle = format!("item {item}");
-    let bytes = error.as_bytes();
-    let mut start = 0;
-    while let Some(rel) = error[start..].find(&needle) {
-        let after = start + rel + needle.len();
-        let boundary = match bytes.get(after) {
-            None => true,
-            Some(b) => !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_',
-        };
-        if boundary {
-            return true;
-        }
-        start += rel + 1;
-    }
-    false
 }
 
 /// Every problem in a manifest, each with its line number.
@@ -512,18 +465,5 @@ GOOD=op://Vault/item/field\n\
                 "line 7: A is set more than once".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn blame_reads_quoted_and_multiline_entries_as_the_launch_does() {
-        let dir = tempfile::tempdir().unwrap();
-        let m = dir.path().join("m.env");
-        std::fs::write(
-            &m,
-            "Q=\"op://V/gone/f\"\nPEM=\"x\nHIDDEN=op://V/gone/g\n\"\n",
-        )
-        .unwrap();
-        let blamed = blame_manifest_lines(&m, "could not find item gone in vault V");
-        assert_eq!(blamed, vec!["Q\n      op://V/gone/f".to_string()]);
     }
 }

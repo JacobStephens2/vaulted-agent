@@ -692,7 +692,10 @@ mod tests {
         ] {
             let scan = scan_bitwarden_refs(&format!("VAR={reference}\n"), &listing);
             let refresh_ok = scan[0].fate == RefFate::Resolvable;
-            let launch_ok = crate::backend::id_from_listing(&listing, reference).is_ok();
+            let launch_ok = matches!(
+                crate::backend::id_from_listing(&listing, reference),
+                Ok(Some(_))
+            );
             assert_eq!(refresh_ok, launch_ok, "{reference}: {:?}", scan[0].fate);
         }
     }
