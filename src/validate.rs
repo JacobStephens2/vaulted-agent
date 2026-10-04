@@ -217,21 +217,9 @@ pub fn blame_manifest_lines(manifest: &Path, error: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut blamed = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let Some((var, value)) = line.split_once('=') else {
-            continue;
-        };
-        let (var, value) = (var.trim(), value.trim());
-        // Quoted values are still references once the outer quotes are gone.
-        let value = value
-            .strip_prefix('"')
-            .and_then(|s| s.strip_suffix('"'))
-            .or_else(|| value.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
-            .unwrap_or(value);
+    // Values as the launch read them: quotes gone, multi-line values whole.
+    for entry in crate::manifest_entry::parse(&text).entries {
+        let (var, value) = (entry.var.as_str(), entry.value.as_str());
         if !value.starts_with("op://") {
             continue;
         }
@@ -284,10 +272,12 @@ fn error_names_op_item(error: &str, item: &str) -> bool {
 pub fn manifest_problems(text: &str) -> Vec<String> {
     let mut problems = Vec::new();
 
-    // Structural faults (unbalanced quotes, a value that runs off the end) come
-    // from the same parser resolve uses, so the editor agrees with the launch.
-    if let Err(e) = crate::config::parse_dotenv_pairs(text) {
-        problems.push(format!("{e}"));
+    // Structural faults (bad names, unbalanced quotes, a value that runs off
+    // the end) and the entries below come from the same parser resolve uses,
+    // so the editor agrees with the launch about what each mapping is.
+    let parsed = crate::manifest_entry::parse(text);
+    for fault in &parsed.faults {
+        problems.push(fault.message.clone());
     }
 
     for n in comment_lines_with_op_refs(text) {
@@ -298,33 +288,18 @@ pub fn manifest_problems(text: &str) -> Vec<String> {
         ));
     }
 
-    let mut seen: Vec<String> = Vec::new();
-    for (n, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((var, value)) = line.split_once('=') else {
-            continue; // a continuation line of a quoted value, or noise
-        };
-        let (var, value) = (var.trim(), value.trim());
-        if var.is_empty() || !validate_var_name(var) {
-            problems.push(format!(
-                "line {}: '{var}' is not a valid variable name",
-                n + 1
-            ));
-            continue;
-        }
-        if seen.iter().any(|s| s == var) {
-            problems.push(format!("line {}: {var} is set more than once", n + 1));
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in &parsed.entries {
+        let (n, var, value) = (entry.first_line, entry.var.as_str(), entry.value.as_str());
+        if seen.contains(&var) {
+            problems.push(format!("line {n}: {var} is set more than once"));
         } else {
-            seen.push(var.to_string());
+            seen.push(var);
         }
         if value.starts_with("op://") && !crate::refs::op_reference_is_parseable(value) {
             problems.push(format!(
-                "line {}: {var} has a reference op cannot parse ({value}) \u{2014} \
-                 one such reference aborts the whole manifest, not just this line",
-                n + 1
+                "line {n}: {var} has a reference op cannot parse ({value}) \u{2014} \
+                 one such reference aborts the whole manifest, not just this line"
             ));
         }
     }
@@ -478,5 +453,65 @@ GOOD=op://Vault/item/field\n\
             "{err}"
         );
         assert!(err.contains("vaulted-agent refresh"), "{err}");
+    }
+
+    // ---- manifest entries (issue #112) ----
+
+    #[test]
+    fn manifest_problems_accepts_a_bare_multiline_json_value() {
+        // Parses and launches, so the editor must not call it broken.
+        let text = "A=1\nSA={\n  \"type\": \"service_account\",\n  \"tok\": \"ab==\"\n}\n\nB=2\n";
+        assert!(crate::config::parse_dotenv_pairs(text).is_ok());
+        assert_eq!(manifest_problems(text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn manifest_problems_accepts_base64_continuation_lines() {
+        // Padding on a continuation line once read as an assignment to the
+        // text before it, and so as a bad variable name.
+        let text = "K=-----BEGIN KEY-----\nMIIB+gA/x==\nMIIB+gA/x==\n-----END KEY-----\n";
+        assert_eq!(manifest_problems(text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn manifest_problems_accepts_a_double_quoted_multiline_value() {
+        let text = "PEM=\"line1\nA=b\nline3\"\nA=1\n";
+        assert_eq!(manifest_problems(text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn manifest_problems_reports_a_quoted_unparseable_op_ref() {
+        let p = manifest_problems("A=\"op://Vault/bad|item/field\"\n");
+        assert!(
+            p.iter()
+                .any(|s| s.starts_with("line 1: A has a reference op cannot parse")),
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_problems_lists_every_structural_fault() {
+        let p = manifest_problems("A=1\n\nMY-VAR=x\nB=2\n\noops\nA=3\n");
+        assert_eq!(
+            p,
+            vec![
+                "line 3: bad variable name MY-VAR".to_string(),
+                "line 6: expected KEY=value".to_string(),
+                "line 7: A is set more than once".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn blame_reads_quoted_and_multiline_entries_as_the_launch_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("m.env");
+        std::fs::write(
+            &m,
+            "Q=\"op://V/gone/f\"\nPEM=\"x\nHIDDEN=op://V/gone/g\n\"\n",
+        )
+        .unwrap();
+        let blamed = blame_manifest_lines(&m, "could not find item gone in vault V");
+        assert_eq!(blamed, vec!["Q\n      op://V/gone/f".to_string()]);
     }
 }
