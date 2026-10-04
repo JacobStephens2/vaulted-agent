@@ -291,3 +291,23 @@ fn merge_does_not_stack_a_banner_on_every_run() {
         "{after}"
     );
 }
+
+/// An unwritable Refs file is refused before any vault work: with no manager
+/// token anywhere, the refusal is about the file, not the missing token.
+#[test]
+fn an_unwritable_refs_file_is_refused_before_the_vault_is_asked() {
+    use std::os::unix::fs::PermissionsExt;
+    let seam = seam_with_manifest(MANIFEST);
+    fs::remove_file(seam.config_dir.join("bws.env")).unwrap();
+    let path = refs_path(&seam);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    if fs::OpenOptions::new().append(true).open(&path).is_ok() {
+        return; // root ignores the mode; nothing to prove here
+    }
+
+    let (ok, out) = refresh(&seam, &[]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("cannot write"), "{out}");
+    assert!(!out.contains("bws.env"), "{out}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), MANIFEST);
+}

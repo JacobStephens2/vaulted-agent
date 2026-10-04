@@ -1090,25 +1090,8 @@ pub fn cmd_refresh(paths: &Paths, args: &[String]) -> Result<()> {
         None => refresh_backend(paths),
     };
 
-    match be {
-        Backend::Bitwarden => {
-            if !exclude.is_empty() {
-                return Err(Error::Message(
-                    "refresh: --exclude applies to the onepassword backend only".into(),
-                ));
-            }
-            refresh_bitwarden(paths, man_path, take_all, mode, prune)
-        }
-        Backend::OnePassword => {
-            refresh_onepassword(paths, man_path, take_all, mode, &exclude, prune)
-        }
-        other => Err(Error::Message(format!(
-            "refresh does not apply to backend '{}'. It builds refs files, which only \
-             bitwarden and onepassword use; {} manifests are edited directly.",
-            other.as_str(),
-            other.as_str()
-        ))),
-    }
+    let step = RefreshStep::new(be, exclude)?;
+    refresh_refs(paths, step, man_path, take_all, mode, prune)
 }
 
 /// Backend for a bare `refresh`: whichever refs-using backend the harnesses
@@ -1138,13 +1121,250 @@ fn refresh_backend(paths: &Paths) -> Backend {
     }
 }
 
-fn refresh_bitwarden(
+/// The part of `refresh` that differs per Backend: the listing, the selection
+/// menu, turning the selection into mappings, and the facts the lines already
+/// in the file are judged against. Everything else is `refresh_refs`, once.
+///
+/// An enum rather than a trait: there are exactly two Backends with Refs
+/// files, and the CLI tests already drive both through fake `bws` / `op`.
+enum RefreshStep {
+    Bitwarden,
+    /// Exclusion patterns: this run's, then (once the target is known) the
+    /// ones the file records.
+    OnePassword {
+        exclusions: Vec<String>,
+    },
+}
+
+impl RefreshStep {
+    /// The step for `be`, or the refusal for a Backend or flag that has no
+    /// business here.
+    fn new(be: Backend, exclude: Vec<String>) -> Result<RefreshStep> {
+        match be {
+            Backend::Bitwarden if !exclude.is_empty() => Err(Error::Message(
+                "refresh: --exclude applies to the onepassword backend only".into(),
+            )),
+            Backend::Bitwarden => Ok(RefreshStep::Bitwarden),
+            Backend::OnePassword => Ok(RefreshStep::OnePassword {
+                exclusions: exclude,
+            }),
+            other => Err(Error::Message(format!(
+                "refresh does not apply to backend '{}'. It builds refs files, which only \
+                 bitwarden and onepassword use; {} manifests are edited directly.",
+                other.as_str(),
+                other.as_str()
+            ))),
+        }
+    }
+
+    fn backend(&self) -> Backend {
+        match self {
+            RefreshStep::Bitwarden => Backend::Bitwarden,
+            RefreshStep::OnePassword { .. } => Backend::OnePassword,
+        }
+    }
+
+    /// The Refs file a bare `refresh` writes when no Harness names one.
+    fn fallback_refs_file(&self) -> &'static str {
+        match self {
+            RefreshStep::Bitwarden => "openai.env.refs",
+            RefreshStep::OnePassword { .. } => "onepassword.refs",
+        }
+    }
+
+    fn style(&self) -> RefsStyle<'_> {
+        match self {
+            RefreshStep::Bitwarden => RefsStyle::Bitwarden,
+            RefreshStep::OnePassword { exclusions } => RefsStyle::OnePassword { exclusions },
+        }
+    }
+
+    fn exclusions(&self) -> Option<&[String]> {
+        match self {
+            RefreshStep::Bitwarden => None,
+            RefreshStep::OnePassword { exclusions } => Some(exclusions),
+        }
+    }
+
+    /// Put the patterns `path` already records ahead of this run's. Read here
+    /// rather than inside the writer so the filtering stays visible: what was
+    /// skipped is reported, never silently dropped.
+    fn read_recorded_exclusions(&mut self, path: &Path) {
+        let RefreshStep::OnePassword { exclusions } = self else {
+            return;
+        };
+        let mut recorded = if path.is_file() {
+            refs::read_exclusions(&fs::read_to_string(path).unwrap_or_default())
+        } else {
+            Vec::new()
+        };
+        for p in exclusions.drain(..) {
+            if !recorded.contains(&p) {
+                recorded.push(p);
+            }
+        }
+        *exclusions = recorded;
+    }
+
+    /// List, let the operator choose, and turn the choice into mappings. The
+    /// manager token is loaded and dropped in here, so it is gone before the
+    /// flow writes anything.
+    fn gather(&self, paths: &Paths, path: &Path, take_all: bool) -> Result<Gathered> {
+        match self {
+            RefreshStep::Bitwarden => gather_bitwarden(paths, take_all),
+            RefreshStep::OnePassword { exclusions } => {
+                gather_onepassword(paths, path, take_all, exclusions)
+            }
+        }
+    }
+
+    /// The line after the reports, saying what the write did.
+    fn print_summary(
+        &self,
+        path: &Path,
+        mode: WriteMode,
+        mappings: usize,
+        written: refs::RefsWrite,
+    ) {
+        // 1Password's item warnings and skip reports precede this line; a
+        // blank line sets it apart from them.
+        let lead = match self {
+            RefreshStep::Bitwarden => "",
+            RefreshStep::OnePassword { .. } => "\n",
+        };
+        match (mode, self) {
+            (WriteMode::Replace, RefreshStep::Bitwarden) => {
+                println!("Wrote refs file (replace): {}", path.display());
+            }
+            (WriteMode::Replace, RefreshStep::OnePassword { .. }) => {
+                println!(
+                    "\nWrote refs file (replace, {mappings} mapping(s)): {}",
+                    path.display()
+                );
+            }
+            (WriteMode::Merge, _) => {
+                if written.recovered > 0 {
+                    println!(
+                        "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh): {}",
+                        written.recovered,
+                        path.display()
+                    );
+                }
+                if written.added == 0 {
+                    if written.recovered == 0 {
+                        println!("{lead}No new mappings to add: {}", path.display());
+                    }
+                } else {
+                    println!(
+                        "{lead}Updated refs file (+{} mapping(s)): {}",
+                        written.added,
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// What a Backend's step hands back to the flow.
+struct Gathered {
+    mappings: Vec<Mapping>,
+    judge: Judge,
+    /// Set when nothing is left to write and that is a refusal, not a merge
+    /// with nothing new (1Password only).
+    nothing_to_write: Option<Error>,
+}
+
+/// What the lines already in the file are judged against.
+enum Judge {
+    /// The `bws` listing.
+    Bitwarden(Vec<(String, String, String)>),
+    /// The item listing plus the fields of the items this run expanded, and
+    /// nothing more (ADR-0005).
+    OnePassword(refs::OpWorld),
+}
+
+impl Judge {
+    fn scan(&self, text: &str) -> Vec<refs::ScannedRef> {
+        match self {
+            Judge::Bitwarden(secrets) => refs::scan_bitwarden_refs(text, secrets),
+            Judge::OnePassword(world) => refs::scan_op_refs(text, world),
+        }
+    }
+
+    /// Whether a renamed ref can be repaired in place. An `op://` line records
+    /// no source id, so a renamed item is indistinguishable from a deleted one
+    /// (ADR-0005).
+    fn repairs(&self) -> bool {
+        matches!(self, Judge::Bitwarden(_))
+    }
+}
+
+/// One `refresh`, whichever Backend `step` lists from.
+fn refresh_refs(
     paths: &Paths,
+    mut step: RefreshStep,
     man_path: Option<String>,
     take_all: bool,
     mode: Option<WriteMode>,
     prune: bool,
 ) -> Result<()> {
+    let path = match man_path {
+        Some(man) => paths.resolve_manifest(&man),
+        None => default_refs_file(paths, step.backend(), step.fallback_refs_file())?,
+    };
+    let mode = WriteMode::settle(mode, &path);
+
+    // Checked before any vault work, not at the write. Expanding every
+    // 1Password item costs a round trip apiece (~a minute on a 65-item vault);
+    // discovering the file is root-owned only at the write meant paying all of
+    // that to learn something knowable at the start.
+    ensure_manifest_writable(&path)?;
+    step.read_recorded_exclusions(&path);
+
+    // The manager token is loaded and dropped inside this step: nothing after
+    // it can reach the vault, and nothing after it holds the token at the write.
+    let gathered = step.gather(paths, &path, take_all)?;
+
+    // After the listing, because it is what makes a verdict possible; before
+    // the write, so a pruned line is gone by the time merge decides what to
+    // append.
+    if path.is_file() {
+        let text = fs::read_to_string(&path).map_err(|e| Error::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let scan = gathered.judge.scan(&text);
+        report_and_fix_refs(
+            paths,
+            &path,
+            &scan,
+            step.exclusions(),
+            gathered.judge.repairs(),
+            mode == WriteMode::Replace,
+            prune,
+        )?;
+    }
+    if let Some(refusal) = gathered.nothing_to_write {
+        return Err(refusal);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let written = refs::write_refs(
+        &path,
+        &gathered.mappings,
+        mode,
+        step.style(),
+        "vaulted-agent refresh",
+    )?;
+    step.print_summary(&path, mode, gathered.mappings.len(), written);
+    Ok(())
+}
+
+/// Bitwarden: pick from the secrets the token can see.
+fn gather_bitwarden(paths: &Paths, take_all: bool) -> Result<Gathered> {
     let token = load_bws(paths)?;
     let secrets = backend::bws_list_secrets(&token)?;
     drop(token);
@@ -1153,23 +1373,6 @@ fn refresh_bitwarden(
             "No secrets visible to this token yet.".into(),
         ));
     }
-
-    let path = match man_path {
-        Some(man) => {
-            if Path::new(&man).is_absolute() {
-                PathBuf::from(&man)
-            } else {
-                paths.manifest_dir.join(&man)
-            }
-        }
-        None => default_bitwarden_manifest(paths)?,
-    };
-
-    let mode = WriteMode::settle(mode, &path);
-
-    ensure_manifest_writable(&path)?;
-
-    report_and_fix_refs(paths, &path, &secrets, mode == WriteMode::Replace, prune)?;
 
     let indices = if take_all {
         None // all
@@ -1192,48 +1395,14 @@ fn refresh_bitwarden(
         }
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-
-    let mappings = Mapping::bitwarden_selection(&secrets, indices.as_deref());
-    let written = refs::write_refs(
-        &path,
-        &mappings,
-        mode,
-        RefsStyle::Bitwarden,
-        "vaulted-agent refresh",
-    )?;
-    match mode {
-        WriteMode::Replace => {
-            println!("Wrote refs file (replace): {}", path.display());
-        }
-        WriteMode::Merge => {
-            if written.recovered > 0 {
-                println!(
-                    "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh): {}",
-                    written.recovered,
-                    path.display()
-                );
-            }
-            if written.added == 0 {
-                if written.recovered == 0 {
-                    println!("No new mappings to add: {}", path.display());
-                }
-            } else {
-                println!(
-                    "Updated refs file (+{} mapping(s)): {}",
-                    written.added,
-                    path.display()
-                );
-            }
-        }
-    }
-    Ok(())
+    Ok(Gathered {
+        mappings: Mapping::bitwarden_selection(&secrets, indices.as_deref()),
+        judge: Judge::Bitwarden(secrets),
+        nothing_to_write: None,
+    })
 }
-
-/// Report what the scan found in a Bitwarden manifest, and act on it when the
-/// operator has said to: dangling refs removed, renamed refs repaired.
+/// Report what the scan found, and act on it when the operator has said to:
+/// dangling refs removed, renamed refs repaired.
 ///
 /// Reporting happens on every run; changing the file never does on its own.
 /// Both kinds of change ride the one `--prune` / confirmation gate, because
@@ -1241,28 +1410,28 @@ fn refresh_bitwarden(
 /// line while leaving another broken would be harder to reason about than
 /// either alone.
 ///
+/// `exclusions` is given only by a Backend that records them, and only then is
+/// the excluded report printed. `can_repair` says whether the Backend can
+/// repair a rename at all.
+///
 /// Exit status is unaffected either way — `refresh` is not a gate, `secrets
 /// validate` is (invariant 5), and it already fails on a dangling ref.
 fn report_and_fix_refs(
     paths: &Paths,
     path: &Path,
-    secrets: &[(String, String, String)],
+    scan: &[refs::ScannedRef],
+    exclusions: Option<&[String]>,
+    can_repair: bool,
     mode_is_replace: bool,
     prune: bool,
 ) -> Result<()> {
-    if !path.is_file() {
-        return Ok(());
-    }
-    let text = fs::read_to_string(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let scan = refs::scan_bitwarden_refs(&text, secrets);
     // `--replace` regenerates from the listing instead of repairing, so the
     // report must not promise a repair it will not perform.
-    print_ref_report(paths, path, &scan, !mode_is_replace);
-
-    apply_ref_edits(path, &scan, mode_is_replace, prune)
+    print_ref_report(paths, path, scan, can_repair && !mode_is_replace);
+    if let Some(exclusions) = exclusions {
+        print_excluded_report(path, scan, exclusions);
+    }
+    apply_ref_edits(path, scan, mode_is_replace, prune)
 }
 
 /// Decide what to do about a scan's pending edits, then do it.
@@ -1326,35 +1495,6 @@ fn apply_ref_edits(
     }
     println!();
     Ok(())
-}
-
-/// Report what the scan found in a 1Password manifest, and act on it under the
-/// same gate as Bitwarden.
-///
-/// Judged against what this run already fetched: the item listing, plus the
-/// fields of the items it expanded. Nothing here costs an extra `op` call
-/// (ADR-0005).
-fn report_and_fix_op_refs(
-    paths: &Paths,
-    path: &Path,
-    world: &refs::OpWorld,
-    exclusions: &[String],
-    mode_is_replace: bool,
-    prune: bool,
-) -> Result<()> {
-    if !path.is_file() {
-        return Ok(());
-    }
-    let text = fs::read_to_string(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let scan = refs::scan_op_refs(&text, world);
-    // No repair to promise: an `op://` line records no source id, so a renamed
-    // item is indistinguishable from a deleted one (ADR-0005).
-    print_ref_report(paths, path, &scan, false);
-    print_excluded_report(path, &scan, exclusions);
-    apply_ref_edits(path, &scan, mode_is_replace, prune)
 }
 
 /// Mappings that resolve but whose variable name an exclusion now covers.
@@ -1575,52 +1715,18 @@ fn load_op(paths: &Paths) -> Result<ManagerToken> {
 /// while fields cost one `op item get` per item. Expanding all items up front
 /// would mean a per-item round trip before the menu could even be printed
 /// (~50s on a 60-item vault). Only the chosen items are expanded.
-fn refresh_onepassword(
+fn gather_onepassword(
     paths: &Paths,
-    man_path: Option<String>,
+    path: &Path,
     take_all: bool,
-    mode: Option<WriteMode>,
-    exclude: &[String],
-    prune: bool,
-) -> Result<()> {
+    exclusions: &[String],
+) -> Result<Gathered> {
     let token = load_op(paths)?;
     let items = backend::op_list_items(&token, None)?;
     if items.is_empty() {
         return Err(Error::Message(
             "No 1Password items visible to this token yet.".into(),
         ));
-    }
-
-    let path = match man_path {
-        Some(man) => {
-            if Path::new(&man).is_absolute() {
-                PathBuf::from(&man)
-            } else {
-                paths.manifest_dir.join(&man)
-            }
-        }
-        None => default_onepassword_manifest(paths)?,
-    };
-    let mode = WriteMode::settle(mode, &path);
-
-    // Checked before the menu, not after the reads. Expanding every item costs
-    // a round trip apiece (~a minute on a 65-item vault); discovering the file
-    // is root-owned only at the write meant paying all of that to learn
-    // something knowable at the start.
-    ensure_manifest_writable(&path)?;
-
-    // Patterns already recorded in the manifest, plus any given on this run.
-    // Reading them here rather than inside the writer keeps the filtering
-    // visible: what was skipped is reported below, never silently dropped.
-    let mut exclusions = if path.is_file() {
-        refs::read_exclusions(&fs::read_to_string(&path).unwrap_or_default())
-    } else {
-        Vec::new()
-    };
-    for p in exclude {
-        if !exclusions.iter().any(|q| q == p) {
-            exclusions.push(p.clone());
-        }
     }
 
     let indices: Vec<usize> = if take_all || !std::io::IsTerminal::is_terminal(&io::stdin()) {
@@ -1730,7 +1836,7 @@ fn refresh_onepassword(
             } else {
                 plain
             };
-            if refs::is_excluded(&exclusions, &var) {
+            if refs::is_excluded(exclusions, &var) {
                 excluded.push(var);
                 continue;
             }
@@ -1774,20 +1880,8 @@ fn refresh_onepassword(
         );
     }
 
-    // After the reads, because the fields they returned are what makes a
-    // field-level verdict possible; before the write, so a dangling line is
-    // gone by the time merge decides what to append.
-    report_and_fix_op_refs(
-        paths,
-        &path,
-        &world,
-        &exclusions,
-        mode == WriteMode::Replace,
-        prune,
-    )?;
-
-    if entries.is_empty() {
-        return Err(Error::Message(if excluded.is_empty() {
+    let nothing_to_write = entries.is_empty().then(|| {
+        Error::Message(if excluded.is_empty() {
             "Nothing selected has a referenceable field.".into()
         } else {
             // Distinguishable from "the vault gave us nothing", because the
@@ -1798,58 +1892,28 @@ fn refresh_onepassword(
                 excluded.len(),
                 path.display()
             )
-        }));
-    }
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-
-    let mappings: Vec<Mapping> = entries
-        .iter()
-        .map(|(var, reference)| Mapping::onepassword(var, reference))
-        .collect();
-    let written = refs::write_refs(
-        &path,
-        &mappings,
-        mode,
-        RefsStyle::OnePassword {
-            exclusions: &exclusions,
-        },
-        "vaulted-agent refresh",
-    )?;
-    match mode {
-        WriteMode::Replace => {
-            println!(
-                "\nWrote refs file (replace, {} mapping(s)): {}",
-                entries.len(),
-                path.display()
-            );
-        }
-        WriteMode::Merge => {
-            if written.added == 0 {
-                println!("\nNo new mappings to add: {}", path.display());
-            } else {
-                println!(
-                    "\nUpdated refs file (+{} mapping(s)): {}",
-                    written.added,
-                    path.display()
-                );
-            }
-        }
-    }
-    Ok(())
+        })
+    });
+    Ok(Gathered {
+        mappings: entries
+            .iter()
+            .map(|(var, reference)| Mapping::onepassword(var, reference))
+            .collect(),
+        judge: Judge::OnePassword(world),
+        nothing_to_write,
+    })
 }
 
-/// Resolve the refs file for a bare 1Password `refresh` from harness config,
-/// mirroring `default_bitwarden_manifest`.
-fn default_onepassword_manifest(paths: &Paths) -> Result<PathBuf> {
+/// Resolve the Refs file for a bare `refresh` / setup from harness config
+/// (story #13): the one Manifest the Harnesses on `be` use, `fallback` under
+/// the manifest directory when none does, and a refusal naming the candidates
+/// when several do.
+fn default_refs_file(paths: &Paths, be: Backend, fallback: &str) -> Result<PathBuf> {
     let be_default = default_backend(paths);
     let mut candidates: Vec<PathBuf> = Vec::new();
     for name in list_harness_names(paths)? {
         let h = Harness::load(paths, &name)?;
-        let be = h.backend.unwrap_or(be_default);
-        if be == Backend::OnePassword {
+        if h.backend.unwrap_or(be_default) == be {
             candidates.push(h.resolve_manifest_path(paths));
         }
     }
@@ -1857,47 +1921,10 @@ fn default_onepassword_manifest(paths: &Paths) -> Result<PathBuf> {
     candidates.dedup();
     match candidates.as_slice() {
         [one] => Ok(one.clone()),
-        [] => Ok(paths.manifest_dir.join("onepassword.refs")),
+        [] => Ok(paths.manifest_dir.join(fallback)),
         many => Err(Error::Message(format!(
-            "multiple onepassword manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
-            many.iter()
-                .map(|p| p
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("?")
-                    .to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))),
-    }
-}
-
-/// Resolve the refs file for bare `refresh` / setup from harness config (story #13).
-fn default_bitwarden_manifest(paths: &Paths) -> Result<PathBuf> {
-    let be_default = default_backend(paths);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for name in list_harness_names(paths)? {
-        let h = Harness::load(paths, &name)?;
-        let be = h.backend.unwrap_or(be_default);
-        if be == Backend::Bitwarden {
-            candidates.push(h.resolve_manifest_path(paths));
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
-    match candidates.as_slice() {
-        [one] => Ok(one.clone()),
-        [] => {
-            let fallback = paths.manifest_dir.join("openai.env.refs");
-            if fallback.is_file() {
-                Ok(fallback)
-            } else {
-                // No harness yet — create the conventional default.
-                Ok(fallback)
-            }
-        }
-        many => Err(Error::Message(format!(
-            "multiple bitwarden manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
+            "multiple {} manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
+            be.as_str(),
             many.iter()
                 .map(|p| p
                     .file_name()
@@ -1965,7 +1992,11 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
         return Ok(());
     }
     println!("{} secret(s) visible.", secrets.len());
-    let man_path = default_bitwarden_manifest(paths)?;
+    let man_path = default_refs_file(
+        paths,
+        Backend::Bitwarden,
+        RefreshStep::Bitwarden.fallback_refs_file(),
+    )?;
     fs::create_dir_all(&paths.manifest_dir).ok();
     let mode = WriteMode::settle(None, &man_path);
     let written = refs::write_refs(
