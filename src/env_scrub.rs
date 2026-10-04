@@ -67,16 +67,27 @@ pub fn apply_aliases(
     Ok(())
 }
 
+/// Snapshot of this process's environment as the child env builder sees it:
+/// only variables whose name and value are both UTF-8. A non-UTF-8 entry is
+/// skipped, never a panic (`env::vars` would panic on one).
+pub fn parent_env_snapshot() -> HashMap<String, String> {
+    env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect()
+}
+
 /// Construct environment for the agent: passthrough + keep + secrets.
 /// Explicit construction — not "inherit then subtract" — so nothing ambient rides along.
+/// `parent` is a snapshot of the parent environment (`parent_env_snapshot`).
 pub fn build_child_env(
+    parent: &HashMap<String, String>,
     keep: &[String],
     secrets: &HashMap<String, SecretValue>,
 ) -> HashMap<OsString, OsString> {
     let mut out: HashMap<OsString, OsString> = HashMap::new();
 
     for &name in PASSTHROUGH {
-        if let Ok(v) = env::var(name) {
+        if let Some(v) = parent.get(name) {
             out.insert(OsString::from(name), OsString::from(v));
         }
     }
@@ -84,7 +95,7 @@ pub fn build_child_env(
         if MANAGER_TOKEN_VARS.contains(&name.as_str()) {
             continue;
         }
-        if let Ok(v) = env::var(name) {
+        if let Some(v) = parent.get(name) {
             out.insert(OsString::from(name.as_str()), OsString::from(v));
         }
     }
@@ -104,19 +115,23 @@ pub fn build_child_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    // Serialize env-mutating tests
-    static LOCK: Mutex<()> = Mutex::new(());
+    fn parent(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
 
     #[test]
     fn parent_secret_not_in_child_env() {
-        let _g = LOCK.lock().unwrap();
-        env::set_var("PARENT_ONLY_SECRET", "leak-me");
-        env::set_var("HOME", "/tmp/home-test");
+        let parent = parent(&[
+            ("PARENT_ONLY_SECRET", "leak-me"),
+            ("HOME", "/tmp/home-test"),
+        ]);
         let secrets =
             HashMap::from([("APP_DB_PASS".to_string(), SecretValue::new("injected-only"))]);
-        let child = build_child_env(&[], &secrets);
+        let child = build_child_env(&parent, &[], &secrets);
         assert!(!child.contains_key(OsStr::new("PARENT_ONLY_SECRET")));
         assert_eq!(
             child
@@ -125,31 +140,27 @@ mod tests {
             Some("injected-only".into())
         );
         assert!(child.contains_key(OsStr::new("HOME")));
-        env::remove_var("PARENT_ONLY_SECRET");
     }
 
     #[test]
     fn keep_allows_named_passthrough() {
-        let _g = LOCK.lock().unwrap();
-        env::set_var("SSH_AUTH_SOCK", "/tmp/ssh.sock");
-        let child = build_child_env(&["SSH_AUTH_SOCK".into()], &HashMap::new());
+        let parent = parent(&[("SSH_AUTH_SOCK", "/tmp/ssh.sock")]);
+        let child = build_child_env(&parent, &["SSH_AUTH_SOCK".into()], &HashMap::new());
         assert_eq!(
             child
                 .get(OsStr::new("SSH_AUTH_SOCK"))
                 .map(|s| s.to_string_lossy().into_owned()),
             Some("/tmp/ssh.sock".into())
         );
-        env::remove_var("SSH_AUTH_SOCK");
     }
 
     #[test]
     fn manager_token_never_in_child_even_if_in_secrets() {
-        let _g = LOCK.lock().unwrap();
         let secrets = HashMap::from([(
             "BWS_ACCESS_TOKEN".to_string(),
             SecretValue::new("should-not-leak"),
         )]);
-        let child = build_child_env(&[], &secrets);
+        let child = build_child_env(&HashMap::new(), &[], &secrets);
         assert!(!child.contains_key(OsStr::new("BWS_ACCESS_TOKEN")));
     }
 

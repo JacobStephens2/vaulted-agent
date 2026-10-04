@@ -11,6 +11,7 @@ pub mod error;
 mod harness_sync;
 pub mod inventory;
 pub mod launch;
+mod launch_plan;
 pub mod manifest_entry;
 pub mod onepassword;
 pub mod privilege;

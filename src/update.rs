@@ -221,9 +221,11 @@ fn sync_with_target(binary: &Path, dry_run: bool) -> Result<()> {
 
 fn target_command(binary: &Path) -> Command {
     let mut command = Command::new(binary);
-    command
-        .env_clear()
-        .envs(crate::env_scrub::build_child_env(&[], &Default::default()));
+    command.env_clear().envs(crate::env_scrub::build_child_env(
+        &crate::env_scrub::parent_env_snapshot(),
+        &[],
+        &Default::default(),
+    ));
     // Same-user handoff only. The privileged sync path drops custom config.
     for key in ["VAULTED_AGENT_CONFIG_DIR", "SUDO_USER"] {
         if let Some(value) = env::var_os(key) {
