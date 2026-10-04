@@ -114,6 +114,18 @@ impl Paths {
             .unwrap_or_else(|| PathBuf::from("/etc/vaulted-agent"));
         Self::from_config_dir(dir)
     }
+
+    /// Where a Manifest named by `manifest` lives: an absolute path as given,
+    /// anything else under the manifest directory. The rule for a Harness's
+    /// `manifest =` line and for a manifest named on the command line.
+    pub fn resolve_manifest(&self, manifest: impl AsRef<Path>) -> PathBuf {
+        let p = manifest.as_ref();
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.manifest_dir.join(p)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -336,12 +348,7 @@ impl Harness {
     }
 
     pub fn resolve_manifest_path(&self, paths: &Paths) -> PathBuf {
-        let p = Path::new(&self.manifest);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            paths.manifest_dir.join(p)
-        }
+        paths.resolve_manifest(&self.manifest)
     }
 
     /// Basename of the first command token (`kimi`, `claude`, …).
