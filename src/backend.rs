@@ -5,10 +5,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::bitwarden::{BwListing, BwRef, Lookup};
 use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
 use crate::secret::{ManagerToken, SecretValue};
-use crate::validate::{is_placeholder_secret_value, is_uuid, validate_manifest_file};
+use crate::validate::{is_placeholder_secret_value, validate_manifest_file};
 
 fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
     let mut cmd = Command::new(program);
@@ -50,99 +51,59 @@ fn bws_list_json(token: &ManagerToken) -> Result<String> {
     )
 }
 
-/// Parse bws secret list JSON into (id, key, project_name) rows.
-pub fn parse_bws_list_json(list_json: &str) -> Result<Vec<(String, String, String)>> {
-    let v: serde_json::Value = serde_json::from_str(list_json)
-        .map_err(|e| Error::Message(format!("bws secret list JSON: {e}")))?;
-    let arr = match &v {
-        serde_json::Value::Array(a) => a.clone(),
-        serde_json::Value::Object(o) => o
-            .get("data")
-            .or_else(|| o.get("secrets"))
-            .and_then(|x| x.as_array())
-            .cloned()
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    let mut rows = Vec::new();
-    for s in arr {
-        let id = s
-            .get("id")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        if id.is_empty() {
-            continue;
+/// The secret id a launch injects for `r`, judged against the listing.
+///
+/// The one place a lookup becomes the launch's errors. `refresh` judges the
+/// same lookup, so a line it calls resolvable is exactly a line this accepts.
+pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<String> {
+    match listing.lookup(r) {
+        Lookup::Found(s) => Ok(s.id.clone()),
+        // `name_the_manifest` recognises this wording; keep them in step.
+        Lookup::Absent => Err(Error::Message(format!("no secret matched {r}"))),
+        Lookup::Ambiguous(_) => Err(match BwRef::parse(r) {
+            Some(BwRef::Name(key)) => Error::Message(format!(
+                "multiple secrets named {key}; use project:PROJECT/{key}"
+            )),
+            // Same key in the same project: only the id tells them apart.
+            _ => Error::Message(format!(
+                "multiple secrets match {r}; use the secret's UUID (uuid:UUID)"
+            )),
+        }),
+        Lookup::NotARef if r.starts_with("project:") => {
+            Err(Error::Message("project: ref needs PROJECT/SECRET".into()))
         }
-        let key = s
-            .get("key")
-            .or_else(|| s.get("name"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string();
-        let proj = match s.get("project") {
-            Some(serde_json::Value::Object(p)) => p
-                .get("name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            Some(serde_json::Value::String(s)) => s.clone(),
-            _ => String::new(),
-        };
-        rows.push((id, key, proj));
+        Lookup::NotARef => Err(Error::Message(format!("bad bitwarden ref {r}"))),
     }
-    Ok(rows)
-}
-
-fn parse_bws_ref(rows: &[(String, String, String)], r: &str) -> Result<String> {
-    if let Some(want_name) = r.strip_prefix("name:") {
-        let matches: Vec<_> = rows.iter().filter(|(_, k, _)| k == want_name).collect();
-        if matches.is_empty() {
-            return Err(Error::Message(format!("no secret matched {r}")));
-        }
-        if matches.len() > 1 {
-            return Err(Error::Message(format!(
-                "multiple secrets named {want_name}; use project:PROJECT/{want_name}"
-            )));
-        }
-        return Ok(matches[0].0.clone());
-    }
-    if let Some(rest) = r.strip_prefix("project:") {
-        let Some((p, s)) = rest.split_once('/') else {
-            return Err(Error::Message("project: ref needs PROJECT/SECRET".into()));
-        };
-        let m = rows
-            .iter()
-            .find(|(_, k, proj)| k == s && proj == p)
-            .ok_or_else(|| Error::Message(format!("no secret matched {r}")))?;
-        return Ok(m.0.clone());
-    }
-    Err(Error::Message(format!("bad bitwarden ref {r}")))
 }
 
 /// Lookup metadata lives only for one resolution; UUIDs need no listing.
 struct BwsRefResolver<'a> {
     token: &'a ManagerToken,
-    rows: Option<Vec<(String, String, String)>>,
+    listing: Option<BwListing>,
 }
 
 impl<'a> BwsRefResolver<'a> {
     fn new(token: &'a ManagerToken) -> Self {
-        Self { token, rows: None }
+        Self {
+            token,
+            listing: None,
+        }
     }
 
     fn resolve_id(&mut self, r: &str) -> Result<String> {
-        let bare = r.strip_prefix("uuid:").unwrap_or(r);
-        if is_uuid(bare) {
-            return Ok(bare.to_string());
+        // Saves one `bws secret list` per manifest of UUID refs. The answer is
+        // the same: `bws secret get` on an id the token cannot see fails just
+        // as a listing miss would.
+        if let Some(BwRef::Id(id)) = BwRef::parse(r) {
+            return Ok(id.to_string());
         }
-        let rows = match self.rows {
-            Some(ref rows) => rows,
+        let listing = match self.listing {
+            Some(ref listing) => listing,
             None => self
-                .rows
-                .insert(parse_bws_list_json(&bws_list_json(self.token)?)?),
+                .listing
+                .insert(BwListing::from_json(&bws_list_json(self.token)?)?),
         };
-        parse_bws_ref(rows, r)
+        id_from_listing(listing, r)
     }
 }
 
@@ -310,10 +271,9 @@ pub fn resolve(
     }
 }
 
-/// List SM secrets as (id, key, project) for setup/refresh/secrets list.
-pub fn bws_list_secrets(token: &ManagerToken) -> Result<Vec<(String, String, String)>> {
-    let list = bws_list_json(token)?;
-    parse_bws_list_json(&list)
+/// The Bitwarden listing, for setup, refresh and `secrets list`.
+pub fn bws_list_secrets(token: &ManagerToken) -> Result<BwListing> {
+    BwListing::from_json(&bws_list_json(token)?)
 }
 
 /// Verify a 1Password service-account token without touching any item.
@@ -774,17 +734,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_list_array() {
-        let j = r#"[{"id":"a","key":"k1","project":{"name":"p"}}]"#;
-        let rows = parse_bws_list_json(j).unwrap();
-        assert_eq!(rows, vec![("a".into(), "k1".into(), "p".into())]);
+    fn parse_name_ref() {
+        let j = r#"[{"id":"id1","key":"openai-api-key","project":{"name":"tools"}}]"#;
+        let listing = BwListing::from_json(j).unwrap();
+        assert_eq!(
+            id_from_listing(&listing, "name:openai-api-key").unwrap(),
+            "id1"
+        );
     }
 
     #[test]
-    fn parse_name_ref() {
-        let j = r#"[{"id":"id1","key":"openai-api-key","project":{"name":"tools"}}]"#;
-        let rows = parse_bws_list_json(j).unwrap();
-        assert_eq!(parse_bws_ref(&rows, "name:openai-api-key").unwrap(), "id1");
+    fn a_lookup_maps_to_the_launch_errors() {
+        let listing = BwListing::from_json(
+            r#"[{"id":"b","key":"DUP","project":{"name":"tools"}},
+                {"id":"c","key":"DUP","project":{"name":"tools"}}]"#,
+        )
+        .unwrap();
+        let err = |r: &str| id_from_listing(&listing, r).unwrap_err().to_string();
+        assert_eq!(err("name:GONE"), "no secret matched name:GONE");
+        assert_eq!(
+            err("name:DUP"),
+            "multiple secrets named DUP; use project:PROJECT/DUP"
+        );
+        // A `project:` used to take the first match in listing order.
+        let e = err("project:tools/DUP");
+        assert!(
+            e.contains("multiple secrets match project:tools/DUP"),
+            "{e}"
+        );
+        assert!(e.contains("uuid:UUID"), "{e}");
+        assert_eq!(err("project:tools"), "project: ref needs PROJECT/SECRET");
+        assert_eq!(err("junk"), "bad bitwarden ref junk");
     }
 
     #[test]

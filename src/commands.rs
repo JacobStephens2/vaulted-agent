@@ -10,6 +10,7 @@ use std::process::Command;
 
 use crate::auth::{self, TokenKind};
 use crate::backend;
+use crate::bitwarden::BwListing;
 use crate::config::{
     env_blind_agent_reason, list_harness_names, load_allow_run, load_auth_mode,
     load_default_backend, load_service_user, parse_dotenv_keys, AuthMode, Backend, Harness, Paths,
@@ -459,11 +460,17 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
             let rows = backend::bws_list_secrets(&token)?;
             drop(token);
             println!("Secrets visible to this token:");
-            for (i, (id, key, proj)) in rows.iter().enumerate() {
-                if proj.is_empty() {
-                    println!("  {:2}) {:36}  {}", i + 1, id, key);
+            for (i, s) in rows.secrets().iter().enumerate() {
+                if s.project.is_empty() {
+                    println!("  {:2}) {:36}  {}", i + 1, s.id, s.key);
                 } else {
-                    println!("  {:2}) {:36}  {}  (project: {})", i + 1, id, key, proj);
+                    println!(
+                        "  {:2}) {:36}  {}  (project: {})",
+                        i + 1,
+                        s.id,
+                        s.key,
+                        s.project
+                    );
                 }
             }
             Ok(())
@@ -1289,7 +1296,7 @@ struct Gathered {
 /// What the lines already in the file are judged against.
 enum Fetched {
     /// The `bws` listing.
-    Bitwarden(Vec<(String, String, String)>),
+    Bitwarden(BwListing),
     /// The item listing plus the fields of the items this run expanded, and
     /// nothing more (ADR-0005).
     OnePassword(refs::OpWorld),
@@ -1298,7 +1305,7 @@ enum Fetched {
 impl Fetched {
     fn scan(&self, text: &str) -> Vec<refs::ScannedRef> {
         match self {
-            Fetched::Bitwarden(secrets) => refs::scan_bitwarden_refs(text, secrets),
+            Fetched::Bitwarden(listing) => refs::scan_bitwarden_refs(text, listing),
             Fetched::OnePassword(world) => refs::scan_op_refs(text, world),
         }
     }
@@ -1386,8 +1393,8 @@ fn gather_bitwarden(paths: &Paths, take_all: bool) -> Result<Gathered> {
     } else {
         // print list and ask
         println!("Secrets:");
-        for (i, (id, key, proj)) in secrets.iter().enumerate() {
-            println!("  {:2}) {}  {}  {}", i + 1, id, key, proj);
+        for (i, s) in secrets.secrets().iter().enumerate() {
+            println!("  {:2}) {}  {}  {}", i + 1, s.id, s.key, s.project);
         }
         eprint!("Secrets to include [all]: ");
         let _ = io::stderr().flush();
@@ -1581,6 +1588,36 @@ fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_
         ) {
             println!("  ! {warning}");
         }
+    }
+    let ambiguous = refs::ambiguous_refs(scan);
+    if !ambiguous.is_empty() {
+        // Not dangling, so never pruned: the secrets exist. Not repaired
+        // either: which one was meant is the operator's call, and only a
+        // recorded identity licenses a repair (ADR-0004).
+        println!(
+            "Ambiguous refs in {} ({} matching more than one secret — the launch \
+             fails closed rather than pick one):",
+            path.display(),
+            ambiguous.len()
+        );
+        for r in &ambiguous {
+            println!("    {}", r.line);
+            for s in &r.candidates {
+                if s.project.is_empty() {
+                    println!("      matches uuid:{}  {}", s.id, s.key);
+                } else {
+                    println!(
+                        "      matches uuid:{}  {}  (project: {})",
+                        s.id, s.key, s.project
+                    );
+                }
+            }
+        }
+        println!(
+            "  Qualify each with project:PROJECT/KEY, or pin one secret with uuid:UUID: \
+             vaulted-agent edit-manifest"
+        );
+        println!();
     }
     let unchecked = refs::unchecked_refs(scan);
     if !unchecked.is_empty() {
@@ -1971,7 +2008,7 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
     // manager token (issue #77). `bws secret list` is both the liveness check
     // that keeps an invalid token off disk and the data the rest of setup
     // needs, so keep the result instead of paying for a second round trip.
-    let listed: RefCell<Option<Vec<(String, String, String)>>> = RefCell::new(None);
+    let listed: RefCell<Option<BwListing>> = RefCell::new(None);
     let verify = |t: &ManagerToken| {
         *listed.borrow_mut() = Some(backend::bws_list_secrets(t)?);
         Ok(())

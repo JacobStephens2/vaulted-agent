@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::bitwarden::{BwListing, BwSecret, Lookup};
 use crate::error::{Error, Result};
 
 mod writer;
@@ -150,6 +151,13 @@ pub enum RefFate {
     /// secret still there under a different key: a **rename**. Repairable
     /// rather than prunable (ADR-0004).
     Renamed,
+    /// An **ambiguous ref** (`CONTEXT.md`): the reference matches more than
+    /// one listed secret, so the launch fails closed rather than pick one.
+    /// Bitwarden only. Not dangling — the secrets exist, and pruning would
+    /// delete a mapping to them (ADR-0003) — and not repairable, because which
+    /// secret was meant is the operator's choice (ADR-0004). Reported, never
+    /// edited.
+    Ambiguous,
     /// Not a reference this can judge — an unknown shape, a placeholder, or a
     /// value carried across several lines. Reported, never pruned: shape is
     /// `secrets validate`'s concern (ADR-0003).
@@ -175,6 +183,8 @@ pub struct ScannedRef {
     pub fate: RefFate,
     /// For `Renamed`: the key the recorded secret carries now.
     pub renamed_to: Option<String>,
+    /// For `Ambiguous`: every listed secret the reference matches.
+    pub candidates: Vec<BwSecret>,
 }
 
 impl ScannedRef {
@@ -191,66 +201,54 @@ impl ScannedRef {
     }
 }
 
-/// Does this reference name a secret in the listing?
-///
-/// `None` when the reference is not a Bitwarden form this can judge. Mirrors
-/// what `parse_bws_ref` matches on, minus the ambiguity errors: a `name:` that
-/// hits two secrets resolves to *something*, so it is not dangling.
-fn bitwarden_ref_matches(reference: &str, secrets: &[(String, String, String)]) -> Option<bool> {
-    let r = reference.trim();
-    if crate::validate::is_placeholder_ref(r) {
-        return None;
-    }
-    if let Some(want) = r.strip_prefix("name:") {
-        if want.is_empty() {
-            return None;
-        }
-        return Some(secrets.iter().any(|(_, k, _)| k == want));
-    }
-    if let Some(rest) = r.strip_prefix("project:") {
-        let (p, k) = rest.split_once('/')?;
-        if p.is_empty() || k.is_empty() {
-            return None;
-        }
-        return Some(secrets.iter().any(|(_, key, proj)| key == k && proj == p));
-    }
-    let bare = r.strip_prefix("uuid:").unwrap_or(r);
-    if crate::validate::is_uuid(bare) {
-        return Some(secrets.iter().any(|(id, _, _)| id == bare));
-    }
-    None
-}
-
-/// The key a line's recorded secret carries now, when that differs from what
-/// the line's reference asks for.
-///
-/// Only ever consulted for a reference that already failed to match, so a
-/// working mapping is never reclassified on the strength of a stale recording.
-fn renamed_key(value: &str, secrets: &[(String, String, String)]) -> Option<String> {
-    let uuid = recorded_uuid(value)?;
-    let (_, key, _) = secrets.iter().find(|(id, _, _)| id == uuid)?;
-    Some(key.clone())
-}
-
 /// Classify every mapping line in a Bitwarden refs file against the listing
 /// `refresh` already holds. No vault calls: the listing is the whole world.
+///
+/// Each line goes through the same lookup the launch resolves with, so a line
+/// called resolvable here is a line the launch accepts. Absent is a rename when
+/// the line's source recording names a listed secret, dangling otherwise;
+/// ambiguous is its own fate, never pruned or repaired.
 ///
 /// Values are read as the launch reads them, so a quoted `A="name:KEY"` is
 /// judged by `name:KEY`. Prune still works on physical lines — it has to put the
 /// file back byte for byte, and only a physical line can be dropped from it. A
 /// value carried across lines is never a Bitwarden reference, so it is marked
 /// `Unjudged` rather than risking a partial removal.
-pub fn scan_bitwarden_refs(text: &str, secrets: &[(String, String, String)]) -> Vec<ScannedRef> {
-    scan_refs(text, |value| {
-        match bitwarden_ref_matches(reference_of(value), secrets) {
-            Some(true) => (RefFate::Resolvable, None),
-            Some(false) => match renamed_key(value, secrets) {
-                Some(key) => (RefFate::Renamed, Some(key)),
-                None => (RefFate::Dangling, None),
+pub fn scan_bitwarden_refs(text: &str, listing: &BwListing) -> Vec<ScannedRef> {
+    scan_refs(text, |value| match listing.lookup(reference_of(value)) {
+        Lookup::Found(_) => Verdict::of(RefFate::Resolvable),
+        // Only consulted for a reference that already failed to match, so a
+        // working mapping is never reclassified on a stale recording.
+        Lookup::Absent => match recorded_uuid(value).and_then(|u| listing.by_id(u)) {
+            Some(now) => Verdict {
+                renamed_to: Some(now.key.clone()),
+                ..Verdict::of(RefFate::Renamed)
             },
-            None => (RefFate::Unjudged, None),
-        }
+            None => Verdict::of(RefFate::Dangling),
+        },
+        Lookup::Ambiguous(candidates) => Verdict {
+            candidates: candidates.into_iter().cloned().collect(),
+            ..Verdict::of(RefFate::Ambiguous)
+        },
+        Lookup::NotARef => Verdict::of(RefFate::Unjudged),
     })
+}
+
+/// What a backend says about one value.
+struct Verdict {
+    fate: RefFate,
+    renamed_to: Option<String>,
+    candidates: Vec<BwSecret>,
+}
+
+impl Verdict {
+    fn of(fate: RefFate) -> Verdict {
+        Verdict {
+            fate,
+            renamed_to: None,
+            candidates: Vec::new(),
+        }
+    }
 }
 
 /// Walk a refs file's entries, letting the backend say what each value means.
@@ -259,7 +257,7 @@ pub fn scan_bitwarden_refs(text: &str, secrets: &[(String, String, String)]) -> 
 /// even where "does not resolve" does. Entries come from the parser the launch
 /// uses, so a line inside another entry's multi-line value is never mistaken
 /// for a mapping of its own.
-fn scan_refs(text: &str, classify: impl Fn(&str) -> (RefFate, Option<String>)) -> Vec<ScannedRef> {
+fn scan_refs(text: &str, classify: impl Fn(&str) -> Verdict) -> Vec<ScannedRef> {
     let lines: Vec<&str> = text.lines().collect();
     crate::manifest_entry::parse(text)
         .entries
@@ -267,8 +265,8 @@ fn scan_refs(text: &str, classify: impl Fn(&str) -> (RefFate, Option<String>)) -
         .map(|e| {
             // Any entry spanning several physical lines must not be pruned:
             // removing its first line would leave the rest behind.
-            let (fate, renamed_to) = if e.is_multiline() {
-                (RefFate::Unjudged, None)
+            let verdict = if e.is_multiline() {
+                Verdict::of(RefFate::Unjudged)
             } else {
                 classify(&e.value)
             };
@@ -279,8 +277,9 @@ fn scan_refs(text: &str, classify: impl Fn(&str) -> (RefFate, Option<String>)) -
                 var: e.var,
                 reference: e.value,
                 line: line.to_string(),
-                fate,
-                renamed_to,
+                fate: verdict.fate,
+                renamed_to: verdict.renamed_to,
+                candidates: verdict.candidates,
             }
         })
         .collect()
@@ -296,6 +295,13 @@ pub fn dangling_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
 /// The renamed lines from a scan, in file order.
 pub fn renamed_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
     scan.iter().filter(|r| r.fate == RefFate::Renamed).collect()
+}
+
+/// The ambiguous lines from a scan, in file order.
+pub fn ambiguous_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
+    scan.iter()
+        .filter(|r| r.fate == RefFate::Ambiguous)
+        .collect()
 }
 
 /// The lines a scan could not judge on shape, in file order.
@@ -729,7 +735,7 @@ fn op_ref_fate(reference: &str, world: &OpWorld) -> RefFate {
 /// Classify every mapping line in a 1Password refs file against what this run
 /// fetched. No extra vault calls — same rule as Bitwarden, different world.
 pub fn scan_op_refs(text: &str, world: &OpWorld) -> Vec<ScannedRef> {
-    scan_refs(text, |value| (op_ref_fate(value, world), None))
+    scan_refs(text, |value| Verdict::of(op_ref_fate(value, world)))
 }
 
 /// Keyword of the comment recording a variable name `refresh` must never map
@@ -1099,19 +1105,19 @@ mod tests {
         assert_eq!(read_exclusions(text), vec!["*_USERNAME", "ZOOM_*"]);
     }
 
-    fn listing() -> Vec<(String, String, String)> {
-        vec![
-            (
-                "ea6db86f-0000-0000-0000-000000000001".into(),
-                "ASSEMBLY_AI_API_KEY".into(),
-                "tools".into(),
+    fn listing() -> BwListing {
+        BwListing::new(vec![
+            BwSecret::new(
+                "ea6db86f-0000-0000-0000-000000000001",
+                "ASSEMBLY_AI_API_KEY",
+                "tools",
             ),
-            (
-                "ea6db86f-0000-0000-0000-000000000002".into(),
-                "OPENAI_API_KEY".into(),
-                "tools".into(),
+            BwSecret::new(
+                "ea6db86f-0000-0000-0000-000000000002",
+                "OPENAI_API_KEY",
+                "tools",
             ),
-        ]
+        ])
     }
 
     #[test]
@@ -1149,6 +1155,73 @@ mod tests {
                 ("GONE_PROJECT", RefFate::Dangling),
             ]
         );
+    }
+
+    /// A duplicated key, a key containing `/`, and the same key in two
+    /// projects.
+    fn tricky_listing() -> BwListing {
+        BwListing::new(vec![
+            BwSecret::new("11111111-1111-1111-1111-111111111111", "DUP", "tools"),
+            BwSecret::new("22222222-2222-2222-2222-222222222222", "DUP", "tools"),
+            BwSecret::new("33333333-3333-3333-3333-333333333333", "a/b", "P"),
+            BwSecret::new("44444444-4444-4444-4444-444444444444", "SHARED", "P"),
+            BwSecret::new("55555555-5555-5555-5555-555555555555", "SHARED", "Q"),
+        ])
+    }
+
+    #[test]
+    fn an_ambiguous_ref_has_a_fate_of_its_own_and_is_never_edited() {
+        let text = "BY_NAME=name:DUP # uuid:11111111-1111-1111-1111-111111111111\n\
+                    BY_PROJECT=project:tools/DUP\n\
+                    ACROSS_PROJECTS=name:SHARED\n";
+        let scan = scan_bitwarden_refs(text, &tricky_listing());
+        assert!(
+            scan.iter().all(|r| r.fate == RefFate::Ambiguous),
+            "{scan:?}"
+        );
+        assert_eq!(ambiguous_refs(&scan).len(), 3);
+        let ids: Vec<&str> = scan[2].candidates.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "44444444-4444-4444-4444-444444444444",
+                "55555555-5555-5555-5555-555555555555"
+            ]
+        );
+        // Not dangling, not a rename — even with a recording naming one of them.
+        assert!(plan_ref_edits(&scan).is_empty());
+        assert!(excluded_refs(&scan, &["*".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn refresh_calls_a_line_resolvable_exactly_when_the_launch_finds_one_secret() {
+        let listing = tricky_listing();
+        for reference in [
+            "11111111-1111-1111-1111-111111111111",
+            "uuid:33333333-3333-3333-3333-333333333333",
+            "99999999-9999-9999-9999-999999999999",
+            "uuid:99999999-9999-9999-9999-999999999999",
+            "name:DUP",
+            "name:a/b",
+            "name:SHARED",
+            "name:GONE",
+            "project:tools/DUP",
+            "project:P/a/b",
+            "project:P/b",
+            "project:P/SHARED",
+            "project:Q/SHARED",
+            "project:R/SHARED",
+            "REPLACE_WITH_BITWARDEN_SECRET_UUID",
+            "00000000-0000-0000-0000-000000000000",
+            "name:",
+            "project:P",
+            "junk",
+        ] {
+            let scan = scan_bitwarden_refs(&format!("VAR={reference}\n"), &listing);
+            let refresh_ok = scan[0].fate == RefFate::Resolvable;
+            let launch_ok = crate::backend::id_from_listing(&listing, reference).is_ok();
+            assert_eq!(refresh_ok, launch_ok, "{reference}: {:?}", scan[0].fate);
+        }
     }
 
     #[test]
@@ -1334,11 +1407,7 @@ mod tests {
     #[test]
     fn a_renamed_secret_is_a_rename_and_not_a_dangling_ref() {
         let u = "00000000-0000-0000-0000-000000000001";
-        let secrets = vec![(
-            u.to_string(),
-            "ASSEMBLY_AI_API_KEY".to_string(),
-            "tools".to_string(),
-        )];
+        let secrets = BwListing::new(vec![BwSecret::new(u, "ASSEMBLY_AI_API_KEY", "tools")]);
         let text = format!("ASSEMBLY_API_KEY=name:ASSEMBLY_API_KEY # uuid:{u}\n");
         let scan = scan_bitwarden_refs(&text, &secrets);
         assert_eq!(scan.len(), 1);
@@ -1357,11 +1426,11 @@ mod tests {
     fn without_a_recorded_uuid_a_rename_is_still_only_dangling() {
         // No backfill (ADR-0004): lines already on disk carry no UUID, so they
         // keep exactly the behaviour ADR-0003 gave them.
-        let secrets = vec![(
-            "00000000-0000-0000-0000-000000000001".to_string(),
-            "ASSEMBLY_AI_API_KEY".to_string(),
-            "tools".to_string(),
-        )];
+        let secrets = BwListing::new(vec![BwSecret::new(
+            "00000000-0000-0000-0000-000000000001",
+            "ASSEMBLY_AI_API_KEY",
+            "tools",
+        )]);
         let scan = scan_bitwarden_refs("ASSEMBLY_API_KEY=name:ASSEMBLY_API_KEY\n", &secrets);
         assert_eq!(scan[0].fate, RefFate::Dangling);
         assert_eq!(dangling_refs(&scan).len(), 1);
@@ -1370,11 +1439,11 @@ mod tests {
     #[test]
     fn a_recorded_uuid_the_token_cannot_see_leaves_the_line_dangling() {
         // The secret is gone, not renamed. Deletion is still prune's case.
-        let secrets = vec![(
-            "00000000-0000-0000-0000-000000000009".to_string(),
-            "OPENAI_API_KEY".to_string(),
-            "tools".to_string(),
-        )];
+        let secrets = BwListing::new(vec![BwSecret::new(
+            "00000000-0000-0000-0000-000000000009",
+            "OPENAI_API_KEY",
+            "tools",
+        )]);
         let text = "GONE=name:GONE # uuid:00000000-0000-0000-0000-000000000001\n";
         let scan = scan_bitwarden_refs(text, &secrets);
         assert_eq!(scan[0].fate, RefFate::Dangling);
@@ -1385,18 +1454,10 @@ mod tests {
         // Two secrets, and the line resolves. Nothing is broken, so refresh has
         // no business editing it — `validate` stays silent about the mismatch
         // too, because the launch works (ADR-0004).
-        let secrets = vec![
-            (
-                "00000000-0000-0000-0000-000000000001".to_string(),
-                "A_KEY".to_string(),
-                "tools".to_string(),
-            ),
-            (
-                "00000000-0000-0000-0000-000000000002".to_string(),
-                "B_KEY".to_string(),
-                "tools".to_string(),
-            ),
-        ];
+        let secrets = BwListing::new(vec![
+            BwSecret::new("00000000-0000-0000-0000-000000000001", "A_KEY", "tools"),
+            BwSecret::new("00000000-0000-0000-0000-000000000002", "B_KEY", "tools"),
+        ]);
         let text = "A=name:A_KEY # uuid:00000000-0000-0000-0000-000000000002\n";
         let scan = scan_bitwarden_refs(text, &secrets);
         assert_eq!(scan[0].fate, RefFate::Resolvable);
