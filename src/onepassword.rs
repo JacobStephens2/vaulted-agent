@@ -3,7 +3,7 @@
 //! run expanded — and the one place a 1Password reference is parsed, rendered
 //! and looked up against them.
 //!
-//! The refresh scan, the Refs file writer, validate's blame, `edit-manifest`,
+//! The refresh scan, the Refs file writer, resolve-failure blame, `edit-manifest`,
 //! the doctor and the refresh gather step all ask this module, so none of them
 //! splits `op://` text by hand. It mirrors the **Bitwarden listing**
 //! (`src/bitwarden.rs`): a reader who knows one knows the other.
@@ -40,7 +40,7 @@ impl<'a> OpRef<'a> {
     /// Parse exactly the 3- and 4-component forms, every component non-empty.
     ///
     /// Shape only: a component `op` cannot read still parses, so the writer's
-    /// canonical form and validate's blame keep working on it. Whether `op`
+    /// canonical form and resolve-failure blame keep working on it. Whether `op`
     /// can read it is `is_readable`'s question.
     pub fn parse(reference: &'a str) -> Option<OpRef<'a>> {
         let rest = reference.strip_prefix("op://")?;
@@ -138,6 +138,48 @@ pub fn is_readable(reference: &str) -> bool {
 /// changes.
 pub fn section_is_default(section: &str) -> bool {
     section.trim().eq_ignore_ascii_case("add more")
+}
+
+/// The Manifest entries an `op inject` failure names, in Manifest order.
+///
+/// `op inject` fails the whole file at the first reference it cannot read and
+/// reports the item, not the variable. The operator needs the variable: that is
+/// what they will grep the manifest for. Matching the item name back to the
+/// entries that use it turns "could not find item X" into the two or three
+/// entries actually at fault, without a round trip per reference.
+///
+/// `entries` are the resolve's own parse, values as the launch reads them:
+/// quotes gone, multi-line values whole.
+pub fn implicated_entries(entries: &[(String, String)], message: &str) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .filter(|(_, value)| {
+            // The item component is what op names when it cannot resolve one.
+            OpRef::parse(value).is_some_and(|r| names_item(message, r.item))
+        })
+        .cloned()
+        .collect()
+}
+
+/// True when `message` names this item the way `op` does: "item <title>", not
+/// a bare substring of the title, so a short name does not hitch a ride on a
+/// longer title's error.
+fn names_item(message: &str, item: &str) -> bool {
+    let needle = format!("item {item}");
+    let bytes = message.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = message[start..].find(&needle) {
+        let after = start + rel + needle.len();
+        let boundary = match bytes.get(after) {
+            None => true,
+            Some(b) => !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_',
+        };
+        if boundary {
+            return true;
+        }
+        start += rel + 1;
+    }
+    false
 }
 
 /// True when a mapping still has the name `refresh` generated before it learned
@@ -683,6 +725,38 @@ fn section_name(item: &serde_json::Value, field: &serde_json::Value) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_inject_failure_implicates_entries_as_the_launch_reads_them() {
+        let entries = crate::config::parse_dotenv_pairs(
+            "Q=\"op://V/gone/f\"\nPEM=\"x\nHIDDEN=op://V/gone/g\n\"\nOK=op://V/kept/f\n",
+        )
+        .unwrap();
+        let implicated = implicated_entries(&entries, "could not find item gone in vault V");
+        assert_eq!(
+            implicated,
+            vec![("Q".to_string(), "op://V/gone/f".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_short_item_title_does_not_match_a_longer_titles_error() {
+        let entries = vec![
+            ("SHORT".to_string(), "op://V/api/key".to_string()),
+            ("LONG".to_string(), "op://V/api-v2/key".to_string()),
+            ("SPACED".to_string(), "op://V/api v2/key".to_string()),
+        ];
+        let blamed = |msg: &str| -> Vec<String> {
+            implicated_entries(&entries, msg)
+                .into_iter()
+                .map(|(var, _)| var)
+                .collect()
+        };
+        assert_eq!(blamed("could not find item api-v2 in vault V"), ["LONG"]);
+        assert_eq!(blamed("could not find item api in vault V"), ["SHORT"]);
+        assert_eq!(blamed("item api v2: not found"), ["SHORT", "SPACED"]);
+        assert!(blamed("authentication failed").is_empty());
+    }
 
     // ---- the reference ----
 

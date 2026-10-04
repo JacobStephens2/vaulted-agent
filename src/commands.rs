@@ -302,8 +302,11 @@ fn format_validate_ok(resolved: Option<usize>) -> String {
     }
 }
 
-fn print_validate_blame(manifest: &Path, error: &str, to_stdout: bool) {
-    let blamed = crate::validate::blame_manifest_lines(manifest, error);
+fn print_validate_blame(error: &Error, to_stdout: bool) {
+    let Error::Resolve(failure) = error else {
+        return;
+    };
+    let blamed = failure.blame_lines();
     if blamed.is_empty() {
         return;
     }
@@ -312,7 +315,7 @@ fn print_validate_blame(manifest: &Path, error: &str, to_stdout: bool) {
             println!("    {b}");
         }
     } else {
-        eprintln!("{}: could not resolve:", manifest.display());
+        eprintln!("{}: could not resolve:", failure.manifest.display());
         for b in &blamed {
             eprintln!("    {b}");
         }
@@ -438,7 +441,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
                             Ok(n) => println!("{}", format_validate_ok(n)),
                             Err(e) => {
                                 println!("FAIL ({e})");
-                                print_validate_blame(man_path, &format!("{e}"), true);
+                                print_validate_blame(&e, true);
                                 err = true;
                             }
                         }
@@ -476,7 +479,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
                             Ok(())
                         }
                         Err(e) => {
-                            print_validate_blame(&man_path, &format!("{e}"), false);
+                            print_validate_blame(&e, false);
                             Err(e)
                         }
                     }
