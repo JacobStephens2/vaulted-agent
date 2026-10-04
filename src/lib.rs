@@ -13,6 +13,7 @@ pub mod launch;
 pub mod manifest_entry;
 pub mod onepassword;
 pub mod privilege;
+mod refresh;
 pub mod refs;
 pub mod resume;
 pub mod route;

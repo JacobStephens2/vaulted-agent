@@ -286,137 +286,6 @@ fn scan_refs(text: &str, classify: impl Fn(&str) -> Verdict) -> Vec<ScannedRef> 
         .collect()
 }
 
-/// The dangling lines from a scan, in file order.
-pub fn dangling_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
-    scan.iter()
-        .filter(|r| r.fate == RefFate::Dangling)
-        .collect()
-}
-
-/// The renamed lines from a scan, in file order.
-pub fn renamed_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
-    scan.iter().filter(|r| r.fate == RefFate::Renamed).collect()
-}
-
-/// The ambiguous lines from a scan, in file order.
-pub fn ambiguous_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
-    scan.iter()
-        .filter(|r| r.fate == RefFate::Ambiguous)
-        .collect()
-}
-
-/// The lines a scan could not judge on shape, in file order.
-pub fn unjudged_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
-    scan.iter()
-        .filter(|r| r.fate == RefFate::Unjudged)
-        .collect()
-}
-
-/// The unchecked lines from a scan, in file order.
-pub fn unchecked_refs(scan: &[ScannedRef]) -> Vec<&ScannedRef> {
-    scan.iter()
-        .filter(|r| r.fate == RefFate::Unchecked)
-        .collect()
-}
-
-/// Mappings whose variable name matches a recorded exclusion but which resolve
-/// anyway, in file order.
-///
-/// Reported, never pruned (ADR-0005). An exclusion says what `refresh` may
-/// **add**; the mapping is still a working line, and removing a working line is
-/// the one thing prune promises not to do.
-///
-/// Only lines shown to resolve. Every other fate already has a heading of its
-/// own, and each says something this one would contradict — a dangling line is
-/// about to go, and an unchecked or unjudged line was never shown to resolve at
-/// all. One line, one heading, one fate.
-pub fn excluded_refs<'a>(scan: &'a [ScannedRef], patterns: &[String]) -> Vec<&'a ScannedRef> {
-    scan.iter()
-        .filter(|r| r.fate == RefFate::Resolvable && is_excluded(patterns, &r.var))
-        .collect()
-}
-
-/// Everything a scan says this manifest needs, as one ordered edit list.
-///
-/// Repairs come first so a rename is fixed before anything is dropped, and both
-/// kinds travel together: one list means one write, so a run cannot leave the
-/// file half-corrected.
-pub fn plan_ref_edits(scan: &[ScannedRef]) -> Vec<(String, RefEdit)> {
-    let mut edits: Vec<(String, RefEdit)> = Vec::new();
-    for r in renamed_refs(scan) {
-        if let Some(new) = r.repaired_line() {
-            edits.push((r.line.clone(), RefEdit::Rewrite(new)));
-        }
-    }
-    for r in dangling_refs(scan) {
-        edits.push((r.line.clone(), RefEdit::Remove));
-    }
-    edits
-}
-
-/// A planned or applied edit list in the operator's terms — a removal and a
-/// repair are not the same act, and a prompt that blurs them is asking for a
-/// wrong `y`.
-pub fn describe_ref_edits(edits: &[(String, RefEdit)]) -> String {
-    let repairs = edits
-        .iter()
-        .filter(|(_, e)| matches!(e, RefEdit::Rewrite(_)))
-        .count();
-    let removals = edits.len() - repairs;
-    match (removals, repairs) {
-        (0, n) => format!("Repair {n} renamed mapping(s)"),
-        (n, 0) => format!("Remove {n} dangling mapping(s)"),
-        (n, m) => format!("Remove {n} dangling and repair {m} renamed mapping(s)"),
-    }
-}
-
-/// What `refresh` should do about the changes its scan wants to make.
-///
-/// Named for the change in general, not for pruning: the `--prune` flag now
-/// gates repairs as well as removals (ADR-0004), and `CONTEXT.md` keeps
-/// **prune** meaning removal alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefFixChoice {
-    /// Nothing to change, so nothing to decide.
-    NothingPending,
-    /// `--replace` is about to regenerate the file, which prunes by
-    /// construction. `--replace --prune` lands here: a harmless no-op rather
-    /// than an error.
-    ReplaceRegenerates,
-    /// `--prune`: make the changes.
-    Apply,
-    /// A TTY is present: ask, defaulting to no.
-    Ask,
-    /// Non-interactive without `--prune`: report and change nothing.
-    Report,
-}
-
-/// The decision, kept out of the I/O so it can be stated as a table.
-///
-/// `setup` never calls this — fixing a manifest is maintenance, and `refresh`
-/// is the maintenance verb (ADR-0003).
-pub fn ref_fix_choice(
-    pending: usize,
-    prune_flag: bool,
-    mode_is_replace: bool,
-    interactive: bool,
-) -> RefFixChoice {
-    if pending == 0 {
-        return RefFixChoice::NothingPending;
-    }
-    if mode_is_replace {
-        return RefFixChoice::ReplaceRegenerates;
-    }
-    if prune_flag {
-        return RefFixChoice::Apply;
-    }
-    if interactive {
-        RefFixChoice::Ask
-    } else {
-        RefFixChoice::Report
-    }
-}
-
 /// What `refresh` wants to do to one physical line of a refs file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefEdit {
@@ -734,7 +603,10 @@ mod tests {
                     ASSEMBLY_API_KEY=name:ASSEMBLY_API_KEY\n\
                     ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY\n";
         let scan = scan_bitwarden_refs(text, &listing());
-        let dangling = dangling_refs(&scan);
+        let dangling: Vec<&ScannedRef> = scan
+            .iter()
+            .filter(|r| r.fate == RefFate::Dangling)
+            .collect();
         assert_eq!(dangling.len(), 1);
         assert_eq!(dangling[0].line, "ASSEMBLY_API_KEY=name:ASSEMBLY_API_KEY");
         assert_eq!(dangling[0].var, "ASSEMBLY_API_KEY");
@@ -784,7 +656,6 @@ mod tests {
             scan.iter().all(|r| r.fate == RefFate::Ambiguous),
             "{scan:?}"
         );
-        assert_eq!(ambiguous_refs(&scan).len(), 3);
         let ids: Vec<&str> = scan[2].candidates.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -793,9 +664,6 @@ mod tests {
                 "55555555-5555-5555-5555-555555555555"
             ]
         );
-        // Not dangling, not a rename — even with a recording naming one of them.
-        assert!(plan_ref_edits(&scan).is_empty());
-        assert!(excluded_refs(&scan, &["*".to_string()]).is_empty());
     }
 
     #[test]
@@ -840,8 +708,7 @@ mod tests {
                     EMPTY_NAME=name:\n\
                     HALF_PROJECT=project:tools\n";
         let scan = scan_bitwarden_refs(text, &secrets);
-        assert!(dangling_refs(&scan).is_empty(), "{scan:?}");
-        assert!(scan.iter().all(|r| r.fate == RefFate::Unjudged));
+        assert!(scan.iter().all(|r| r.fate == RefFate::Unjudged), "{scan:?}");
     }
 
     #[test]
@@ -869,8 +736,9 @@ mod tests {
         fs::write(&p, before).unwrap();
 
         let scan = scan_bitwarden_refs(before, &listing());
-        let doomed: Vec<(String, RefEdit)> = dangling_refs(&scan)
+        let doomed: Vec<(String, RefEdit)> = scan
             .iter()
+            .filter(|r| r.fate == RefFate::Dangling)
             .map(|r| (r.line.clone(), RefEdit::Remove))
             .collect();
         assert_eq!(
@@ -923,25 +791,6 @@ mod tests {
         let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "prune widened the manifest to {mode:o}");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn prune_decision_table() {
-        // --prune removes; a TTY asks; neither reports and changes nothing.
-        assert_eq!(ref_fix_choice(2, true, false, false), RefFixChoice::Apply);
-        assert_eq!(ref_fix_choice(2, false, false, true), RefFixChoice::Ask);
-        assert_eq!(ref_fix_choice(2, false, false, false), RefFixChoice::Report);
-        // Nothing dangling is nothing to decide.
-        assert_eq!(
-            ref_fix_choice(0, true, false, true),
-            RefFixChoice::NothingPending
-        );
-        // --replace already prunes by construction, so --replace --prune is a
-        // harmless no-op rather than an error.
-        assert_eq!(
-            ref_fix_choice(3, true, true, true),
-            RefFixChoice::ReplaceRegenerates
-        );
     }
 
     // ---- source UUIDs on generated lines (issue #82, ADR-0004) ----
@@ -1018,8 +867,6 @@ mod tests {
         assert_eq!(scan.len(), 1);
         assert_eq!(scan[0].fate, RefFate::Renamed);
         assert_eq!(scan[0].renamed_to.as_deref(), Some("ASSEMBLY_AI_API_KEY"));
-        // A rename is not prunable: it is repairable, which is strictly better.
-        assert!(dangling_refs(&scan).is_empty());
         // The repair keeps the VAR, so a harness `alias =` reading it survives.
         assert_eq!(
             scan[0].repaired_line().unwrap(),
@@ -1038,7 +885,6 @@ mod tests {
         )]);
         let scan = scan_bitwarden_refs("ASSEMBLY_API_KEY=name:ASSEMBLY_API_KEY\n", &secrets);
         assert_eq!(scan[0].fate, RefFate::Dangling);
-        assert_eq!(dangling_refs(&scan).len(), 1);
     }
 
     #[test]
@@ -1162,22 +1008,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_exclusion_does_not_make_a_working_mapping_prunable() {
-        let text = "DB_EXAMPLE_COM_PASSWORD=op://Orchestrator/db.example.com/password\n\
-                    GONE=op://Orchestrator/vanished/password\n";
-        let scan = scan_op_refs(text, &op_listing());
-        let patterns = vec!["*_PASSWORD".to_string(), "GONE".to_string()];
-
-        // Reported under its own heading, and absent from the edit list.
-        let excluded = excluded_refs(&scan, &patterns);
-        assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].var, "DB_EXAMPLE_COM_PASSWORD");
-        let edits = plan_ref_edits(&scan);
-        assert_eq!(edits.len(), 1);
-        assert!(edits[0].0.starts_with("GONE="));
-    }
-
     // ---- quoted and multi-line entries (issue #112) ----
 
     #[test]
@@ -1191,21 +1021,6 @@ mod tests {
         let scan = scan_bitwarden_refs("A=\"name:GONE\"\n", &listing());
         assert_eq!(scan[0].fate, RefFate::Dangling);
         assert_eq!(scan[0].line, "A=\"name:GONE\"");
-    }
-
-    #[test]
-    fn a_quoted_dangling_ref_is_pruned_as_one_physical_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("bws.refs");
-        let before = "KEEP=name:OPENAI_API_KEY\nA=\"name:GONE\"\nB=2\n";
-        fs::write(&p, before).unwrap();
-        let edits = plan_ref_edits(&scan_bitwarden_refs(before, &listing()));
-        assert_eq!(edits.len(), 1, "{edits:?}");
-        edit_refs_lines(&p, &edits).unwrap();
-        assert_eq!(
-            fs::read_to_string(&p).unwrap(),
-            "KEEP=name:OPENAI_API_KEY\nB=2\n"
-        );
     }
 
     #[test]
