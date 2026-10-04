@@ -3,10 +3,10 @@
 //! Rust is the shipped runtime (v0.4.0+). See MIGRATION.md.
 
 use std::env;
-use std::ffi::OsStr;
 use std::path::Path;
 use std::process;
 
+use vaulted_agent::auth::TokenSource;
 use vaulted_agent::commands;
 use vaulted_agent::config::Paths;
 use vaulted_agent::Error;
@@ -71,15 +71,17 @@ fn main() {
             // into a request for a vault token, which then failed with
             // "auth_mode=prompt needs a terminal" -- an error pointing nowhere
             // near the cause, and the prompt silently dropped. Prompt auth stays
-            // reachable in this mode through VAULTED_AGENT_PROMPT_AUTH=1.
-            let force =
-                env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(OsStr::new("1"));
+            // reachable in this mode through VAULTED_AGENT_PROMPT_AUTH=1, which
+            // the Token source reads.
+            let token_source = TokenSource::from_env(&paths, false);
             let mut extra: Vec<String> = argv.iter().skip(1).cloned().collect();
             // A leading `--` stays an explicit "the rest is the agent's".
             if extra.first().is_some_and(|s| s == "--") {
                 extra.remove(0);
             }
-            if let Err(e) = commands::cmd_launch_harness(&paths, harness, &extra, force, None) {
+            if let Err(e) =
+                commands::cmd_launch_harness(&paths, harness, &extra, token_source, None)
+            {
                 eprintln!("vaulted-agent: {e}");
                 process::exit(1);
             }
@@ -111,17 +113,14 @@ fn main() {
     // Pull launcher flags only until the first non-flag token (harness or
     // management command). Flags after that belong to the agent (e.g.
     // `va claude --version`, `va claude -p "explain this"`).
-    let mut force_prompt = false;
-    if env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        force_prompt = true;
-    }
+    let mut prompt_flag = false;
     let mut harness_flag: Option<String> = None;
     let mut manifest_flag: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut args = argv.iter().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
-            "-p" | "--prompt-auth" => force_prompt = true,
+            "-p" | "--prompt-auth" => prompt_flag = true,
             "-m" | "--manifest" => {
                 let v = args.next().cloned().unwrap_or_else(|| {
                     eprintln!("vaulted-agent: -m requires a value");
@@ -219,7 +218,10 @@ fn main() {
                 eprintln!("vaulted-agent: could not check as the service user: {e}");
             }
         }
-        let code = dispatch_mgmt(&paths, &name, &rest, force_prompt, manifest_flag.as_deref());
+        // `-p` in front of a management command reaches it the same way it
+        // reaches a harness launch: through the one Token source.
+        let token_source = TokenSource::from_env(&paths, prompt_flag);
+        let code = dispatch_mgmt(&paths, &name, &rest, token_source, manifest_flag.as_deref());
         process::exit(code);
     }
 
@@ -231,8 +233,9 @@ fn main() {
         process::exit(1);
     }
 
+    let token_source = TokenSource::from_env(&paths, prompt_flag);
     if let Err(e) =
-        commands::cmd_launch_harness(&paths, &name, &rest, force_prompt, manifest_flag.as_deref())
+        commands::cmd_launch_harness(&paths, &name, &rest, token_source, manifest_flag.as_deref())
     {
         eprintln!("vaulted-agent: {e}");
         if matches!(e, Error::UnknownHarness { .. }) {
@@ -246,7 +249,7 @@ fn dispatch_mgmt(
     paths: &Paths,
     name: &str,
     rest: &[String],
-    force_prompt: bool,
+    token_source: TokenSource,
     manifest_override: Option<&str>,
 ) -> i32 {
     let result = match name {
@@ -260,16 +263,16 @@ fn dispatch_mgmt(
         }
         "auth-mode" => commands::cmd_auth_mode(paths, rest),
         "doctor" => commands::cmd_doctor(paths),
-        "secrets" => commands::cmd_secrets(paths, rest),
-        "setup" => commands::cmd_setup(paths, rest),
-        "refresh" => commands::cmd_refresh(paths, rest),
+        "secrets" => commands::cmd_secrets(paths, rest, token_source),
+        "setup" => commands::cmd_setup(paths, rest, token_source),
+        "refresh" => commands::cmd_refresh(paths, rest, token_source),
         "uninstall" => commands::cmd_uninstall(rest),
         "update" => vaulted_agent::update::cmd_update(rest),
-        "run" => commands::cmd_run(paths, rest, force_prompt),
+        "run" => commands::cmd_run(paths, rest, token_source),
         "edit-manifest" => commands::cmd_edit_manifest(paths, rest),
         "pick" => match commands::cmd_pick(paths) {
             Ok(chosen) => {
-                commands::cmd_launch_harness(paths, &chosen, rest, force_prompt, manifest_override)
+                commands::cmd_launch_harness(paths, &chosen, rest, token_source, manifest_override)
             }
             Err(e) => Err(e),
         },

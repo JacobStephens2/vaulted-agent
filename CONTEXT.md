@@ -27,12 +27,13 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Manager token** | Vault *manager* credential (`BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`). Used only to resolve secrets; must never appear in the child agent env. |
 | **Secret value** | A resolved secret destined for the child environment. Redacted on Display/Debug. |
 | **Agent-owned credential** | Authentication state created, stored, and consumed by the launched agent itself. Outside launcher manifest resolution and rotation; distinct from a Manager token or an injected Secret value. |
-| **Auth mode** | How the manager token is obtained: `file` (token file on disk) or `prompt` (TTY each launch). |
+| **Auth mode** | How the manager token is obtained: `file` (token file on disk) or `prompt` (TTY each launch). One input to the Token source, which settles token loading for each invocation. |
+| **Token source** | How one invocation obtains a Manager token (manager-token env var, else prompt when forced or auth mode is `prompt`, else the token file, else a one-shot TTY prompt), settled once from the environment, the `-p` flag and the configured Auth mode. Distinct from Token capture, which is `setup`-only and writes the file. |
 | **Token capture** | `setup`-only path that obtains a manager token (TTY paste, or piped stdin under `--set-token`), verifies it against the backend, then writes the token file. Distinct from load: never runs on the launch path, and never fires for an unreadable existing token file (invariant 6). |
 | **Operator identity** | The human on whose behalf a Harness is launched; determines personal agent state and source-control attribution. Distinct from the Service user that executes the process. |
 | **Service user** | Optional dedicated OS account; launcher re-execs via `sudo -u` so the agent runs as that user. |
 | **Conductor link** | Symlink `*-conductor` → fixed harness name; `-H` must not override (narrow entitlement). |
-| **Launch path** | scrub → resolve → drop manager token → exec (story #44: keep small and auditable). |
+| **Launch path** | scrub → resolve (loading the manager token through the Token source) → drop manager token → exec (story #44: keep small and auditable). |
 | **Launch plan** | Pure result of the launch path before handoff: program, agent argv, workdir, child env. Tests assert the plan without process exec. |
 | **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets (after aliases), then harness `env=` non-secret pairs and optional `bin`→PATH. |
 | **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |

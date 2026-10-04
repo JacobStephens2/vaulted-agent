@@ -1,4 +1,4 @@
-//! Load vault manager tokens from env, file, or TTY prompt.
+//! Load vault manager tokens from env, file, or TTY prompt (the Token source).
 
 use std::fs;
 use std::io::{self, Write};
@@ -245,7 +245,7 @@ fn prompt_token(kind: TokenKind) -> Result<ManagerToken> {
 //
 // `setup`-only path that obtains a manager token, verifies it against the
 // backend, then writes the token file. Deliberately not reachable from
-// `load_manager_token`: that runs on the launch path, which stays small and
+// `TokenSource::load`: that runs on the launch path, which stays small and
 // auditable and must never gain a credential-writing mode.
 // ---------------------------------------------------------------------------
 
@@ -563,25 +563,104 @@ fn capture_from_prompt(
     unreachable!("prompt loop returns on every path")
 }
 
-/// force_prompt: -p / --prompt-auth
-pub fn load_manager_token(
-    paths: &Paths,
+// ---------------------------------------------------------------------------
+// Token source (issue #124)
+//
+// How one invocation obtains a manager token, settled once from the
+// environment, the `-p` flag and the configured auth mode. The decision is a
+// pure function of those inputs; `TokenSource::from_env` is the only place that
+// reads `VAULTED_AGENT_AUTH_MODE` / `VAULTED_AGENT_PROMPT_AUTH`.
+// ---------------------------------------------------------------------------
+
+/// Where `TokenSource::load` takes the token from. Pure output of `route`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenRoute {
+    /// The manager-token env var is exported: it wins over everything.
+    Env,
+    /// Forced (`-p`, `VAULTED_AGENT_PROMPT_AUTH=1`) or auth mode `prompt`.
+    Prompt,
+    /// The token file, else a one-shot TTY prompt when the file is missing.
+    File,
+}
+
+/// How this invocation obtains a Manager token. Built once per invocation at
+/// the entry point and handed to every command that loads one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenSource {
     mode: AuthMode,
-    kind: TokenKind,
     force_prompt: bool,
-) -> Result<ManagerToken> {
-    let key = kind.env_var();
-    if let Ok(v) = std::env::var(key) {
-        if !v.is_empty() {
-            return Ok(ManagerToken::new(v));
+}
+
+impl TokenSource {
+    /// The pure precedence step. `env_mode` is `VAULTED_AGENT_AUTH_MODE`,
+    /// `env_prompt` is `VAULTED_AGENT_PROMPT_AUTH`, `prompt_flag` is `-p` /
+    /// `--prompt-auth`, and `configured` is the auth mode in `defaults.conf`.
+    pub fn decide(
+        env_mode: Option<&str>,
+        env_prompt: Option<&str>,
+        prompt_flag: bool,
+        configured: AuthMode,
+    ) -> Self {
+        let mode = match env_mode {
+            Some("prompt") => AuthMode::Prompt,
+            Some("file") => AuthMode::File,
+            _ => configured,
+        };
+        Self {
+            mode,
+            force_prompt: prompt_flag || env_prompt == Some("1"),
         }
     }
 
-    let prompt = force_prompt || mode == AuthMode::Prompt;
-    if prompt {
-        return prompt_token(kind);
+    /// Thin adapter: read the real environment and `defaults.conf`.
+    pub fn from_env(paths: &Paths, prompt_flag: bool) -> Self {
+        let env_mode = std::env::var("VAULTED_AGENT_AUTH_MODE").ok();
+        let env_prompt = std::env::var("VAULTED_AGENT_PROMPT_AUTH").ok();
+        Self::decide(
+            env_mode.as_deref(),
+            env_prompt.as_deref(),
+            prompt_flag,
+            config::load_auth_mode(paths),
+        )
     }
 
+    /// The same prompt forcing under an auth mode `setup` just had the
+    /// operator choose.
+    pub fn with_auth_mode(self, mode: AuthMode) -> Self {
+        Self { mode, ..self }
+    }
+
+    /// Effective auth mode for this invocation (env override, else config).
+    pub fn auth_mode(&self) -> AuthMode {
+        self.mode
+    }
+
+    /// Pure: where the token comes from, given whether its env var is set.
+    pub(crate) fn route(&self, env_token: bool) -> TokenRoute {
+        if env_token {
+            TokenRoute::Env
+        } else if self.force_prompt || self.mode == AuthMode::Prompt {
+            TokenRoute::Prompt
+        } else {
+            TokenRoute::File
+        }
+    }
+
+    /// Load a manager token of `kind` along this invocation's route.
+    pub fn load(&self, paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
+        let key = kind.env_var();
+        let env_token = std::env::var(key).unwrap_or_default();
+        match self.route(!env_token.is_empty()) {
+            TokenRoute::Env => Ok(ManagerToken::new(env_token)),
+            TokenRoute::Prompt => prompt_token(kind),
+            TokenRoute::File => load_from_file(paths, kind),
+        }
+    }
+}
+
+/// The token file, else a one-shot TTY prompt when the file is missing.
+fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
+    let key = kind.env_var();
     let path = kind.file(paths);
     match read_token_file(path, key) {
         Ok(Some(t)) => return Ok(t),
@@ -598,10 +677,7 @@ pub fn load_manager_token(
     if tty_usable() {
         eprintln!(
             "vaulted-agent: {} missing {}",
-            match kind {
-                TokenKind::Bws => "bitwarden",
-                TokenKind::Op => "onepassword",
-            },
+            kind.backend_name(),
             path.display()
         );
         return prompt_token(kind);
@@ -922,6 +998,89 @@ mod tests {
             .shape_problem("my personal password")
             .is_some());
         assert!(TokenKind::Op.shape_problem("eyJhbGci").is_some());
+    }
+
+    #[test]
+    fn env_token_wins_over_every_prompt_route() {
+        for flag in [false, true] {
+            for configured in [AuthMode::File, AuthMode::Prompt] {
+                let ts = TokenSource::decide(Some("prompt"), Some("1"), flag, configured);
+                assert_eq!(ts.route(true), TokenRoute::Env);
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_flag_forces_prompt_over_file_mode() {
+        let ts = TokenSource::decide(None, None, true, AuthMode::File);
+        assert_eq!(ts.route(false), TokenRoute::Prompt);
+        assert_eq!(ts.auth_mode(), AuthMode::File);
+    }
+
+    #[test]
+    fn prompt_env_forces_prompt_only_when_exactly_one() {
+        assert_eq!(
+            TokenSource::decide(None, Some("1"), false, AuthMode::File).route(false),
+            TokenRoute::Prompt
+        );
+        for other in ["0", "", "yes", "true"] {
+            assert_eq!(
+                TokenSource::decide(None, Some(other), false, AuthMode::File).route(false),
+                TokenRoute::File,
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_prompt_mode_prompts() {
+        let ts = TokenSource::decide(None, None, false, AuthMode::Prompt);
+        assert_eq!(ts.auth_mode(), AuthMode::Prompt);
+        assert_eq!(ts.route(false), TokenRoute::Prompt);
+    }
+
+    #[test]
+    fn file_mode_without_forcing_reads_the_file() {
+        let ts = TokenSource::decide(None, None, false, AuthMode::File);
+        assert_eq!(ts.auth_mode(), AuthMode::File);
+        assert_eq!(ts.route(false), TokenRoute::File);
+    }
+
+    #[test]
+    fn env_auth_mode_overrides_configured() {
+        assert_eq!(
+            TokenSource::decide(Some("prompt"), None, false, AuthMode::File).auth_mode(),
+            AuthMode::Prompt
+        );
+        assert_eq!(
+            TokenSource::decide(Some("file"), None, false, AuthMode::Prompt).auth_mode(),
+            AuthMode::File
+        );
+        assert_eq!(
+            TokenSource::decide(Some("file"), None, false, AuthMode::Prompt).route(false),
+            TokenRoute::File
+        );
+    }
+
+    #[test]
+    fn unknown_env_auth_mode_falls_back_to_configured() {
+        for configured in [AuthMode::File, AuthMode::Prompt] {
+            for junk in ["", "disk", "PROMPT"] {
+                assert_eq!(
+                    TokenSource::decide(Some(junk), None, false, configured).auth_mode(),
+                    configured,
+                    "{junk:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forced_prompt_survives_setup_mode_choice() {
+        let ts =
+            TokenSource::decide(None, None, true, AuthMode::Prompt).with_auth_mode(AuthMode::File);
+        assert_eq!(ts.auth_mode(), AuthMode::File);
+        assert_eq!(ts.route(false), TokenRoute::Prompt);
     }
 
     #[test]
