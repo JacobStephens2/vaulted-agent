@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::bitwarden::BwRef;
 use crate::config::Backend;
 use crate::error::{Error, Result};
+use crate::onepassword::{self, OpRef};
 
 pub fn is_uuid(s: &str) -> bool {
     let b = s.as_bytes();
@@ -210,15 +211,10 @@ pub fn blame_manifest_lines(manifest: &Path, error: &str) -> Vec<String> {
     // Values as the launch read them: quotes gone, multi-line values whole.
     for entry in crate::manifest_entry::parse(&text).entries {
         let (var, value) = (entry.var.as_str(), entry.value.as_str());
-        if !value.starts_with("op://") {
-            continue;
-        }
         // The item component is what op names when it cannot resolve one.
-        let parts: Vec<&str> = value[5..].split('/').collect();
-        if parts.len() < 2 || parts[1].is_empty() {
+        let Some(OpRef { item, .. }) = OpRef::parse(value) else {
             continue;
-        }
-        let item = parts[1];
+        };
         // Match "item <title>" as op phrases it, not a bare substring of the
         // title: a short name must not hitch a ride on a longer title's error.
         if error_names_op_item(error, item) {
@@ -286,7 +282,7 @@ pub fn manifest_problems(text: &str) -> Vec<String> {
         } else {
             seen.push(var);
         }
-        if value.starts_with("op://") && !crate::refs::op_reference_is_parseable(value) {
+        if value.starts_with("op://") && !onepassword::is_readable(value) {
             problems.push(format!(
                 "line {n}: {var} has a reference op cannot parse ({value}) \u{2014} \
                  one such reference aborts the whole manifest, not just this line"

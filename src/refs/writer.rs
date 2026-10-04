@@ -17,6 +17,7 @@ use super::{
 };
 use crate::bitwarden::{BwListing, BwRef, BwSecret};
 use crate::error::{Error, Result};
+use crate::onepassword::OpRef;
 
 /// Merge into what is there, or regenerate the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,29 +311,18 @@ fn text_has_var(text: &str, var: &str) -> bool {
         .any(|e| e.var == var)
 }
 
-/// A reference reduced to the field it identifies, so a generated mapping can
-/// be recognised in a manifest an operator wrote by hand.
-///
-/// `op://V/eta-factory-github-app/add more/app-id` and
-/// `op://V/eta-factory-github-app/app-id` are the same secret: a default
-/// section groups fields that were never grouped, and `op` resolves the
-/// unqualified form to the field inside it — checked against a real vault, by
-/// launching with both forms mapped and observing one value under both names.
+/// A reference reduced to the field it identifies (`OpRef::canonical`), so a
+/// generated mapping can be recognised in a manifest an operator wrote by hand.
 ///
 /// Comparing the strings byte for byte instead reports "not present" for a
-/// field the manifest already maps, and merge appends a second mapping under
-/// the generated name. On a 60-item vault that was 81 duplicate variables,
-/// every one of them a live credential in the agent's environment twice.
+/// field the manifest already maps under the other form, and merge appends a
+/// second mapping under the generated name. On a 60-item vault that was 81
+/// duplicate variables, every one of them a live credential in the agent's
+/// environment twice.
 fn canonical_reference(reference: &str) -> String {
-    let Some(rest) = reference.strip_prefix("op://") else {
-        return reference.to_string();
-    };
-    let parts: Vec<&str> = rest.split('/').collect();
-    match parts.as_slice() {
-        [vault, item, section, field] if super::op_section_is_default(section) => {
-            format!("op://{vault}/{item}/{field}")
-        }
-        _ => reference.to_string(),
+    match OpRef::parse(reference) {
+        Some(r) => r.canonical().to_string(),
+        None => reference.to_string(),
     }
 }
 

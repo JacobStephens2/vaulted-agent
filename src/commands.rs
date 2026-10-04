@@ -18,6 +18,7 @@ use crate::config::{
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
 use crate::launch::{self, LaunchOpts};
+use crate::onepassword::{self, OpListing, OpRef};
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
@@ -821,9 +822,7 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                     .and_then(|t| parse_dotenv_keys(&t).ok())
                     .map(|m| {
                         m.into_iter()
-                            .filter(|(_, v)| {
-                                v.starts_with("op://") && !refs::op_reference_is_parseable(v)
-                            })
+                            .filter(|(_, v)| v.starts_with("op://") && !onepassword::is_readable(v))
                             .map(|(k, _)| k)
                             .collect()
                     })
@@ -872,9 +871,10 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                     .map(|m| {
                         m.into_iter()
                             .filter(|(k, v)| {
-                                v.starts_with("op://")
-                                    && v.split('/').any(refs::op_section_is_default)
-                                    && refs::name_folds_default_section(k)
+                                OpRef::parse(v)
+                                    .and_then(|r| r.section)
+                                    .is_some_and(onepassword::section_is_default)
+                                    && onepassword::name_folds_default_section(k)
                             })
                             .map(|(k, _)| k)
                             .collect()
@@ -1256,14 +1256,14 @@ enum Fetched {
     Bitwarden(BwListing),
     /// The item listing plus the fields of the items this run expanded, and
     /// nothing more (ADR-0005).
-    OnePassword(refs::OpWorld),
+    OnePassword(OpListing),
 }
 
 impl Fetched {
     fn scan(&self, text: &str) -> Vec<refs::ScannedRef> {
         match self {
             Fetched::Bitwarden(listing) => refs::scan_bitwarden_refs(text, listing),
-            Fetched::OnePassword(world) => refs::scan_op_refs(text, world),
+            Fetched::OnePassword(listing) => refs::scan_op_refs(text, listing),
         }
     }
 }
@@ -1706,18 +1706,21 @@ fn gather_onepassword(
     exclusions: &[String],
 ) -> Result<Gathered> {
     let token = token_source.load(paths, TokenKind::Op)?;
-    let items = backend::op_list_items(&token, None)?;
-    if items.is_empty() {
+    // What the run learned, for judging the mappings already in the file. Only
+    // the items expanded below gain fields: `refresh` judges what it fetched
+    // and nothing more (ADR-0005).
+    let mut listing = backend::op_list_items(&token, None)?;
+    if listing.is_empty() {
         return Err(Error::Message(
             "No 1Password items visible to this token yet.".into(),
         ));
     }
 
     let indices: Vec<usize> = if take_all || !std::io::IsTerminal::is_terminal(&io::stdin()) {
-        (0..items.len()).collect()
+        (0..listing.len()).collect()
     } else {
         println!("Items visible to this token:");
-        for (i, it) in items.iter().enumerate() {
+        for (i, it) in listing.items().iter().enumerate() {
             println!("  {:2}) {}  ({})", i + 1, it.title, it.vault);
         }
         println!();
@@ -1725,9 +1728,9 @@ fn gather_onepassword(
         let _ = io::stderr().flush();
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
-            (0..items.len()).collect()
+            (0..listing.len()).collect()
         } else {
-            refs::parse_index_list(line.trim(), items.len())?
+            refs::parse_index_list(line.trim(), listing.len())?
         }
     };
 
@@ -1736,41 +1739,17 @@ fn gather_onepassword(
     let mut unreadable: Vec<String> = Vec::new();
     let mut unrepresentable: Vec<String> = Vec::new();
     let mut excluded: Vec<String> = Vec::new();
-    // What the run learned, for judging the mappings already in the file. Only
-    // the items expanded below land in it: `refresh` judges what it fetched and
-    // nothing more (ADR-0005).
-    let mut world = refs::OpWorld {
-        items: items.clone(),
-        fields: std::collections::HashMap::new(),
-    };
     for i in indices {
-        let backend::OpItem {
-            id, title, vault, ..
-        } = &items[i];
+        let item = listing.items()[i].clone();
+        let title = &item.title;
         // A per-item failure (transient 502 from the vault API, an item the
         // token cannot read) must not discard the whole run - reading 60 items
         // takes ~a minute, and refresh defaults to merge, so the next run picks
         // up whatever was missed. Skips are reported, never silent.
-        // One `op item get`, read twice: the fields worth mapping, and every
-        // field identity a reference may name. The second view is wider — an
-        // OTP or empty-valued field is one `refresh` will not map and `op` will
-        // still resolve — and judging an existing mapping against the narrow
-        // one would call a working line dangling.
-        let json = match backend::op_item_json(&token, id, Some(vault.as_str())) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("  warn: {title}: {e}");
-                unreadable.push(title.clone());
-                continue;
-            }
-        };
-        let fields = match backend::parse_op_item_fields_json(&json)
-            .and_then(|f| backend::parse_op_item_field_refs(&json).map(|r| (f, r)))
+        let fields = match backend::op_item_json(&token, &item.id, Some(item.vault.as_str()))
+            .and_then(|json| listing.expand(&item.id, &json))
         {
-            Ok((fields, field_refs)) => {
-                world.fields.insert(id.clone(), field_refs);
-                fields
-            }
+            Ok(fields) => fields,
             Err(e) => {
                 eprintln!("  warn: {title}: {e}");
                 unreadable.push(title.clone());
@@ -1781,53 +1760,20 @@ fn gather_onepassword(
             println!("  {title}: no referenceable fields, skipped");
             continue;
         }
-        // Named per item, because dropping a default section label can make two
-        // of an item's fields want one name and only the whole item shows that.
-        let mut representable: Vec<backend::OpField> = Vec::new();
-        for f in fields {
-            let section = f.section.as_deref();
-            // An item has an opaque ID to fall back on when its title does not
-            // parse; a section or field label has no such fallback. Report and
-            // skip those rather than writing a reference that would abort the
-            // injection of every other variable in the file.
-            if !section.map(refs::op_component_is_safe).unwrap_or(true)
-                || !refs::op_component_is_safe(&f.label)
-            {
-                eprintln!(
-                    "  warn: {title}: field '{}' has characters op cannot parse, skipped",
-                    f.label
-                );
-                unrepresentable.push(title.clone());
-                continue;
-            }
-            representable.push(f);
+        let mapped = onepassword::item_mappings(&item, fields);
+        for f in &mapped.skipped {
+            eprintln!(
+                "  warn: {title}: field '{}' has characters op cannot parse, skipped",
+                f.label
+            );
+            unrepresentable.push(title.clone());
         }
-
-        for f in &representable {
-            let section = f.section.as_deref();
-            let plain = refs::op_ref_var(title, section, &f.label);
-            // Two fields reduced to the same name are two different secrets, so
-            // keep the section on both rather than let either win. Rare: it
-            // needs one item holding the same label inside and outside its
-            // default section.
-            let clashes = representable
-                .iter()
-                .filter(|g| refs::op_ref_var(title, g.section.as_deref(), &g.label) == plain)
-                .count()
-                > 1;
-            let var = if clashes {
-                refs::op_ref_var_qualified(title, section, &f.label)
-            } else {
-                plain
-            };
-            if refs::is_excluded(exclusions, &var) {
-                excluded.push(var);
+        for m in mapped.mappings {
+            if refs::is_excluded(exclusions, &m.var) {
+                excluded.push(m.var);
                 continue;
             }
-            entries.push((
-                var,
-                refs::op_reference(vault, refs::op_item_component(title, id), section, &f.label),
-            ));
+            entries.push((m.var, m.reference));
         }
     }
     drop(token);
@@ -1883,7 +1829,7 @@ fn gather_onepassword(
             .iter()
             .map(|(var, reference)| Mapping::onepassword(var, reference))
             .collect(),
-        fetched: Fetched::OnePassword(world),
+        fetched: Fetched::OnePassword(listing),
         refusal,
     })
 }
