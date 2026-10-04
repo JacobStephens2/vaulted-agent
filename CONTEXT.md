@@ -37,6 +37,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Launch path** | scrub → resolve (loading the manager token through the Token source) → drop manager token → exec (story #44: keep small and auditable). |
 | **Launch plan** | Pure result of the launch path before handoff: program, agent argv, workdir, child env. Tests assert the plan without process exec. |
 | **Child environment** | Explicit allowlist construction (`build_child_env`): passthrough + keep + injected secrets (after aliases), then harness `env=` non-secret pairs and optional `bin`→PATH. |
+| **Invocation route** | What one command line asks the Launcher to do (a Harness launch, a Conductor link launch, or a management verb) and which Service-user re-exec it takes, decided once and purely before anything runs. The reserved verbs are one typed set; a Harness conf of the same name shadows a verb. The binary's entry point is its only adapter (`src/route.rs`). |
 | **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |
 | **Caller cwd** | Invocation directory preserved across sudo re-exec (`VAULTED_AGENT_CALLER_CWD`) for `workdir = caller`. |
 | **Workdir** | Where a Harness's agent starts: the Caller cwd when `workdir` is `caller`, empty or unset, otherwise a fixed path with a leading `$HOME` / `${HOME}` expanded. The launch preflight and `doctor` judge whether the launching account can enter it through one module, which also owns the traverse-only `setfacl` remedy that `setup` prints (`src/workdir.rs`). |
@@ -47,7 +48,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 
 The **CLI** is the primary and sole public acceptance seam (story #50). Library modules support the binary; they are not a second product API.
 
-Management verbs: `setup`, `refresh`, `secrets`, `doctor`, `auth-mode`, `run`, `pick`, `uninstall`, `update`, `version`.
+Management verbs: `setup`, `refresh`, `secrets`, `doctor`, `auth-mode`, `run`, `edit-manifest`, `pick`, `uninstall`, `update`, `version`, `help`.
 
 Agent-facing ops contract (commands, recipes, failure modes): **`AGENTS.md`**.
 
@@ -55,7 +56,7 @@ Agent-facing ops contract (commands, recipes, failure modes): **`AGENTS.md`**.
 
 1. Manager tokens never reach the child environment.
 2. No secret material on the agent argv.
-3. Sudo re-exec replays **original** argv so sudoers matches what the operator typed.
+3. Sudo re-exec replays **original** argv so sudoers matches what the operator typed. The one exception is `pick`: it hops after the menu and replays as though the operator had typed the chosen Harness (launcher flags as typed, then the Harness name, then the rest), so a sudoers grant for `pick` never authorizes more than the Harness picked.
 4. Fail closed on unknown backend, bad var names, and placeholder refs (misconfiguration).
 5. `secrets validate` is the pre-flight gate before privileged/paid launches — must not fail open. It covers every manifest the machine reads, harness or **extra** (ADR-0006).
 6. Unreadable manager-token files are not reported as missing and do not fall through to an interactive SA-token paste.
