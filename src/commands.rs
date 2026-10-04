@@ -14,7 +14,8 @@ use crate::backend;
 use crate::bitwarden::BwListing;
 use crate::config::{
     env_blind_agent_reason, list_harness_names, load_allow_run, load_auth_mode,
-    load_default_backend, load_service_user, parse_dotenv_keys, AuthMode, Backend, Harness, Paths,
+    load_default_backend, load_service_user, parse_dotenv_keys, set_default, set_harnesses_workdir,
+    AuthMode, Backend, Harness, Paths,
 };
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
@@ -141,56 +142,7 @@ fn ensure_auth_mode_for_setup(paths: &Paths, token_source: TokenSource) -> Resul
 }
 
 fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
-    write_defaults_key(paths, "auth_mode", Some(mode.as_str()))
-}
-
-/// Set or remove a key in defaults.conf, preserving all other lines.
-fn write_defaults_key(paths: &Paths, key: &str, value: Option<&str>) -> Result<()> {
-    let existing = fs::read_to_string(&paths.defaults_file).unwrap_or_default();
-    let mut lines: Vec<String> = Vec::new();
-    let mut saw = false;
-    if existing.trim().is_empty() {
-        lines.push("# Machine-wide launcher defaults.".into());
-    }
-    for raw in existing.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            lines.push(raw.to_string());
-            continue;
-        }
-        if let Some((k, _)) = line.split_once('=') {
-            if k.trim() == key {
-                if let Some(v) = value {
-                    lines.push(format!("{key} = {v}"));
-                    saw = true;
-                }
-                // value None → drop the key
-                continue;
-            }
-        }
-        lines.push(raw.to_string());
-    }
-    if !saw {
-        if let Some(v) = value {
-            lines.push(format!("{key} = {v}"));
-        }
-    }
-    let body = lines.join("\n") + "\n";
-    if let Some(parent) = paths.defaults_file.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::config_write(parent, e))?;
-    }
-    fs::write(&paths.defaults_file, body)
-        .map_err(|e| Error::config_write(&paths.defaults_file, e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(&paths.defaults_file) {
-            let mut p = meta.permissions();
-            p.set_mode(0o644);
-            let _ = fs::set_permissions(&paths.defaults_file, p);
-        }
-    }
-    Ok(())
+    set_default(paths, "auth_mode", Some(mode.as_str()))
 }
 
 /// Interactive: who agents run as (defaults to "you" = no service_user).
@@ -218,7 +170,7 @@ fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
     let choice = line.trim();
     match choice {
         "" | "1" | "you" | "me" => {
-            write_defaults_key(paths, "service_user", None)?;
+            set_default(paths, "service_user", None)?;
             println!("service_user: (unset — agents run as the invoking user)");
             Ok(None)
         }
@@ -230,7 +182,7 @@ fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
                 eprintln!("  empty name; leaving service_user unchanged");
                 return Ok(load_service_user(paths));
             }
-            write_defaults_key(paths, "service_user", Some(&name))?;
+            set_default(paths, "service_user", Some(&name))?;
             println!("service_user = {name}");
             eprintln!(
                 "  NOTE: with service_user, `va run` is disabled unless allow_run = yes \
@@ -247,52 +199,6 @@ fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
             Ok(load_service_user(paths))
         }
     }
-}
-
-/// Set `workdir = …` on every harness conf, inserting if missing.
-fn set_harnesses_workdir(paths: &Paths, workdir: &str) -> Result<usize> {
-    let dir = &paths.harness_dir;
-    if !dir.is_dir() {
-        return Ok(0);
-    }
-    let mut n = 0usize;
-    for ent in fs::read_dir(dir).map_err(|e| Error::Io {
-        path: dir.clone(),
-        source: e,
-    })? {
-        let ent = ent.map_err(|e| Error::Io {
-            path: dir.clone(),
-            source: e,
-        })?;
-        let path = ent.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("conf") {
-            continue;
-        }
-        let text = fs::read_to_string(&path).map_err(|e| Error::Io {
-            path: path.clone(),
-            source: e,
-        })?;
-        let mut lines: Vec<String> = Vec::new();
-        let mut saw = false;
-        for raw in text.lines() {
-            let trimmed = raw.trim();
-            if let Some((k, _)) = trimmed.split_once('=') {
-                if k.trim() == "workdir" {
-                    lines.push(format!("workdir  = {workdir}"));
-                    saw = true;
-                    continue;
-                }
-            }
-            lines.push(raw.to_string());
-        }
-        if !saw {
-            lines.push(format!("workdir  = {workdir}"));
-        }
-        let body = lines.join("\n") + "\n";
-        fs::write(&path, body).map_err(|e| Error::config_write(&path, e))?;
-        n += 1;
-    }
-    Ok(n)
 }
 
 /// Interactive: where agents start (default = caller cwd).
