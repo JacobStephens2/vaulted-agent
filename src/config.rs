@@ -490,7 +490,6 @@ pub fn load_auth_mode(paths: &Paths) -> AuthMode {
         .unwrap_or(AuthMode::File)
 }
 
-/// Service account for sudo re-exec (optional). Env VAULTED_AGENT_SERVICE_USER wins.
 /// Expand a leading `$HOME` or `${HOME}` in a harness value with `home`.
 /// Anything else, including `$HOME` later in the value, is left as written.
 pub(crate) fn expand_home(value: &str, home: &str) -> String {
@@ -503,6 +502,7 @@ pub(crate) fn expand_home(value: &str, home: &str) -> String {
     }
 }
 
+/// Service account for sudo re-exec (optional). Env VAULTED_AGENT_SERVICE_USER wins.
 pub fn load_service_user(paths: &Paths) -> Option<String> {
     if let Ok(v) = std::env::var("VAULTED_AGENT_SERVICE_USER") {
         if !v.is_empty() {

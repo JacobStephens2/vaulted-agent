@@ -559,7 +559,7 @@ command  = claude --permission-mode auto
 | `backend`  | `onepassword`, `bitwarden`, `sops`, `pass`, or `plainfile`          |
 | `manifest` | the secrets to load. **This is the blast radius.**                  |
 | `bin`      | prepended to `PATH` before exec; `$HOME` expands                    |
-| `workdir`  | agent cwd: unset → install default; `caller` → your shell’s directory (needed for `--resume` / project sessions); or an absolute/`$HOME` path |
+| `workdir`  | agent cwd: `caller` (or unset) → your shell’s directory (needed for `--resume` / project sessions); or an absolute/`$HOME` path |
 | `labels`   | map non-UUID `--resume`/`--session-id` values to a stable UUIDv5    |
 | `keep`     | extra variables surviving the environment scrub, comma separated    |
 | `alias`    | repeatable: `TARGET = SOURCE` — copy an injected secret onto another name in this harness's child env only (fail closed if SOURCE missing; see issue #66) |

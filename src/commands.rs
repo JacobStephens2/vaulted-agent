@@ -626,7 +626,7 @@ fn workdir_warning(
     harness: &str,
     caller: &CallerContext,
 ) -> Option<String> {
-    if service_user.is_some() {
+    if service_user.is_some_and(|s| !s.is_empty()) {
         return workdir::audit(workdir, caller, service_user);
     }
     let is_agent = matches!(

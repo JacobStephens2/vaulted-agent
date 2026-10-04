@@ -117,9 +117,10 @@ pub fn build_launch_plan(
     // After the privilege hop (if any) this process *is* the effective launch
     // account. Fail here with a clear remedy rather than a bare exec EACCES
     // (issue #56).
+    let caller = CallerContext::from_env();
     let workdir = workdir::preflight(
         harness.workdir.as_deref(),
-        &CallerContext::from_env(),
+        &caller,
         load_service_user(paths).as_deref(),
     )?;
 
@@ -140,10 +141,10 @@ pub fn build_launch_plan(
         child_env.insert(OsString::from(k.as_str()), OsString::from(v.as_str()));
     }
 
-    let home = env::var("HOME").unwrap_or_default();
+    let home = &caller.home;
     let mut cmdline = harness.command.clone();
     if let Some(bin) = &harness.bin_dir {
-        let bin = expand_home(bin, &home);
+        let bin = expand_home(bin, home);
         let path = child_env
             .get(OsStr::new("PATH"))
             .map(|p| format!("{bin}:{}", p.to_string_lossy()))
@@ -154,7 +155,7 @@ pub fn build_launch_plan(
     if cmdline.is_empty() {
         return Err(Error::Message("empty command".into()));
     }
-    let program = expand_home(&cmdline.remove(0), &home);
+    let program = expand_home(&cmdline.remove(0), home);
     let agent_base = Path::new(&program)
         .file_name()
         .and_then(|s| s.to_str())
