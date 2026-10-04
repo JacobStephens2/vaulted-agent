@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::conf_file::{ConfFile, Line};
 use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,25 +186,24 @@ impl Harness {
         let mut command = Vec::new();
         let mut extra_args = Vec::new();
 
-        for (lineno, raw) in text.lines().enumerate() {
-            let line = raw.trim().trim_end_matches('\r');
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((k, v)) = line.split_once('=') else {
-                return Err(Error::HarnessParse {
-                    name: name.to_string(),
-                    lineno: lineno + 1,
-                    msg: "expected key = value".into(),
-                });
+        let conf = ConfFile::parse(text);
+        for line in conf.lines() {
+            let (lineno, key, val) = match line {
+                Line::Comment => continue,
+                Line::Malformed { lineno } => {
+                    return Err(Error::HarnessParse {
+                        name: name.to_string(),
+                        lineno,
+                        msg: "expected key = value".into(),
+                    });
+                }
+                Line::Entry { lineno, key, value } => (lineno, key, value),
             };
-            let key = k.trim();
-            let val = v.trim();
             match key {
                 "backend" => {
                     backend = Some(val.parse().map_err(|_| Error::HarnessParse {
                         name: name.to_string(),
-                        lineno: lineno + 1,
+                        lineno,
                         msg: format!("unknown backend '{val}'"),
                     })?);
                 }
@@ -224,7 +224,7 @@ impl Harness {
                     let Some((target, source)) = val.split_once('=') else {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: "alias expects TARGET = SOURCE (e.g. alias = OPENAI_API_KEY = FIREWORKS_AI_API_KEY)".into(),
                         });
                     };
@@ -232,7 +232,7 @@ impl Harness {
                     if target.is_empty() || source.is_empty() {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: "alias needs both TARGET and SOURCE names".into(),
                         });
                     }
@@ -241,7 +241,7 @@ impl Harness {
                     {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: format!(
                                 "alias names must be shell-safe identifiers (got '{target}' / '{source}')"
                             ),
@@ -250,7 +250,7 @@ impl Harness {
                     if target == source {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: format!(
                                 "alias {target} = {source}: target and source are the same"
                             ),
@@ -264,7 +264,7 @@ impl Harness {
                     let Some((name, value)) = val.split_once('=') else {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: "env expects NAME = value (e.g. env = KIMI_CODE_LEGACY_FLAG = 1)"
                                 .into(),
                         });
@@ -273,14 +273,14 @@ impl Harness {
                     if ename.is_empty() {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: "env needs a variable name".into(),
                         });
                     }
                     if !crate::validate::validate_var_name(ename) {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: format!(
                                 "env name must be a shell-safe identifier (got '{ename}')"
                             ),
@@ -289,7 +289,7 @@ impl Harness {
                     if crate::env_scrub::MANAGER_TOKEN_VARS.contains(&ename) {
                         return Err(Error::HarnessParse {
                             name: name.to_string(),
-                            lineno: lineno + 1,
+                            lineno,
                             msg: format!("env cannot set manager-token name '{ename}'"),
                         });
                     }
@@ -306,7 +306,7 @@ impl Harness {
                 | "extra_manifest" => {
                     return Err(Error::HarnessParse {
                         name: name.to_string(),
-                        lineno: lineno + 1,
+                        lineno,
                         msg: format!(
                             "'{key}' is a launcher-wide setting: move it to defaults.conf (it is not a per-harness key)"
                         ),
@@ -315,7 +315,7 @@ impl Harness {
                 _ => {
                     return Err(Error::HarnessParse {
                         name: name.to_string(),
-                        lineno: lineno + 1,
+                        lineno,
                         msg: format!("unknown key '{key}'"),
                     });
                 }
@@ -392,23 +392,10 @@ pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
 
 /// Read a single `key = value` from defaults.conf (first match wins).
 pub fn load_default(paths: &Paths, key: &str) -> Option<String> {
-    let text = fs::read_to_string(&paths.defaults_file).ok()?;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || !line.contains('=') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == key {
-            let v = v.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
+    ConfFile::read(&paths.defaults_file)
+        .ok()?
+        .first(key)
+        .map(str::to_string)
 }
 
 /// Every value recorded for `key` in defaults.conf, in file order.
@@ -417,26 +404,23 @@ pub fn load_default(paths: &Paths, key: &str) -> Option<String> {
 /// has one value. A machine can read more than one manifest, so that key is
 /// repeatable and the whole list matters.
 pub fn load_defaults_all(paths: &Paths, key: &str) -> Vec<String> {
-    let Ok(text) = fs::read_to_string(&paths.defaults_file) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        if k.trim() == key {
-            let v = v.trim();
-            if !v.is_empty() {
-                out.push(v.to_string());
-            }
-        }
+    ConfFile::read(&paths.defaults_file)
+        .map(|c| c.all(key).into_iter().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Set (`Some`) or remove (`None`) a single-valued key in defaults.conf,
+/// changing only that key's line. A new or empty file gets the header.
+pub fn set_default(paths: &Paths, key: &str, value: Option<&str>) -> Result<()> {
+    let mut conf = ConfFile::read(&paths.defaults_file)?;
+    match value {
+        Some(v) => conf.set(key, v)?,
+        None => conf.remove(key),
     }
-    out
+    if conf.is_changed() && conf.was_blank() {
+        conf.prepend_comment("Machine-wide launcher defaults.");
+    }
+    conf.write(&paths.defaults_file)
 }
 
 /// A manifest something on this machine reads that no Harness launches from.
@@ -559,6 +543,19 @@ pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// Set `workdir` on every Harness [`list_harness_names`] finds, appending the
+/// line where a conf has none. Returns how many Harnesses now carry it.
+pub fn set_harnesses_workdir(paths: &Paths, workdir: &str) -> Result<usize> {
+    let names = list_harness_names(paths)?;
+    for name in &names {
+        let path = paths.harness_conf(name);
+        let mut conf = ConfFile::read(&path)?;
+        conf.set("workdir", workdir)?;
+        conf.write(&path)?;
+    }
+    Ok(names.len())
 }
 
 /// Ordered KEY=value pairs (shared policy for validate + resolve).
@@ -698,6 +695,101 @@ mod tests {
         fs::create_dir_all(&paths.config_dir).unwrap();
         fs::write(&paths.defaults_file, "auth_mode = prompt\n").unwrap();
         assert_eq!(load_auth_mode(&paths), AuthMode::Prompt);
+    }
+
+    #[test]
+    fn set_default_writes_the_header_into_a_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path().join("etc"));
+        set_default(&paths, "auth_mode", Some("prompt")).unwrap();
+        assert_eq!(
+            fs::read_to_string(&paths.defaults_file).unwrap(),
+            "# Machine-wide launcher defaults.\nauth_mode = prompt\n"
+        );
+        assert_eq!(load_auth_mode(&paths), AuthMode::Prompt);
+    }
+
+    #[test]
+    fn set_default_none_removes_only_that_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::write(
+            &paths.defaults_file,
+            "# mine\nservice_user = svc\nextra_manifest = /a\nextra_manifest = /b\n",
+        )
+        .unwrap();
+        set_default(&paths, "service_user", None).unwrap();
+        assert_eq!(
+            fs::read_to_string(&paths.defaults_file).unwrap(),
+            "# mine\nextra_manifest = /a\nextra_manifest = /b\n"
+        );
+        assert_eq!(
+            load_defaults_all(&paths, "extra_manifest"),
+            vec!["/a", "/b"]
+        );
+    }
+
+    #[test]
+    fn removing_an_absent_default_creates_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        set_default(&paths, "service_user", None).unwrap();
+        assert!(!paths.defaults_file.exists());
+    }
+
+    #[test]
+    fn set_default_refuses_a_line_break() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        assert!(set_default(&paths, "service_user", Some("svc\nallow_run = yes")).is_err());
+        assert!(!load_allow_run(&paths));
+    }
+
+    #[test]
+    fn set_harnesses_workdir_edits_every_listed_harness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::create_dir_all(&paths.harness_dir).unwrap();
+        fs::write(
+            paths.harness_conf("claude"),
+            "# shipped\nmanifest = empty.env\nworkdir  = /old\ncommand  = claude\n",
+        )
+        .unwrap();
+        fs::write(
+            paths.harness_conf("codex"),
+            "manifest = empty.env\ncommand = codex\n",
+        )
+        .unwrap();
+        fs::write(paths.harness_dir.join("notes.txt"), "workdir = untouched\n").unwrap();
+
+        assert_eq!(set_harnesses_workdir(&paths, "caller").unwrap(), 2);
+        assert_eq!(
+            fs::read_to_string(paths.harness_conf("claude")).unwrap(),
+            "# shipped\nmanifest = empty.env\nworkdir  = caller\ncommand  = claude\n"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.harness_conf("codex")).unwrap(),
+            "manifest = empty.env\ncommand = codex\nworkdir = caller\n"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.harness_dir.join("notes.txt")).unwrap(),
+            "workdir = untouched\n"
+        );
+        let h = Harness::load(&paths, "codex").unwrap();
+        assert_eq!(h.workdir.as_deref(), Some("caller"));
+    }
+
+    #[test]
+    fn set_harnesses_workdir_without_a_harness_directory_is_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        assert_eq!(set_harnesses_workdir(&paths, "caller").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_malformed_harness_line_keeps_its_line_number() {
+        let err = Harness::parse("x", "# c\n\nmanifest = a\noops\ncommand = true\n").unwrap_err();
+        assert_eq!(err.to_string(), "harness x:4: expected key = value");
     }
 
     #[test]

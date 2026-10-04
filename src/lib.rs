@@ -4,6 +4,7 @@ pub mod auth;
 pub mod backend;
 pub mod bitwarden;
 pub mod commands;
+pub mod conf_file;
 pub mod config;
 pub mod env_scrub;
 pub mod error;
