@@ -457,21 +457,11 @@ pub fn cmd_secrets(paths: &Paths, args: &[String]) -> Result<()> {
         "refresh" => cmd_refresh(paths, &args[1..]),
         "list" => {
             let token = load_bws(paths)?;
-            let rows = backend::bws_list_secrets(&token)?;
+            let listing = backend::bws_listing(&token)?;
             drop(token);
             println!("Secrets visible to this token:");
-            for (i, s) in rows.secrets().iter().enumerate() {
-                if s.project.is_empty() {
-                    println!("  {:2}) {:36}  {}", i + 1, s.id, s.key);
-                } else {
-                    println!(
-                        "  {:2}) {:36}  {}  (project: {})",
-                        i + 1,
-                        s.id,
-                        s.key,
-                        s.project
-                    );
-                }
+            for (i, s) in listing.secrets().iter().enumerate() {
+                println!("  {:2}) {:36}  {}{}", i + 1, s.id, s.key, s.project_note());
             }
             Ok(())
         }
@@ -1377,9 +1367,9 @@ fn refresh_refs(
 /// Bitwarden: pick from the secrets the token can see.
 fn gather_bitwarden(paths: &Paths, take_all: bool) -> Result<Gathered> {
     let token = load_bws(paths)?;
-    let secrets = backend::bws_list_secrets(&token)?;
+    let listing = backend::bws_listing(&token)?;
     drop(token);
-    if secrets.is_empty() {
+    if listing.is_empty() {
         return Err(Error::Message(
             "No secrets visible to this token yet.".into(),
         ));
@@ -1393,7 +1383,7 @@ fn gather_bitwarden(paths: &Paths, take_all: bool) -> Result<Gathered> {
     } else {
         // print list and ask
         println!("Secrets:");
-        for (i, s) in secrets.secrets().iter().enumerate() {
+        for (i, s) in listing.secrets().iter().enumerate() {
             println!("  {:2}) {}  {}  {}", i + 1, s.id, s.key, s.project);
         }
         eprint!("Secrets to include [all]: ");
@@ -1402,13 +1392,13 @@ fn gather_bitwarden(paths: &Paths, take_all: bool) -> Result<Gathered> {
         if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
             None
         } else {
-            Some(refs::parse_index_list(line.trim(), secrets.len())?)
+            Some(refs::parse_index_list(line.trim(), listing.len())?)
         }
     };
 
     Ok(Gathered {
-        mappings: Mapping::bitwarden_selection(&secrets, indices.as_deref()),
-        fetched: Fetched::Bitwarden(secrets),
+        mappings: Mapping::bitwarden_selection(&listing, indices.as_deref()),
+        fetched: Fetched::Bitwarden(listing),
         refusal: None,
     })
 }
@@ -1603,14 +1593,7 @@ fn print_ref_report(paths: &Paths, path: &Path, scan: &[refs::ScannedRef], will_
         for r in &ambiguous {
             println!("    {}", r.line);
             for s in &r.candidates {
-                if s.project.is_empty() {
-                    println!("      matches uuid:{}  {}", s.id, s.key);
-                } else {
-                    println!(
-                        "      matches uuid:{}  {}  (project: {})",
-                        s.id, s.key, s.project
-                    );
-                }
+                println!("      matches uuid:{}  {}{}", s.id, s.key, s.project_note());
             }
         }
         println!(
@@ -2010,7 +1993,7 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
     // needs, so keep the result instead of paying for a second round trip.
     let listed: RefCell<Option<BwListing>> = RefCell::new(None);
     let verify = |t: &ManagerToken| {
-        *listed.borrow_mut() = Some(backend::bws_list_secrets(t)?);
+        *listed.borrow_mut() = Some(backend::bws_listing(t)?);
         Ok(())
     };
     let token = match auth::capture_token(paths, TokenKind::Bws, mode, set_token, &verify)? {
@@ -2025,7 +2008,7 @@ fn setup_bitwarden(paths: &Paths, mode: AuthMode, set_token: bool) -> Result<()>
     };
     let secrets = match listed.borrow_mut().take() {
         Some(secrets) => secrets,
-        None => backend::bws_list_secrets(&token)?,
+        None => backend::bws_listing(&token)?,
     };
     drop(token);
     if secrets.is_empty() {

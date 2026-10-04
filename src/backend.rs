@@ -9,7 +9,7 @@ use crate::bitwarden::{BwListing, BwRef, Lookup};
 use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
 use crate::secret::{ManagerToken, SecretValue};
-use crate::validate::{is_placeholder_secret_value, validate_manifest_file};
+use crate::validate::{is_placeholder_secret_value, is_uuid, validate_manifest_file};
 
 fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
     let mut cmd = Command::new(program);
@@ -69,10 +69,14 @@ pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<String> {
                 "multiple secrets match {r}; use the secret's UUID (uuid:UUID)"
             )),
         }),
-        Lookup::NotARef if r.starts_with("project:") => {
-            Err(Error::Message("project: ref needs PROJECT/SECRET".into()))
-        }
-        Lookup::NotARef => Err(Error::Message(format!("bad bitwarden ref {r}"))),
+        // The launch validates first, so only `secrets get` reaches these. Each
+        // keeps the wording it had before the shared parse (issue #120).
+        Lookup::NotARef => Err(Error::Message(match r.strip_prefix("project:") {
+            Some(rest) if !rest.contains('/') => "project: ref needs PROJECT/SECRET".into(),
+            Some(_) => format!("no secret matched {r}"),
+            None if r.starts_with("name:") => format!("no secret matched {r}"),
+            None => format!("bad bitwarden ref {r}"),
+        })),
     }
 }
 
@@ -94,8 +98,13 @@ impl<'a> BwsRefResolver<'a> {
         // Saves one `bws secret list` per manifest of UUID refs. The answer is
         // the same: `bws secret get` on an id the token cannot see fails just
         // as a listing miss would.
-        if let Some(BwRef::Id(id)) = BwRef::parse(r) {
-            return Ok(id.to_string());
+        //
+        // Checked on the UUID shape alone, as before the shared parse: a
+        // placeholder UUID reaches `bws secret get` here, and the launch's
+        // validate pass has already refused it.
+        let bare = r.strip_prefix("uuid:").unwrap_or(r);
+        if is_uuid(bare) {
+            return Ok(bare.to_string());
         }
         let listing = match self.listing {
             Some(ref listing) => listing,
@@ -272,7 +281,7 @@ pub fn resolve(
 }
 
 /// The Bitwarden listing, for setup, refresh and `secrets list`.
-pub fn bws_list_secrets(token: &ManagerToken) -> Result<BwListing> {
+pub fn bws_listing(token: &ManagerToken) -> Result<BwListing> {
     BwListing::from_json(&bws_list_json(token)?)
 }
 
@@ -763,7 +772,10 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("uuid:UUID"), "{e}");
+        // Malformed refs keep their old wording (`secrets get` skips validate).
         assert_eq!(err("project:tools"), "project: ref needs PROJECT/SECRET");
+        assert_eq!(err("project:/DUP"), "no secret matched project:/DUP");
+        assert_eq!(err("name:"), "no secret matched name:");
         assert_eq!(err("junk"), "bad bitwarden ref junk");
     }
 

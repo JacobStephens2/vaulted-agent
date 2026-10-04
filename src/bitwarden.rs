@@ -31,6 +31,16 @@ impl BwSecret {
             project: project.to_string(),
         }
     }
+
+    /// `  (project: P)`, or nothing for a secret in no project: the suffix a
+    /// listing line names the project with.
+    pub fn project_note(&self) -> String {
+        if self.project.is_empty() {
+            String::new()
+        } else {
+            format!("  (project: {})", self.project)
+        }
+    }
 }
 
 /// A well-formed Bitwarden reference: one of the four forms.
@@ -186,8 +196,10 @@ mod tests {
     const D: &str = "44444444-4444-4444-4444-444444444444";
     const E: &str = "55555555-5555-5555-5555-555555555555";
     const F: &str = "66666666-6666-6666-6666-666666666666";
+    const G: &str = "77777777-7777-7777-7777-777777777777";
 
-    /// A duplicated key, a key containing `/`, the same key in two projects.
+    /// A duplicated key, a key containing `/`, the same key in two projects,
+    /// and a secret whose key is a placeholder.
     fn listing() -> BwListing {
         BwListing::from_json(&format!(
             r#"[
@@ -196,7 +208,8 @@ mod tests {
               {{"id":"{C}","key":"DUP","project":{{"name":"tools"}}}},
               {{"id":"{D}","key":"a/b","project":{{"name":"P"}}}},
               {{"id":"{E}","key":"SHARED","project":{{"name":"P"}}}},
-              {{"id":"{F}","key":"SHARED","project":{{"name":"Q"}}}}
+              {{"id":"{F}","key":"SHARED","project":{{"name":"Q"}}}},
+              {{"id":"{G}","key":"REPLACE_WITH_KEY","project":{{"name":"P"}}}}
             ]"#
         ))
         .unwrap()
@@ -282,6 +295,11 @@ mod tests {
             "project:tools/",
             "not-a-reference",
             "name:A=name:B",
+            // Listed, but a placeholder reference is never looked up
+            // (invariant 4), even when a secret carries that key.
+            "REPLACE_WITH_KEY",
+            "name:REPLACE_WITH_KEY",
+            "project:P/REPLACE_WITH_KEY",
         ] {
             assert_eq!(listing().lookup(r), Lookup::NotARef, "{r}");
             assert_eq!(BwRef::parse(r), None, "{r}");

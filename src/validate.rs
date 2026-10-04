@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::bitwarden::BwRef;
 use crate::config::Backend;
 use crate::error::{Error, Result};
 
@@ -109,7 +110,7 @@ pub fn validate_bitwarden_ref(var: &str, r: &str) -> Result<()> {
     // The shared parse decides what is well-formed, so anything this accepts
     // the launch and `refresh` read the same way (issue #120). What follows is
     // only the wording for each way of being malformed.
-    if crate::bitwarden::BwRef::parse(r).is_some() {
+    if BwRef::parse(r).is_some() {
         return Ok(());
     }
     if r.starts_with("uuid:") {
@@ -359,7 +360,7 @@ GOOD=op://Vault/item/field\n\
         ] {
             assert_eq!(
                 validate_bitwarden_ref("X", r).is_ok(),
-                crate::bitwarden::BwRef::parse(r).is_some(),
+                BwRef::parse(r).is_some(),
                 "{r}"
             );
         }
