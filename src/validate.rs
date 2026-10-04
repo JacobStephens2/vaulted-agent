@@ -175,7 +175,7 @@ impl std::fmt::Display for Problem {
 
 /// What the Manifest check found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Checked {
+pub struct ManifestCheck {
     /// Every Manifest entry as `(variable, reference)`, in file order, with the
     /// Bitwarden source recording stripped when Bitwarden reads the Manifest.
     pub entries: Vec<(String, String)>,
@@ -183,7 +183,7 @@ pub struct Checked {
     pub problems: Vec<Problem>,
 }
 
-impl Checked {
+impl ManifestCheck {
     /// The launch gate's projection: the first blocking problem, else the
     /// entries.
     pub fn gate(self) -> std::result::Result<Vec<(String, String)>, Problem> {
@@ -215,7 +215,7 @@ impl Checked {
 /// aborts. One typo therefore costs every other variable in the file, so it is
 /// worth catching while the editor is still open. Comments are included: inject
 /// reads them. No other Backend feeds the file to `op inject`.
-pub fn check_manifest(text: &str, backends: &[Backend]) -> Checked {
+pub fn check_manifest(text: &str, backends: &[Backend]) -> ManifestCheck {
     let mut problems: Vec<Problem> = Vec::new();
     let mut push = |line: usize, msg: String, blocks: bool| {
         let message = format!("line {line}: {msg}");
@@ -302,7 +302,7 @@ pub fn check_manifest(text: &str, backends: &[Backend]) -> Checked {
     // Line order for the editor. Stable, so problems on one line keep the
     // order the rules above found them in.
     problems.sort_by_key(|p| p.line);
-    Checked { entries, problems }
+    ManifestCheck { entries, problems }
 }
 
 /// 1-based line numbers of `#` comments that contain an `op://` token.
@@ -354,7 +354,10 @@ mod tests {
     }
 
     /// The gate's projection, as the error text it fails with (no path).
-    fn gate(text: &str, backend: Backend) -> std::result::Result<Vec<(String, String)>, String> {
+    fn gate_text(
+        text: &str,
+        backend: Backend,
+    ) -> std::result::Result<Vec<(String, String)>, String> {
         check_manifest(text, &[backend])
             .gate()
             .map_err(|p| p.message)
@@ -425,7 +428,7 @@ GOOD=op://Vault/item/field\n\
     #[test]
     fn pass_path_example_com_is_not_placeholder() {
         assert!(!is_placeholder_ref("example.com/token"));
-        assert!(gate("API=example.com/token\n", Backend::Pass).is_ok());
+        assert!(gate_text("API=example.com/token\n", Backend::Pass).is_ok());
     }
 
     #[test]
@@ -442,13 +445,13 @@ GOOD=op://Vault/item/field\n\
 
     #[test]
     fn validate_shares_quote_stripping_with_resolve() {
-        let pairs = gate("QUOTED=\"hello world\"\n", Backend::Plainfile).unwrap();
+        let pairs = gate_text("QUOTED=\"hello world\"\n", Backend::Plainfile).unwrap();
         assert_eq!(pairs, vec![("QUOTED".into(), "hello world".into())]);
     }
 
     #[test]
     fn validate_multiline_does_not_split_continuation() {
-        let pairs = gate("PEM=\"line1\nline2\"\n", Backend::Plainfile).unwrap();
+        let pairs = gate_text("PEM=\"line1\nline2\"\n", Backend::Plainfile).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].1, "line1\nline2");
     }
@@ -462,7 +465,7 @@ GOOD=op://Vault/item/field\n\
         // the format changed.
         let u = "11111111-1111-1111-1111-111111111111";
         let text = format!("ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:{u}\n");
-        let pairs = gate(&text, Backend::Bitwarden).unwrap();
+        let pairs = gate_text(&text, Backend::Bitwarden).unwrap();
         assert_eq!(
             pairs,
             vec![(
@@ -478,14 +481,14 @@ GOOD=op://Vault/item/field\n\
         // disagreement between the recording and the key is `refresh`'s signal
         // to report a rename, not a misconfiguration.
         let text = "A=name:A_KEY # uuid:11111111-1111-1111-1111-111111111111\n";
-        assert!(gate(text, Backend::Bitwarden).is_ok());
+        assert!(gate_text(text, Backend::Bitwarden).is_ok());
     }
 
     #[test]
     fn a_hash_inside_a_secret_value_is_still_part_of_the_value() {
         // The recording is a Bitwarden-refs concept. Stripping comments from
         // dotenv secret material would silently truncate passwords.
-        let pairs = gate("PW=s3cret # not-a-comment\n", Backend::Plainfile).unwrap();
+        let pairs = gate_text("PW=s3cret # not-a-comment\n", Backend::Plainfile).unwrap();
         assert_eq!(pairs[0].1, "s3cret # not-a-comment");
     }
 
@@ -493,7 +496,7 @@ GOOD=op://Vault/item/field\n\
     fn an_annotation_cannot_smuggle_a_placeholder_past_the_gate() {
         // Invariant 4: the reference itself is what must be real.
         let text = "A=name: # uuid:11111111-1111-1111-1111-111111111111\n";
-        assert!(gate(text, Backend::Bitwarden).is_err());
+        assert!(gate_text(text, Backend::Bitwarden).is_err());
     }
 
     #[test]
@@ -502,7 +505,7 @@ GOOD=op://Vault/item/field\n\
         // `no secret matched 'name:META_AI_API_KEYFIREWORKS_API_KEY=name:…'`.
         // Shape is validate's job (CONTEXT.md: malformed ref).
         let text = "META_AI_API_KEY=name:META_AI_API_KEYFIREWORKS_API_KEY=name:FIREWORKS_API_KEYELEVENLABS_API_KEY=name:ELEVENLABS_API_KEY\n";
-        let err = gate(text, Backend::Bitwarden).unwrap_err().to_string();
+        let err = gate_text(text, Backend::Bitwarden).unwrap_err().to_string();
         assert!(err.contains("glued onto one line"), "{err}");
         assert!(
             err.contains("META_AI_API_KEY=name:META_AI_API_KEY"),
@@ -588,13 +591,14 @@ GOOD=op://Vault/item/field\n\
             assert_eq!(blocking.len(), 1, "{text:?}: {:?}", checked.problems);
             assert_eq!(blocking[0].message, want, "{text:?}");
             assert_eq!(blocking[0].line, 1);
-            assert_eq!(gate(text, Backend::Bitwarden), Err(want.to_string()));
+            assert_eq!(gate_text(text, Backend::Bitwarden), Err(want.to_string()));
         }
     }
 
     #[test]
     fn the_gate_names_the_line_of_the_first_blocking_problem() {
-        let err = gate("A=name:A\n# note\nB=name:B\nC=name:\n", Backend::Bitwarden).unwrap_err();
+        let err =
+            gate_text("A=name:A\n# note\nB=name:B\nC=name:\n", Backend::Bitwarden).unwrap_err();
         assert_eq!(err, "line 4: C empty name: ref");
     }
 

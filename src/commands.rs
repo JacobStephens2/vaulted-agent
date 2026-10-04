@@ -1690,7 +1690,13 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
         let _ = io::stderr().flush();
         let answer = read_tty_line()?;
         if matches!(answer.trim().to_ascii_lowercase().as_str(), "n" | "no") {
-            eprintln!("Left as saved. A launch using this manifest will fail until it is fixed.");
+            if problems.iter().any(|p| p.blocks) {
+                eprintln!(
+                    "Left as saved. A launch using this manifest will fail until it is fixed."
+                );
+            } else {
+                eprintln!("Left as saved.");
+            }
             return Ok(());
         }
     }
