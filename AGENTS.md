@@ -85,7 +85,10 @@ elevated launches always read the machine config dir).
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
 `-m` / `--manifest`, `-H` / `--harness`. After the harness name, flags go to the
-agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth).
+agent (`va claude -p "…"` is agent `-p`, not launcher prompt-auth). `-p` before
+the command name applies to every command that loads a manager token, not only
+harness launches: `va -p secrets validate`, `va -p refresh`, `va -p setup …`,
+`va -p run …`.
 
 `va bash` is a harness whose command is always bash; extra argv is appended
 (`va bash ./script.sh`). It is not `va run` (any program) and not a retired
@@ -108,7 +111,7 @@ run `va update --sync-harnesses` (or `va update` again) with the new binary.
 
 | Path | How to force prompt this launch |
 |------|----------------------------------|
-| `va …` | `va -p grok` or `va --prompt-auth claude` |
+| `va …` | `va -p grok` or `va --prompt-auth claude`; also `va -p secrets validate`, `va -p refresh`, `va -p setup …` |
 | `*-conductor` | `VAULTED_AGENT_PROMPT_AUTH=1 claude-conductor …` (`-p` is the agent’s) |
 
 ### Antigravity

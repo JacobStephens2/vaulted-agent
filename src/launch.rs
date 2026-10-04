@@ -8,9 +8,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::auth::{self, TokenKind};
+use crate::auth::TokenSource;
 use crate::backend;
-use crate::config::{load_default_backend, load_service_user, AuthMode, Backend, Harness, Paths};
+use crate::config::{load_default_backend, load_service_user, Backend, Harness, Paths};
 use crate::env_scrub::{apply_aliases, build_child_env, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
 use crate::privilege;
@@ -198,21 +198,9 @@ impl HandoffMode {
     }
 }
 
-pub fn force_prompt_from_env() -> bool {
-    env::var_os("VAULTED_AGENT_PROMPT_AUTH").as_deref() == Some(OsStr::new("1"))
-}
-
-pub fn auth_mode_from_env_or_config(paths: &Paths) -> AuthMode {
-    match env::var("VAULTED_AGENT_AUTH_MODE").as_deref() {
-        Ok("prompt") => AuthMode::Prompt,
-        Ok("file") => AuthMode::File,
-        _ => crate::config::load_auth_mode(paths),
-    }
-}
-
-#[derive(Default)]
 pub struct LaunchOpts {
-    pub force_prompt: bool,
+    /// How this invocation obtains the Manager token, if the Backend needs one.
+    pub tokens: TokenSource,
     pub extra_args: Vec<String>,
     /// When set, overrides env-based handoff.
     pub handoff: Option<HandoffMode>,
@@ -245,20 +233,6 @@ pub fn build_launch_plan(
         .backend
         .unwrap_or_else(|| load_default_backend(paths));
 
-    let mode = auth_mode_from_env_or_config(paths);
-    let force = opts.force_prompt || force_prompt_from_env();
-
-    let token = match backend_name {
-        Backend::Bitwarden => Some(auth::load_manager_token(
-            paths,
-            mode,
-            TokenKind::Bws,
-            force,
-        )?),
-        Backend::OnePassword => Some(auth::load_manager_token(paths, mode, TokenKind::Op, force)?),
-        Backend::Pass | Backend::Sops | Backend::Plainfile => None,
-    };
-
     // A resolver failure names what the vault could not find — an item title,
     // or a reference its scanner could not read — and the operator needs the
     // variable, which is what they will grep the manifest for. `op inject`
@@ -270,7 +244,7 @@ pub fn build_launch_plan(
     // written: the reference stays well-formed and stops resolving, so nothing
     // offline can catch it.
     let mut secrets: HashMap<String, SecretValue> =
-        match backend::resolve(backend_name, &manifest, paths, token.as_ref()) {
+        match backend::resolve(backend_name, &manifest, paths, &opts.tokens) {
             Ok(s) => s,
             Err(e) => {
                 let blamed = crate::validate::blame_manifest_lines(&manifest, &format!("{e}"));
@@ -292,10 +266,10 @@ pub fn build_launch_plan(
             }
         };
 
-    // Token is dropped from the launcher process env so it is not ambient.
+    // `resolve` already dropped the token it loaded. Clear the manager-token
+    // vars from the launcher process env too so they are not ambient.
     // Residual plaintext in this process's heap is out of scope for the threat
     // model (explicit child env is the boundary that matters).
-    drop(token);
     for &name in MANAGER_TOKEN_VARS {
         env::remove_var(name);
     }
@@ -402,7 +376,7 @@ pub fn launch_run(
     backend: Backend,
     workdir: Option<&str>,
     command: &[String],
-    force_prompt: bool,
+    tokens: TokenSource,
 ) -> Result<()> {
     let h = Harness {
         name: "run".into(),
@@ -420,7 +394,7 @@ pub fn launch_run(
         paths,
         &h,
         &LaunchOpts {
-            force_prompt,
+            tokens,
             extra_args: vec![],
             handoff: None,
         },
@@ -466,7 +440,12 @@ mod tests {
             env_sets: vec![],
             command: vec![agent.display().to_string()],
         };
-        let plan = build_launch_plan(&paths, &h, &LaunchOpts::default()).unwrap();
+        let opts = LaunchOpts {
+            tokens: TokenSource::decide(None, None, false, crate::config::AuthMode::File),
+            extra_args: vec![],
+            handoff: None,
+        };
+        let plan = build_launch_plan(&paths, &h, &opts).unwrap();
         assert_eq!(
             plan.env
                 .get(OsStr::new("APP_DB_PASS"))

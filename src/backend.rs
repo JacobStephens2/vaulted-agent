@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::auth::{TokenKind, TokenSource};
 use crate::bitwarden::{BwListing, BwRef, Lookup};
 use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
@@ -258,22 +259,24 @@ pub fn resolve_sops(manifest: &Path, age_key: &Path) -> Result<HashMap<String, S
         .collect())
 }
 
+/// Resolve a Manifest into its variables. Loads the Manager token through
+/// `tokens` only for the Backends that need one, and drops it before
+/// returning: a resolved Manifest never carries it (invariant 1).
 pub fn resolve(
     backend: Backend,
     manifest: &Path,
     paths: &Paths,
-    token: Option<&ManagerToken>,
+    tokens: &TokenSource,
 ) -> Result<HashMap<String, SecretValue>> {
     match backend {
         Backend::Plainfile => resolve_plainfile(manifest),
         Backend::Bitwarden => {
-            let t = token.ok_or_else(|| Error::Message("bitwarden needs manager token".into()))?;
-            resolve_bitwarden(manifest, t)
+            let token = tokens.load(paths, TokenKind::Bws)?;
+            resolve_bitwarden(manifest, &token)
         }
         Backend::OnePassword => {
-            let t =
-                token.ok_or_else(|| Error::Message("onepassword needs manager token".into()))?;
-            resolve_onepassword(manifest, t)
+            let token = tokens.load(paths, TokenKind::Op)?;
+            resolve_onepassword(manifest, &token)
         }
         Backend::Pass => resolve_pass(manifest),
         Backend::Sops => resolve_sops(manifest, &paths.age_key_file),

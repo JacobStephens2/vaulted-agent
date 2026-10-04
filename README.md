@@ -70,7 +70,10 @@ va bash ./script.sh
 ```
 
 With `auth_mode=prompt`, paste the vault manager token when asked (not written
-to disk). Force once on the `va` path: `va grok -p`. Under a `*-conductor`
+to disk). Force once on the `va` path: `va -p grok` (`-p` goes before the
+harness name; after it, `-p` is the agent's). The same `-p` in front of any
+command that loads a manager token forces the prompt there too:
+`va -p secrets validate`, `va -p refresh`, `va -p run …`. Under a `*-conductor`
 symlink, `-p` is the agent's flag; use `VAULTED_AGENT_PROMPT_AUTH=1` for prompt
 auth there.
 
@@ -193,7 +196,7 @@ flags `op://` references the scanner cannot parse (plain literals are fine).
 **One-shot (any command, no harness file):**
 
 ```bash
-va run -m openai.env.refs --backend bitwarden -p -- \
+va -p run -m openai.env.refs --backend bitwarden -- \
   python gpt_image.py generate "a lighthouse" --output out.png
 ```
 
@@ -691,11 +694,13 @@ Set at install (interactive question, or `--auth-mode`), or later:
 vaulted-agent auth-mode              # interactive (TTY) or print current
 vaulted-agent auth-mode prompt       # nothing on disk
 vaulted-agent auth-mode file         # use op.env / bws.env
-va claude -p                         # force prompt for this launch only
+va -p claude                         # force prompt for this launch only
 ```
 
 **How the token is chosen on a single launch** (first match wins for “prompt
-this launch”):
+this launch”). The same order applies to every command that loads a manager
+token - `secrets validate|list|get`, `refresh`, `setup`, `run`, `pick` - and
+`-p` / `--prompt-auth` before the command name reaches each of them:
 
 1. `-p` / `--prompt-auth`  
 2. `VAULTED_AGENT_PROMPT_AUTH=1`  
@@ -824,7 +829,7 @@ over raw `bws` so auth matches launches.
 at it with `backend = bitwarden` and `manifest = openai.env.refs`, or:
 
 ```bash
-va run -m openai.env.refs --backend bitwarden -p -- your-command
+va run -m openai.env.refs --backend bitwarden -- your-command
 ```
 
 When you **add** secrets in Secrets Manager later (same process as setup’s
