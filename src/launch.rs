@@ -1,6 +1,5 @@
-//! Launch path: resolve → scrub env → drop tokens → plan → exec (or spawn for tests).
-//!
-//! This is the thin adapter around the pure Launch plan (`launch_plan.rs`).
+//! Launch adapter: manifest check → resolve → drop tokens → Workdir preflight
+//! → pure Launch plan (`launch_plan.rs`) → exec (or spawn for tests).
 
 use std::collections::HashMap;
 use std::env;

@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::env_scrub::{build_child_env, parent_env_snapshot};
 use crate::error::{Error, Result};
 
 const DEFAULT_REPO: &str = "JacobStephens2/vaulted-agent";
@@ -221,8 +222,8 @@ fn sync_with_target(binary: &Path, dry_run: bool) -> Result<()> {
 
 fn target_command(binary: &Path) -> Command {
     let mut command = Command::new(binary);
-    command.env_clear().envs(crate::env_scrub::build_child_env(
-        &crate::env_scrub::parent_env_snapshot(),
+    command.env_clear().envs(build_child_env(
+        &parent_env_snapshot(),
         &[],
         &Default::default(),
     ));

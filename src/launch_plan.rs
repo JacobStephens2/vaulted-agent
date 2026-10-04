@@ -24,7 +24,7 @@ pub struct LaunchPlan {
 }
 
 /// What the adapter learned about this launch before the plan is assembled.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct LaunchFacts {
     /// The Workdir, already settled by the preflight. Carried through unchanged.
     pub workdir: PathBuf,
@@ -131,7 +131,8 @@ mod tests {
         LaunchFacts {
             workdir: PathBuf::from("/work"),
             home: "/home/op".into(),
-            ..Default::default()
+            parent_env: HashMap::new(),
+            extra_args: vec![],
         }
     }
 
