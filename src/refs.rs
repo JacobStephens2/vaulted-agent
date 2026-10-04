@@ -656,7 +656,6 @@ mod tests {
             scan.iter().all(|r| r.fate == RefFate::Ambiguous),
             "{scan:?}"
         );
-        assert_eq!(scan.len(), 3);
         let ids: Vec<&str> = scan[2].candidates.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,

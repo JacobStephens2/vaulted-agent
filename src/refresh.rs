@@ -136,9 +136,15 @@ pub(crate) fn default_refs_file(paths: &Paths, be: Backend) -> Result<PathBuf> {
 fn fallback_refs_file(be: Backend) -> &'static str {
     match be {
         Backend::OnePassword => "onepassword.refs",
-        _ => "openai.env.refs",
+        Backend::Bitwarden | Backend::Pass | Backend::Sops | Backend::Plainfile => {
+            BITWARDEN_FALLBACK_REFS
+        }
     }
 }
+
+/// The Bitwarden Refs file `refresh` and `setup bitwarden` write when no
+/// Harness names one.
+const BITWARDEN_FALLBACK_REFS: &str = "openai.env.refs";
 
 /// The part of `refresh` that differs per Backend: the listing, the selection
 /// menu, turning the selection into mappings, and the facts the lines already
@@ -513,9 +519,9 @@ impl<'a> RefreshReport<'a> {
         // goes. That is the one piece of cleanup refresh cannot do itself
         // (ADR-0003), so it has to be said out loud.
         if !report.repair_promised {
-            report.renamed_aliases = aliases_reading(inventory, &report.renamed);
+            report.renamed_aliases = vanishing_aliases(inventory, &report.renamed);
         }
-        report.dangling_aliases = aliases_reading(inventory, &report.dangling);
+        report.dangling_aliases = vanishing_aliases(inventory, &report.dangling);
         report.edits = plan_ref_edits(&report.renamed, &report.dangling);
         report
     }
@@ -668,7 +674,7 @@ fn print_alias_warnings(aliases: &[AliasUse], consequence: &str) {
 ///
 /// A warning, never a block: refresh changes the manifest, and the `alias =`
 /// line naming it is in a harness file refresh does not own.
-fn aliases_reading<'a>(
+fn vanishing_aliases<'a>(
     inventory: Option<&'a Inventory>,
     vanishing: &[&ScannedRef],
 ) -> Vec<AliasUse<'a>> {
@@ -1222,7 +1228,8 @@ mod tests {
     fn ambiguous_and_unchecked_lines_are_never_planned_edits() {
         let scan = refs::scan_bitwarden_refs("BOTH=name:DUP\nJUNK=x\n", &bw_listing());
         let report = RefreshReport::new(&scan, None, true, WriteMode::Merge, None);
-        assert_eq!(report.ambiguous.len(), 1);
+        assert_eq!(vars(&report.ambiguous), ["BOTH"]);
+        assert_eq!(vars(&report.unjudged), ["JUNK"]);
         assert!(report.edits.is_empty());
 
         let scan = refs::scan_op_refs(
