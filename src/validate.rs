@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::bitwarden::BwRef;
 use crate::config::Backend;
 use crate::error::{Error, Result};
 
@@ -106,35 +107,24 @@ pub fn validate_bitwarden_ref(var: &str, r: &str) -> Result<()> {
             "{var} bad bitwarden ref {r} (a reference cannot contain '=')"
         )));
     }
-    if let Some(rest) = r.strip_prefix("uuid:") {
-        if !is_uuid(rest) {
-            return Err(Error::Message(format!(
-                "{var} uuid: value is not a UUID: {r}"
-            )));
-        }
+    // The shared parse decides what is well-formed, so anything this accepts
+    // the launch and `refresh` read the same way (issue #120). What follows is
+    // only the wording for each way of being malformed.
+    if BwRef::parse(r).is_some() {
         return Ok(());
     }
-    if let Some(rest) = r.strip_prefix("name:") {
-        if rest.is_empty() {
-            return Err(Error::Message(format!("{var} empty name: ref")));
-        }
-        return Ok(());
+    if r.starts_with("uuid:") {
+        return Err(Error::Message(format!(
+            "{var} uuid: value is not a UUID: {r}"
+        )));
     }
-    if let Some(rest) = r.strip_prefix("project:") {
-        let Some((p, s)) = rest.split_once('/') else {
-            return Err(Error::Message(format!(
-                "{var} want project:PROJECT/SECRET (got {r})"
-            )));
-        };
-        if p.is_empty() || s.is_empty() {
-            return Err(Error::Message(format!(
-                "{var} want project:PROJECT/SECRET (got {r})"
-            )));
-        }
-        return Ok(());
+    if r.starts_with("name:") {
+        return Err(Error::Message(format!("{var} empty name: ref")));
     }
-    if is_uuid(r) {
-        return Ok(());
+    if r.starts_with("project:") {
+        return Err(Error::Message(format!(
+            "{var} want project:PROJECT/SECRET (got {r})"
+        )));
     }
     Err(Error::Message(format!(
         "{var} bad bitwarden ref {r} (use UUID, uuid:UUID, name:KEY, or project:PROJECT/KEY)"
@@ -348,6 +338,32 @@ GOOD=op://Vault/item/field\n\
     #[test]
     fn accepts_name_ref() {
         assert!(validate_bitwarden_ref("OPENAI_API_KEY", "name:openai-api-key").is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_exactly_what_the_shared_parse_accepts() {
+        for r in [
+            "6a1c0e94-1111-2222-3333-444444444444",
+            "uuid:6a1c0e94-1111-2222-3333-444444444444",
+            "uuid:not-a-uuid",
+            "name:KEY",
+            "name:a/b",
+            "name:",
+            "project:P/a/b",
+            "project:P",
+            "project:/KEY",
+            "project:P/",
+            "REPLACE_WITH_BITWARDEN_SECRET_UUID",
+            "00000000-0000-0000-0000-000000000000",
+            "name:A=name:B",
+            "junk",
+        ] {
+            assert_eq!(
+                validate_bitwarden_ref("X", r).is_ok(),
+                BwRef::parse(r).is_some(),
+                "{r}"
+            );
+        }
     }
 
     #[test]

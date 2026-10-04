@@ -255,6 +255,7 @@ Interpret carefully:
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |
 | `could not resolve` / item named on validate or launch | Well-formed ref, vault item missing or renamed - fix the refs file or vault. Launch lists the variables implicated and suggests `secrets validate` |
 | `Dangling refs in <file>` on refresh | Mappings matching nothing the token can see - on 1Password, a missing item or field. Reported every run; exit stays 0. `--prune` removes them |
+| `Ambiguous refs in <file>` on refresh | Bitwarden `name:` / `project:` mappings matching more than one secret; the launch fails closed on them. Never pruned or repaired; exit stays 0. Qualify with `project:PROJECT/KEY` or pin `uuid:UUID` via `va edit-manifest` |
 | `Refs this run did not check` on refresh | 1Password mappings into items this run never expanded (not selected, or a read that failed). Never pruned; `refresh --all --prune` checks every item |
 | `Mapped but excluded in <file>` | 1Password mappings that resolve but match a recorded `# exclude:`. Kept on purpose (ADR-0005) - exclusion governs what refresh *adds*. Delete the line with `va edit-manifest` if you meant it to go |
 | `Renamed secrets in <file>` on refresh | Mappings whose `# uuid:…` recording names a secret now under a different key. `--prune` rewrites the reference and keeps the variable name |

@@ -15,6 +15,7 @@ use super::{
     key_to_var, name_line, read_exclusions, recorded_uuid, split_annotation,
     split_glued_bitwarden_line, write_atomic, EXCLUDE_KEYWORD,
 };
+use crate::bitwarden::{BwListing, BwRef, BwSecret};
 use crate::error::{Error, Result};
 
 /// Merge into what is there, or regenerate the file.
@@ -50,7 +51,7 @@ pub enum RefsStyle<'a> {
 /// What a secret a mapping points at is, for the "already mapped?" check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Identity {
-    Bitwarden { id: String, key: String },
+    Bitwarden(BwSecret),
     OnePassword { reference: String },
 }
 
@@ -65,7 +66,8 @@ pub struct Mapping {
 
 impl Mapping {
     /// A Bitwarden secret's mapping, carrying its source recording (ADR-0004).
-    pub fn bitwarden(id: &str, key: &str) -> Mapping {
+    pub fn bitwarden(secret: &BwSecret) -> Mapping {
+        let (id, key) = (secret.id.as_str(), secret.key.as_str());
         let shaped = !key.is_empty()
             && key
                 .chars()
@@ -83,24 +85,19 @@ impl Mapping {
         Mapping {
             var,
             line,
-            identity: Identity::Bitwarden {
-                id: id.to_string(),
-                key: key.to_string(),
-            },
+            identity: Identity::Bitwarden(secret.clone()),
         }
     }
 
     /// Mappings for the selected secrets of a `bws` listing, in listing order.
     /// `None` selects every secret.
-    pub fn bitwarden_selection(
-        secrets: &[(String, String, String)],
-        indices: Option<&[usize]>,
-    ) -> Vec<Mapping> {
-        secrets
+    pub fn bitwarden_selection(listing: &BwListing, indices: Option<&[usize]>) -> Vec<Mapping> {
+        listing
+            .secrets()
             .iter()
             .enumerate()
             .filter(|(i, _)| indices.is_none_or(|sel| sel.contains(i)))
-            .map(|(_, (id, key, _))| Mapping::bitwarden(id, key))
+            .map(|(_, secret)| Mapping::bitwarden(secret))
             .collect()
     }
 
@@ -119,7 +116,7 @@ impl Mapping {
     /// any variable.
     fn already_mapped(&self, text: &str) -> bool {
         match &self.identity {
-            Identity::Bitwarden { id, key } => text_has_secret(text, id, key),
+            Identity::Bitwarden(secret) => text_has_secret(text, secret),
             Identity::OnePassword { reference } => text_has_reference(text, reference),
         }
     }
@@ -285,36 +282,24 @@ fn replace_body(mappings: &[Mapping], style: RefsStyle, source: &str) -> (String
     (body, added)
 }
 
-/// True if the refs file already maps this secret by reference (id / name:KEY / project:…/KEY).
+/// True if the refs file already maps this secret: a line whose reference
+/// selects it (same id, same key for `name:`, same project and key for
+/// `project:`), or whose source recording names its id.
+///
+/// The reference is parsed as the launch parses it, so `project:P/a/b` maps
+/// key `a/b` in project `P`. Listing-free: the secret record is all it needs.
 ///
 /// Reads values as the launch does, so `A="name:KEY"` counts as mapping `KEY`.
-fn text_has_secret(text: &str, id: &str, key: &str) -> bool {
-    for e in crate::manifest_entry::parse(text).entries {
+fn text_has_secret(text: &str, secret: &BwSecret) -> bool {
+    crate::manifest_entry::parse(text).entries.iter().any(|e| {
         let v = e.value.as_str();
-        let (r, _) = split_annotation(v);
         // A recorded UUID is the secret's identity, so a line still mapping it
         // under its old key counts as mapped. Without this the rename would
         // come back as "1 dangling, 1 new" — the outcome ADR-0004 exists to
         // replace.
-        if !id.is_empty() && recorded_uuid(v) == Some(id) {
-            return true;
-        }
-        if !id.is_empty() && (r == id || r == format!("uuid:{id}")) {
-            return true;
-        }
-        if !key.is_empty() {
-            if r == format!("name:{key}") {
-                return true;
-            }
-            // project:PROJECT/KEY also counts as mapped for this key
-            if let Some(rest) = r.strip_prefix("project:") {
-                if rest.rsplit_once('/').map(|(_, s)| s) == Some(key) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+        (!secret.id.is_empty() && recorded_uuid(v) == Some(secret.id.as_str()))
+            || BwRef::parse(split_annotation(v).0).is_some_and(|r| r.selects(secret))
+    })
 }
 
 /// True if a VAR= line already exists (protects hand-edited custom mappings; story #14).
@@ -442,10 +427,11 @@ mod tests {
             .collect()
     }
 
+    /// Mappings for secrets in project `tools`.
     fn bw(secrets: &[(&str, &str)]) -> Vec<Mapping> {
         secrets
             .iter()
-            .map(|(id, key)| Mapping::bitwarden(id, key))
+            .map(|(id, key)| Mapping::bitwarden(&BwSecret::new(id, key, "tools")))
             .collect()
     }
 
@@ -494,15 +480,21 @@ mod tests {
         let text = "# note about 00000000-0000-0000-0000-000000000001\nOPENAI=name:other\n";
         assert!(!text_has_secret(
             text,
-            "00000000-0000-0000-0000-000000000001",
-            "openai-api-key"
+            &BwSecret::new(
+                "00000000-0000-0000-0000-000000000001",
+                "openai-api-key",
+                "tools"
+            )
         ));
     }
 
     #[test]
     fn name_ref_line_is_a_hit() {
         let text = "OPENAI_API_KEY=name:openai-api-key\n";
-        assert!(text_has_secret(text, "id-x", "openai-api-key"));
+        assert!(text_has_secret(
+            text,
+            &BwSecret::new("id-x", "openai-api-key", "tools")
+        ));
     }
 
     #[test]
@@ -510,8 +502,7 @@ mod tests {
         let text = "X=00000000-0000-0000-0000-000000000099\n";
         assert!(text_has_secret(
             text,
-            "00000000-0000-0000-0000-000000000099",
-            "anything"
+            &BwSecret::new("00000000-0000-0000-0000-000000000099", "anything", "")
         ));
     }
 
@@ -811,12 +802,12 @@ mod tests {
     fn generated_lines_record_the_source_uuid() {
         let u = "11111111-1111-1111-1111-111111111111";
         assert_eq!(
-            Mapping::bitwarden(u, "ASSEMBLY_AI_API_KEY").line,
+            Mapping::bitwarden(&BwSecret::new(u, "ASSEMBLY_AI_API_KEY", "")).line,
             format!("ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:{u}")
         );
         // The UUID-form fallback already carries the identity.
         assert_eq!(
-            Mapping::bitwarden(u, "has spaces").line,
+            Mapping::bitwarden(&BwSecret::new(u, "has spaces", "")).line,
             format!("SECRET={u}")
         );
 
@@ -846,11 +837,11 @@ mod tests {
 
     #[test]
     fn selection_keeps_listing_order_and_honours_indices() {
-        let secrets = vec![
-            ("id0".to_string(), "A".to_string(), String::new()),
-            ("id1".to_string(), "B".to_string(), String::new()),
-            ("id2".to_string(), "C".to_string(), String::new()),
-        ];
+        let secrets = BwListing::new(vec![
+            BwSecret::new("id0", "A", ""),
+            BwSecret::new("id1", "B", ""),
+            BwSecret::new("id2", "C", ""),
+        ]);
         let vars = |m: Vec<Mapping>| m.into_iter().map(|m| m.var).collect::<Vec<_>>();
         assert_eq!(
             vars(Mapping::bitwarden_selection(&secrets, None)),
@@ -897,6 +888,31 @@ mod tests {
         ]);
         assert_eq!(merge(&p, &m, RefsStyle::Bitwarden), RefsWrite::default());
         assert_eq!(fs::read_to_string(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn a_key_containing_a_slash_is_already_mapped_by_its_project_ref() {
+        // `refresh` generates this shape. Splitting on the last `/` read the
+        // key as `b`, missed the mapping and appended a duplicate.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bws.refs");
+        let before = "AB=project:P/a/b\n";
+        fs::write(&p, before).unwrap();
+        let m = [Mapping::bitwarden(&BwSecret::new("id-ab", "a/b", "P"))];
+        assert_eq!(merge(&p, &m, RefsStyle::Bitwarden), RefsWrite::default());
+        assert_eq!(fs::read_to_string(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn a_mapping_into_another_project_does_not_block_this_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bws.refs");
+        fs::write(&p, "Q_SHARED=project:Q/SHARED\n").unwrap();
+        let m = [Mapping::bitwarden(&BwSecret::new("id-p", "SHARED", "P"))];
+        assert_eq!(merge(&p, &m, RefsStyle::Bitwarden).added, 1);
+        assert!(fs::read_to_string(&p)
+            .unwrap()
+            .contains("SHARED=name:SHARED"));
     }
 
     #[test]

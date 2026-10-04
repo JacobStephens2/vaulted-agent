@@ -1,3 +1,25 @@
+# Migration: ambiguous Bitwarden refs fail closed (unreleased)
+
+**Behaviour break.** A `project:PROJECT/KEY` reference that matches more than
+one secret (the same key twice in one project) now fails the launch closed:
+
+```text
+multiple secrets match project:tools/KEY; use the secret's UUID (uuid:UUID)
+```
+
+It used to inject whichever secret `bws secret list` returned first. Listing
+order is not a contract `bws` makes, so that silent pick could inject the wrong
+credential. An ambiguous `name:KEY` already failed this way. Pin the secret you
+mean with `uuid:UUID` (`va secrets list` shows the ids).
+
+`refresh` now lists ambiguous `name:` and `project:` mappings under
+`Ambiguous refs in <file>`, with the secrets each one matches. It never prunes
+or repairs them, and the run still exits 0. It used to count them as healthy.
+
+Merge reads `project:P/a/b` as key `a/b` in project `P`, as the launch does.
+It no longer appends a duplicate mapping for such a secret, and a mapping into
+project `Q` no longer stops a same-named secret from project `P` being added.
+
 # Migration: installer detects agent CLIs as the service account (v0.4.25)
 
 When install runs with `--user <service>`, auto-detection now resolves each

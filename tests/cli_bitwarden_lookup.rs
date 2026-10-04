@@ -203,3 +203,96 @@ fn backend_failures_do_not_start_the_child() {
         assert_eq!(calls(&seam, "get"), gets);
     }
 }
+
+// ---- one Bitwarden listing for launch, refresh and merge (issue #120) ----
+
+fn refresh(seam: &CliSeam, args: &[&str]) -> Output {
+    seam.vaulted_agent()
+        .env("VAULTED_AGENT_AUTH_MODE", "file")
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .arg("refresh")
+        .args(args)
+        .output()
+        .expect("refresh")
+}
+
+fn set_vault(seam: &CliSeam, rows: serde_json::Value) {
+    fs::write(seam.root.join("vault.json"), rows.to_string()).unwrap();
+}
+
+#[test]
+fn an_ambiguous_project_ref_fails_the_launch_closed() {
+    // It used to take whichever secret `bws` happened to list first.
+    let seam = harness("GOOD=name:first\nBAD=project:tools/second\n");
+    set_vault(
+        &seam,
+        serde_json::json!([
+            {"id": FIRST, "key": "first", "project": {"name": "tools"}, "value": "first-value"},
+            {"id": SECOND, "key": "second", "project": {"name": "tools"}, "value": "a"},
+            {"id": THIRD, "key": "second", "project": {"name": "tools"}, "value": "b"}
+        ]),
+    );
+    let out = launch(&seam);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("multiple secrets match project:tools/second"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("uuid:UUID"), "{stderr}");
+    assert!(!seam.work_dir.join("agy.record").exists());
+}
+
+#[test]
+fn refresh_reports_an_ambiguous_name_and_never_edits_it() {
+    // The fixture's `second` exists in two projects: every launch through this
+    // line fails closed, and refresh used to call it healthy.
+    let before = format!("FIRST=name:first\nAMBIG=name:second # uuid:{SECOND}\n");
+    let seam = harness(&before);
+    for args in [
+        &["test.refs", "--all"][..],
+        &["test.refs", "--all", "--prune"],
+    ] {
+        let out = refresh(&seam, args);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains("Ambiguous refs in"), "{stdout}");
+        assert!(stdout.contains("AMBIG=name:second"), "{stdout}");
+        assert!(stdout.contains(&format!("uuid:{SECOND}")), "{stdout}");
+        assert!(stdout.contains(&format!("uuid:{THIRD}")), "{stdout}");
+        assert!(stdout.contains("project:PROJECT/KEY"), "{stdout}");
+        assert!(!stdout.contains("Dangling refs"), "{stdout}");
+        assert!(!stdout.contains("Renamed secrets"), "{stdout}");
+        assert_eq!(
+            fs::read_to_string(seam.config_dir.join("manifests/test.refs")).unwrap(),
+            before,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn merge_does_not_duplicate_a_project_ref_whose_key_holds_a_slash() {
+    let before = "AB=project:P/a/b\n";
+    let seam = harness(before);
+    set_vault(
+        &seam,
+        serde_json::json!([
+            {"id": FIRST, "key": "a/b", "project": {"name": "P"}, "value": "v"}
+        ]),
+    );
+    let out = refresh(&seam, &["test.refs", "--all"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(seam.config_dir.join("manifests/test.refs")).unwrap(),
+        before
+    );
+}

@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod backend;
+pub mod bitwarden;
 pub mod commands;
 pub mod config;
 pub mod env_scrub;
