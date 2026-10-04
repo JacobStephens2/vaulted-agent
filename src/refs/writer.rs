@@ -13,7 +13,7 @@ use std::path::Path;
 
 use super::{
     key_to_var, name_line, read_exclusions, recorded_uuid, split_annotation,
-    split_glued_bitwarden_line, write_atomic,
+    split_glued_bitwarden_line, write_atomic, EXCLUDE_DIRECTIVE,
 };
 use crate::error::{Error, Result};
 
@@ -174,6 +174,10 @@ pub fn write_refs(
 
     if mode == WriteMode::Replace || existing.trim().is_empty() {
         let (body, added) = replace_body(mappings, style, source);
+        // A merge that maps nothing leaves even an empty file alone.
+        if mode == WriteMode::Merge && added == 0 && fresh.is_empty() {
+            return Ok(RefsWrite::default());
+        }
         write_atomic(path, &body)?;
         return Ok(RefsWrite {
             added,
@@ -421,7 +425,7 @@ fn text_ends_in_banner(text: &str, source: &str) -> bool {
 fn exclusion_lines(patterns: &[String]) -> String {
     patterns
         .iter()
-        .map(|p| format!("# exclude: {p}\n"))
+        .map(|p| format!("{EXCLUDE_DIRECTIVE} {p}\n"))
         .collect()
 }
 
@@ -820,10 +824,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("bws.refs");
         fs::write(&p, "PINNED=name:P\n").unwrap();
-        merge(&p, &bw(&[(u, "ASSEMBLY_AI_API_KEY")]), RefsStyle::Bitwarden);
-        assert!(fs::read_to_string(&p)
-            .unwrap()
-            .contains(&format!("# uuid:{u}\n")));
+        let m = bw(&[(u, "ASSEMBLY_AI_API_KEY")]);
+        merge(&p, &m, RefsStyle::Bitwarden);
+        let recorded = format!("ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:{u}\n");
+        assert!(fs::read_to_string(&p).unwrap().contains(&recorded));
+        replace(&p, &m, RefsStyle::Bitwarden);
+        assert!(fs::read_to_string(&p).unwrap().contains(&recorded));
+    }
+
+    #[test]
+    fn a_merge_that_maps_nothing_leaves_an_empty_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bws.refs");
+        fs::write(&p, "").unwrap();
+        assert_eq!(merge(&p, &[], RefsStyle::Bitwarden), RefsWrite::default());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "");
+        let missing = dir.path().join("missing.refs");
+        assert_eq!(merge(&missing, &[], op_style(&[])), RefsWrite::default());
+        assert!(!missing.exists());
     }
 
     #[test]

@@ -732,6 +732,10 @@ pub fn scan_op_refs(text: &str, world: &OpWorld) -> Vec<ScannedRef> {
     scan_refs(text, |value| (op_ref_fate(value, world), None))
 }
 
+/// Comment form recording a variable name `refresh` must never map. The writer
+/// spells it out and `read_exclusions` reads it back, so both take it from here.
+const EXCLUDE_DIRECTIVE: &str = "# exclude:";
+
 /// Variable-name patterns the manifest records as "do not map these".
 ///
 /// `refresh` maps every referenceable field of every item it is given. That is
@@ -757,7 +761,7 @@ pub fn read_exclusions(text: &str) -> Vec<String> {
         };
         let Some(rest) = body
             .trim_start()
-            .strip_prefix("exclude:")
+            .strip_prefix(EXCLUDE_DIRECTIVE.trim_start_matches(['#', ' ']))
             .or_else(|| body.trim_start().strip_prefix("exclude "))
         else {
             continue;
