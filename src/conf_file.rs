@@ -163,10 +163,13 @@ impl ConfFile {
     /// Replace `path` with this text: through a temp file in the same
     /// directory and a rename, keeping the existing mode (`0644` for a new
     /// file) and, best effort, its owner. Does nothing when nothing changed.
+    /// A symlinked conf keeps its link: the file it points at is replaced.
     pub fn write(&self, path: &Path) -> Result<()> {
         if !self.is_changed() {
             return Ok(());
         }
+        let target = fs::canonicalize(path).ok();
+        let path = target.as_deref().unwrap_or(path);
         let dir = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),
@@ -195,13 +198,14 @@ impl ConfFile {
                 .as_ref()
                 .map(|m| m.permissions().mode() & 0o7777)
                 .unwrap_or(0o644);
-            fs::set_permissions(tmp.path(), fs::Permissions::from_mode(mode))
-                .map_err(|e| Error::config_write(path, e))?;
             // The rename gives the file the writer's ownership; put back who
-            // owned it. Only root can, which is the case that matters.
-            if let Some(m) = existing {
+            // owned it. Only root can, which is the case that matters. Before
+            // the mode, since a chown may clear setuid/setgid bits.
+            if let Some(m) = &existing {
                 let _ = std::os::unix::fs::chown(tmp.path(), Some(m.uid()), Some(m.gid()));
             }
+            fs::set_permissions(tmp.path(), fs::Permissions::from_mode(mode))
+                .map_err(|e| Error::config_write(path, e))?;
         }
         tmp.persist(path)
             .map_err(|e| Error::config_write(path, e.error))?;
@@ -445,6 +449,25 @@ mod tests {
         c.set("k", "v").unwrap();
         assert!(c.write(&p).is_err());
         assert_eq!(entries(dir.path()), vec!["defaults.conf"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_conf_keeps_its_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.conf");
+        let link = dir.path().join("defaults.conf");
+        fs::write(&real, "auth_mode = file\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut c = ConfFile::read(&link).unwrap();
+        c.set("auth_mode", "prompt").unwrap();
+        c.write(&link).unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "auth_mode = prompt\n");
+        assert_eq!(entries(dir.path()), vec!["defaults.conf", "real.conf"]);
     }
 
     #[test]
