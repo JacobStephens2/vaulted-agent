@@ -50,6 +50,9 @@ pub struct ResolveFailure {
     pub cause: ResolveCause,
 }
 
+/// Why a Manifest did not resolve, one variant per Backend that reports it.
+/// The plainfile, pass and sops resolves keep their plain errors: nothing
+/// blames them.
 #[derive(Debug)]
 pub enum ResolveCause {
     /// Bitwarden resolves one reference at a time, so it knows the variable
@@ -123,8 +126,10 @@ fn bws_list_json(token: &ManagerToken) -> Result<String> {
 /// `None` when the reference matched nothing; each caller says so in its own
 /// words.
 ///
-/// The one place a lookup becomes the launch's errors. `refresh` judges the
-/// same lookup, so a line it calls resolvable is exactly a line this accepts.
+/// The one place a lookup is judged for the launch; an absent reference
+/// becomes the launch's **Resolve failure** in `resolve_bitwarden`. `refresh`
+/// judges the same lookup, so a line it calls resolvable is exactly a line this
+/// accepts.
 pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<Option<String>> {
     match listing.lookup(r) {
         Lookup::Found(s) => Ok(Some(s.id.clone())),
