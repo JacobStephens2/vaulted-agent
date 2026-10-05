@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::bitwarden::{BwListing, BwSecret, Lookup};
 use crate::error::{Error, Result};
+use crate::file_replace::{self, Perms};
 use crate::onepassword::{Lookup as OpLookup, OpListing};
 
 mod writer;
@@ -302,8 +303,8 @@ pub enum RefEdit {
 /// One pass and one write, so a run that both removes a deleted secret and
 /// repairs a renamed one cannot leave the file half-corrected.
 ///
-/// Written through a temp file in the same directory and a rename, as every
-/// Refs file write is: a truncated manifest is an install that launches nothing.
+/// Written through File replace, as every Refs file write is: a truncated
+/// manifest is an install that launches nothing.
 pub fn edit_refs_lines(path: &Path, edits: &[(String, RefEdit)]) -> Result<Vec<(String, RefEdit)>> {
     if edits.is_empty() {
         return Ok(Vec::new());
@@ -353,40 +354,17 @@ pub fn edit_refs_lines(path: &Path, edits: &[(String, RefEdit)]) -> Result<Vec<(
     if applied.is_empty() {
         return Ok(applied);
     }
-    write_atomic(path, &body)?;
+    replace_refs_file(path, &body)?;
     Ok(applied)
 }
 
-/// Replace a file's contents without ever leaving it half-written.
-fn write_atomic(path: &Path, body: &str) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "refs".to_string());
-    let tmp = dir.join(format!(".{name}.va-tmp"));
-    let io_err = |p: &Path, e: std::io::Error| Error::Io {
-        path: p.to_path_buf(),
+/// Write a whole Refs file through File replace: whole or not at all, keeping
+/// the manifest's owner, group and mode so the Service user can still read it.
+fn replace_refs_file(path: &Path, body: &str) -> Result<()> {
+    file_replace::replace(path, body.as_bytes(), Perms::Keep).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
         source: e,
-    };
-    fs::write(&tmp, body).map_err(|e| io_err(&tmp, e))?;
-    // The rename replaces the file, so the mode has to be the one the manifest
-    // is meant to carry rather than whatever the temp file was created with.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777);
-        let mut p = fs::metadata(&tmp)
-            .map_err(|e| io_err(&tmp, e))?
-            .permissions();
-        p.set_mode(mode.unwrap_or(0o644));
-        let _ = fs::set_permissions(&tmp, p);
-    }
-    if let Err(e) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(io_err(path, e));
-    }
-    Ok(())
+    })
 }
 
 /// Classify every mapping line in a 1Password refs file against the
@@ -794,6 +772,31 @@ mod tests {
         let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "prune widened the manifest to {mode:o}");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_symlinked_refs_file_keeps_its_link_after_an_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("shared.refs");
+        let link = dir.path().join("bws.refs");
+        fs::write(
+            &real,
+            "GONE=name:GONE\nOPENAI_API_KEY=name:OPENAI_API_KEY\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        edit_refs_lines(&link, &[("GONE=name:GONE".to_string(), RefEdit::Remove)]).unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "OPENAI_API_KEY=name:OPENAI_API_KEY\n"
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     // ---- source UUIDs on generated lines (issue #82, ADR-0004) ----

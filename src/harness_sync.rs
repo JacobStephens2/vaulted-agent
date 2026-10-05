@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -190,20 +190,7 @@ fn ensure_empty_manifest(paths: &Paths) -> Result<()> {
 }
 
 fn create_profile(path: &Path, body: &str) -> Result<bool> {
-    let parent = path.parent().unwrap();
-    let write = || -> std::io::Result<bool> {
-        fs::create_dir_all(parent)?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        temp.write_all(body.as_bytes())?;
-        temp.as_file()
-            .set_permissions(fs::Permissions::from_mode(0o644))?;
-        match temp.persist_noclobber(path) {
-            Ok(_) => Ok(true),
-            Err(e) if e.error.kind() == ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(e.error),
-        }
-    };
-    write().map_err(|source| Error::Io {
+    crate::file_replace::create_new(path, body.as_bytes(), 0o644).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })
