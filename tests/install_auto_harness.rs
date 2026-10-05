@@ -67,7 +67,7 @@ fn install_discovers_muse_and_preserves_an_existing_profile() {
     assert!(config.join("harnesses.d/muse.conf.example").is_file());
     assert!(config.join("manifests/empty.env").is_file());
     assert!(stdout.contains("va muse"), "{stdout}");
-    assert!(!stdout.contains("found. Install an agent CLI"), "{stdout}");
+    assert!(!stdout.contains("No agent CLI found"), "{stdout}");
 
     // Both entry points must apply the same automatic defaults. Example
     // profiles intentionally make different command/permission choices.
@@ -87,19 +87,10 @@ fn install_discovers_muse_and_preserves_an_existing_profile() {
     );
     for name in agents.into_iter().chain(["bash"]) {
         let relative = format!("harnesses.d/{name}.conf");
-        let installed =
-            Harness::parse(name, &fs::read_to_string(config.join(&relative)).unwrap()).unwrap();
-        let updated = Harness::parse(
-            name,
-            &fs::read_to_string(update_config.join(&relative)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(installed.command, updated.command, "{name}");
-        assert_eq!(installed.keep, updated.keep, "{name}");
-        assert_eq!(installed.env_sets, updated.env_sets, "{name}");
-        assert_eq!(installed.backend, updated.backend, "{name}");
-        assert_eq!(installed.manifest, updated.manifest, "{name}");
-        assert_eq!(installed.workdir, updated.workdir, "{name}");
+        let installed = fs::read_to_string(config.join(&relative)).unwrap();
+        let updated = fs::read_to_string(update_config.join(&relative)).unwrap();
+        assert_eq!(installed, updated, "{name}");
+        Harness::parse(name, &installed).unwrap();
     }
 
     let custom =
@@ -173,18 +164,16 @@ fn install_resolves_auto_harnesses_for_the_service_account() {
     fs::write(users.join("svc.home"), svc_home.to_str().unwrap()).unwrap();
     fs::write(users.join("invoker.home"), invoker_home.to_str().unwrap()).unwrap();
 
-    // sudo -nu <user> -- command -v <name> with a per-user PATH from $users.
+    // Harness discovery's probe, sudo -n -u <user> sh -c 'command -v "$1"' sh
+    // <name>, answered with a per-user PATH from $users.
     fs::write(
         shim.join("sudo"),
         r#"#!/bin/bash
-user=""
-if [[ "${1:-}" == "-nu" ]]; then user="${2:-}"; shift 2; fi
-if [[ "${1:-}" == "--" ]]; then shift; fi
-if [[ "${1:-}" == "command" ]]; then
-  shift
+if [[ "${1:-}" == "-n" && "${2:-}" == "-u" && "${4:-}" == "sh" && "${5:-}" == "-c" ]]; then
+  user="$3"
+  shift 4
   if [[ -f "$FAKE_USER_PATHS/$user" ]]; then
-    PATH="$(cat "$FAKE_USER_PATHS/$user")" command -v "$@"
-    exit $?
+    PATH="$(cat "$FAKE_USER_PATHS/$user")" exec /bin/sh "$@"
   fi
   exit 1
 fi
@@ -345,7 +334,7 @@ fn dry_run_auto_detects_agy_as_an_agent_harness() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stdout={stdout}\nstderr={stderr}");
     assert!(
-        stdout.contains("harnesses.d/agy.conf  (bin=") && stdout.contains("command=agy)"),
+        stdout.contains("would add ") && stdout.contains("harnesses.d/agy.conf  (backend="),
         "AGY live Harness was not proposed:\n{stdout}"
     );
     assert!(
@@ -353,7 +342,7 @@ fn dry_run_auto_detects_agy_as_an_agent_harness() {
         "AGY missing from next steps:\n{stdout}"
     );
     assert!(
-        !stdout.contains("found. Install an agent CLI"),
+        !stdout.contains("No agent CLI found"),
         "AGY must count as a detected agent:\n{stdout}"
     );
 }

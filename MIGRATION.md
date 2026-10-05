@@ -1,3 +1,26 @@
+# Migration: one Harness discovery for `install.sh` and `va update` (unreleased)
+
+**Behaviour change.** The installer no longer detects agent CLIs itself. It
+runs the installed launcher's `update --sync-harnesses` (a dry run asks the
+release binary with `--dry-run`), passing its service account as
+`VAULTED_AGENT_SERVICE_USER`. Both entry points now find the same binaries,
+write byte-identical Harness confs and print the same per-agent report.
+
+- **A re-install reuses the shared binding.** When every existing Harness
+  agrees on a Backend and Manifest, a newly detected agent gets that pair, as
+  `va update` already did. A fresh install, or Harnesses that disagree, still
+  start on `plainfile` + `empty.env`. Vault wiring still rewires day-one
+  Harnesses after discovery.
+- **`va update` reports CLIs found only for the invoking account.** Under
+  `sudo` with a Service user, such a CLI used to be skipped silently; it is now
+  named with both accounts and the remedy, and still gets no Harness.
+- **The installer searches more places.** Existing Harness `bin` directories,
+  `/usr/bin` and `/bin` join its search; `va update` gains the other account's
+  `PATH` through a silent `sudo -n` probe.
+- **A Harness `bin` expands only a leading `$HOME`**, as the launch does.
+- **One conf body.** Installer-written confs gain `labels = no` and a header
+  that names Harness discovery instead of `install.sh`.
+
 # Migration: one Uninstall plan for `uninstall` and `install.sh --uninstall` (unreleased)
 
 **Behaviour change.** `vaulted-agent uninstall` and `./install.sh --uninstall`

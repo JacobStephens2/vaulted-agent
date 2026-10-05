@@ -417,6 +417,8 @@ fn sync_does_not_use_a_nonempty_empty_env_as_a_secret_free_starter() {
 fn sync_under_sudo_detects_the_invoking_users_local_agent() {
     let seam = CliSeam::new();
     seam.write_executable("id", "#!/bin/sh\necho root\n");
+    // The other-account PATH probe must fail silently, not reach real sudo.
+    seam.write_executable("sudo", "#!/bin/sh\nexit 1\n");
     let home = seam.root.join("operator-home");
     let bin = home.join(".local/bin");
     fs::create_dir_all(&bin).unwrap();
@@ -448,6 +450,41 @@ fn sync_under_sudo_detects_the_invoking_users_local_agent() {
         "{profile}"
     );
     assert!(!seam.config_dir.join("harnesses.d/claude-ro.conf").exists());
+}
+
+#[test]
+fn sync_skips_an_agent_found_only_for_the_invoking_account_and_names_the_remedy() {
+    let seam = CliSeam::new();
+    seam.install_stub_agent("invokeronly");
+    seam.write_executable("sudo", "#!/bin/sh\nexit 1\n");
+    seam.write_executable("getent", "#!/bin/sh\nexit 2\n");
+    let list = seam.root.join("auto-harnesses");
+    fs::write(&list, "invokeronly\n").unwrap();
+    let out = isolated_update(&seam)
+        .env("VAULTED_AGENT_SERVICE_USER", "svc-account")
+        .env("VAULTED_AGENT_AUTO_HARNESSES", &list)
+        .args(["update", "--sync-harnesses"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!seam
+        .config_dir
+        .join("harnesses.d/invokeronly.conf")
+        .exists());
+    assert!(
+        stdout.contains("invokeronly skipped: found for ")
+            && stdout.contains("but not for launch account svc-account"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("install invokeronly for svc-account"),
+        "{stdout}"
+    );
 }
 
 #[test]
