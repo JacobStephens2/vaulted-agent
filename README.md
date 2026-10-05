@@ -51,9 +51,14 @@ va doctor         # health check as the account a launch would use
 and warns when those two combine on a locked-down home. Non-interactive setup
 leaves existing choices alone.
 
-Day-one harnesses start with **no vault secrets** until you set them up.
-Bitwarden: `va setup bitwarden` builds a refs file (env var → secret *reference*
-only). Point harnesses at it, or use `va run -m …`.
+Day-one harnesses (`plainfile` + `empty.env`) start with **no vault secrets**
+until you set them up. `va setup bitwarden` (or `onepassword`, `pass`) records
+`default_backend`, creates the starter refs file if it is missing, and rewires
+every day-one harness to it, adding `workdir = caller` where none is set; it
+prints which harnesses it wired and which it left alone, and why. Bitwarden
+setup then maps your secrets into that refs file (env var → secret *reference*
+only). `va setup <backend> --wire-only` does the wiring and stops before the
+token. `sops` records `default_backend` only.
 
 ### 3. Launch
 
@@ -323,9 +328,16 @@ installed only for the invoking user is skipped with a message naming both
 accounts — install it for the service account, or configure that
 `harnesses.d/<name>.conf` explicitly.
 
-`install.sh` installs the Rust binary and writes machine defaults to
-`defaults.conf` (never sed-patches a shell script). It never overwrites a
-config file you have edited. Useful flags:
+`install.sh` installs the Rust binary and never overwrites a config file you
+have edited. Its vault questions become launcher calls: `vaulted-agent
+auth-mode`, `vaulted-agent setup <backend> --wire-only` (the same Vault wiring
+as `va setup <backend>`), and, with `auth_mode = file`, the Manager token piped
+to `vaulted-agent setup <backend> --set-token`. Install-time tokens are
+therefore **verified against the vault before they are stored**; a rejected
+token does not stop the install, which says the token was not stored and shows
+the launcher's reason. Skipping the backend leaves `default_backend` as it is.
+On a fresh Bitwarden install the starter refs file is `openai.env.refs` (it
+used to be `bitwarden.refs`; hosts that have one keep using it). Useful flags:
 
 | flag | |
 |---|---|
@@ -334,13 +346,12 @@ config file you have edited. Useful flags:
 | `--no-va` | skip the short `va` alias (default is to install it) |
 | `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/muse/bash or write live harnesses |
 | `--no-setup` | skip interactive vault backend questions |
-| `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Sets `default_backend` in `defaults.conf` and the summary’s token path (`bws.env` vs `op.env`) |
-| `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch; default `file`) |
-| `--op-token-file PATH` | write OP_SERVICE_ACCOUNT_TOKEN from this file (not argv); ignored when `--auth-mode prompt` |
-| `--bws-token-file PATH` | write BWS_ACCESS_TOKEN from this file; ignored when `--auth-mode prompt` |
+| `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Runs `setup NAME --wire-only` (also under `--no-setup`); `skip` writes nothing about the backend |
+| `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch). A fresh install records `file`; a re-install without it keeps the current mode |
+| `--op-token-file PATH` | OP_SERVICE_ACCOUNT_TOKEN from this file (not argv), verified then stored in `op.env`; ignored when `--auth-mode prompt` |
+| `--bws-token-file PATH` | BWS_ACCESS_TOKEN from this file, verified then stored in `bws.env`; ignored when `--auth-mode prompt` |
+| `--op-env FILE` | token source: an existing env file whose `OP_SERVICE_ACCOUNT_TOKEN` is verified and stored in `<config>/op.env`, the only file the launcher reads (with `--backend onepassword`) |
 | `--workdir DIR` | working directory; defaults to that account's home |
-
-| `--op-env FILE` | reuse a backend credential that already exists elsewhere |
 | `--links a,b,c` | also create `a-conductor`, `b-conductor`, … symlinks |
 | `--allow-user NAME` | write a sudoers rule letting NAME launch any harness |
 | `--link-user NAME` | symlink into NAME's `~/.local/bin`, so the command is on their PATH |
@@ -825,8 +836,10 @@ over raw `bws` so auth matches launches.
 **Refs file (what setup / refresh write).** After listing secrets, setup (or
 `va refresh`) can write a **refs file** under `/etc/vaulted-agent/manifests/`
 (default name `openai.env.refs`). That is only a filename for lines like
-`OPENAI_API_KEY=name:…` - not a secret, not the access token. Point a harness
-at it with `backend = bitwarden` and `manifest = openai.env.refs`, or:
+`OPENAI_API_KEY=name:…` - not a secret, not the access token. When harnesses
+on `bitwarden` already name a refs file, setup and refresh use that one instead.
+Setup points every day-one harness at it; point another harness at it with
+`backend = bitwarden` and `manifest = openai.env.refs`, or:
 
 ```bash
 va run -m openai.env.refs --backend bitwarden -- your-command

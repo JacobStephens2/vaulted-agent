@@ -78,7 +78,8 @@ elevated launches always read the machine config dir).
 | Remove dangling refs / repair renamed refs | `va refresh --prune` (repair is bitwarden only) |
 | Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
-| Interactive install-time config | `va setup` |
+| Interactive install-time config | `va setup` (the installer asks its own questions, then calls `auth-mode`, `setup <backend> --wire-only` and `setup <backend> --set-token`) |
+| Wire day-one Harnesses to a Backend, no token | `sudo va setup bitwarden --wire-only` (also `onepassword`, `pass`; `sops` records `default_backend` only). Asks no questions and never touches the token |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
 | Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.25` |
 | Uninstall | `sudo va uninstall` |
@@ -102,6 +103,17 @@ a verified empty starter Manifest and print a configuration reminder. It never
 resolves secrets or runs `install.sh`. `--check` and `--dry-run` leave installed
 files and configuration unchanged. Root-owned machine configuration triggers a
 sudo retry; a custom config directory must be writable without that hop.
+
+`install.sh` keeps its questions and flags but makes no vault-config write of
+its own: it runs `vaulted-agent auth-mode`, `setup <backend> --wire-only`, and,
+with `auth_mode = file`, pipes the token to `setup <backend> --set-token`.
+Install-time tokens are therefore **verified before they are stored**; a
+rejected one does not stop the install, which says the token was not stored.
+`--op-env PATH` is a token source: its `OP_SERVICE_ACCOUNT_TOKEN` is stored in
+`<config>/op.env`, the only file the launcher reads (it used to write PATH,
+which nothing read). A fresh Bitwarden install's starter Refs file is
+`openai.env.refs`, not `bitwarden.refs`. Skipping the backend leaves
+`default_backend` as it is.
 
 `va update --sync-harnesses` performs only Harness discovery/setup. Updaters
 through v0.4.23 replace only the binary: after upgrading from one of those,
@@ -145,7 +157,7 @@ precedence over Muse's account login (`muse login --help`).
 ### Kimi
 
 Shipped / auto harness defaults to `kimi --auto` (unattended). Day-one is
-`plainfile` + `empty.env`; vault setup rewires kimi like claude/codex/grok.
+`plainfile` + `empty.env`; `va setup <backend>` rewires kimi like claude/codex/grok.
 
 **Credentials (issue #70).** Kimi **does** read OpenAI-compatible provider keys
 from the process environment. Selection is by provider **type** (`openai` →

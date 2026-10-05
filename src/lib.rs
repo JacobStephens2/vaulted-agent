@@ -25,6 +25,7 @@ pub mod route;
 pub mod secret;
 pub mod update;
 pub mod validate;
+mod vault_wiring;
 mod workdir;
 
 pub use config::{list_harness_names, AuthMode, Backend, Harness, Paths};

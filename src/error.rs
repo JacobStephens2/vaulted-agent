@@ -23,6 +23,13 @@ pub enum Error {
     Message(String),
     /// A Manifest that will not resolve, reported by its Backend.
     Resolve(crate::backend::ResolveFailure),
+    /// The Harnesses on one Backend use several Manifests, so there is no one
+    /// Refs file for it. Each caller says how to settle it.
+    SeveralManifests {
+        backend: crate::config::Backend,
+        /// File names, comma-separated.
+        names: String,
+    },
 }
 
 impl Error {
@@ -69,6 +76,9 @@ impl std::fmt::Display for Error {
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Error::Message(m) => write!(f, "{m}"),
             Error::Resolve(failure) => write!(f, "{failure}"),
+            Error::SeveralManifests { backend, names } => {
+                write!(f, "multiple {backend} manifests ({names})")
+            }
         }
     }
 }

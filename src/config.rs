@@ -367,8 +367,8 @@ impl Harness {
 
 /// Shared list of env-blind agent basenames (`etc/env-blind-agents`).
 ///
-/// Install (`wire_day_one_harnesses`) reads the same file from the tree so
-/// doctor and install cannot drift (PR #69 review).
+/// The one parse of it: doctor and Vault wiring (which the installer runs
+/// through `setup --wire-only`) share it, so they cannot drift (PR #69 review).
 const ENV_BLIND_AGENTS_LIST: &str = include_str!("../etc/env-blind-agents");
 
 /// True when `name` is a command basename (or harness stem) listed in
