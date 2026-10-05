@@ -95,6 +95,16 @@ pub(crate) fn probe(path: &Path, key: &str) -> Probe {
         return Probe::Malformed(fault);
     }
     match parsed.entries.into_iter().find(|e| e.var == key) {
+        // The shared rules let a bare value take the lines after it (a PEM in
+        // a manifest). A token is one line, so a stray line straight after it
+        // is a fault, not part of the token.
+        Some(entry) if entry.is_multiline() => {
+            let line = entry.first_line + 1;
+            Probe::Malformed(Fault {
+                line,
+                message: format!("line {line}: continues the {key} value; a token is one line"),
+            })
+        }
         Some(entry) if !entry.value.is_empty() => Probe::Token(ManagerToken::new(entry.value)),
         _ => Probe::NoValue,
     }
@@ -301,6 +311,8 @@ mod tests {
         for (text, line) in [
             ("not a token line\n", 1),
             ("OP_SERVICE_ACCOUNT_TOKEN=ops_abc\n\nstray\n", 3),
+            ("OP_SERVICE_ACCOUNT_TOKEN=ops_abc\nstray\n", 2),
+            ("OP_SERVICE_ACCOUNT_TOKEN=\"ops_abc\nstray\"\n", 2),
             ("1BAD=x\n", 1),
         ] {
             match probe_text(text) {

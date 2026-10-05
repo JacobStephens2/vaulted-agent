@@ -512,16 +512,6 @@ pub fn parse_dotenv_keys(text: &str) -> Result<HashMap<String, String>> {
     Ok(m)
 }
 
-/// First value for `key` in dotenv text, using the shared parse policy.
-pub fn parse_dotenv_var(text: &str, key: &str) -> Result<Option<String>> {
-    for (k, v) in parse_dotenv_pairs(text)? {
-        if k == key {
-            return Ok(Some(v));
-        }
-    }
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,16 +805,6 @@ command = claude
         assert_eq!(p.len(), 2);
         assert_eq!(p[0], ("A".into(), "one\ntwo".into()));
         assert_eq!(p[1], ("B".into(), "2".into()));
-    }
-
-    #[test]
-    fn parse_dotenv_var_uses_shared_policy() {
-        assert_eq!(
-            parse_dotenv_var("X=\"hi there\"\n", "X")
-                .unwrap()
-                .as_deref(),
-            Some("hi there")
-        );
     }
 
     #[test]

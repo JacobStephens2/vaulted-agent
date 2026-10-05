@@ -222,7 +222,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
     }
 }
 
-/// Report what a vault token file holds, by the one Manager-token file probe.
+/// Report what a Manager-token file holds, by its one probe.
 /// Returns 1 when the file is unreadable or malformed (a doctor error), else 0.
 fn report_token_file(paths: &Paths, kind: TokenKind, reader: &token_file::Reader) -> usize {
     use crate::token_file::Probe;
@@ -366,9 +366,9 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
         yn(have_pass)
     );
 
-    // Three states, not two: is_file() used to report EACCES as "missing"
-    // (issue #51), which sent operators hunting for a file that was present
-    // and steered them toward pasting a vault token by hand.
+    // Unreadable and malformed are not missing: is_file() used to report
+    // EACCES as "missing" (issue #51), which sent operators hunting for a file
+    // that was present and steered them toward pasting a vault token by hand.
     let reader = token_file::Reader {
         user: running_as.clone(),
         service_user: Ok(service_user.clone()),
