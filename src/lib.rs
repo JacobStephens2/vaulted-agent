@@ -8,6 +8,7 @@ pub mod conf_file;
 pub mod config;
 pub mod env_scrub;
 pub mod error;
+mod file_replace;
 mod harness_sync;
 pub mod inventory;
 pub mod launch;

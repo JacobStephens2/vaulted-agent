@@ -7,7 +7,7 @@
 //! What a key *means* stays with the reader (defaults getters, `Harness::parse`).
 //!
 //! One edit for changing it: set or remove a key in memory, touching only the
-//! lines that carry it, then write the whole file atomically. A truncated
+//! lines that carry it, then write the whole file through File replace. A truncated
 //! `defaults.conf` silently loses `service_user`, and with it the account
 //! agents run as.
 
@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::error::{Error, Result};
+use crate::file_replace::{self, Perms};
 
 /// One physical line, as the line rule reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,56 +161,15 @@ impl ConfFile {
         self.text = format!("# {comment}{ending}{}", self.text);
     }
 
-    /// Replace `path` with this text: through a temp file in the same
-    /// directory and a rename, keeping the existing mode (`0644` for a new
-    /// file) and, best effort, its owner. Does nothing when nothing changed.
-    /// A symlinked conf keeps its link: the file it points at is replaced.
+    /// Replace `path` with this text through File replace, keeping the
+    /// existing mode and owner (`0644` for a new file). Does nothing when
+    /// nothing changed. A symlinked conf keeps its link.
     pub fn write(&self, path: &Path) -> Result<()> {
         if !self.is_changed() {
             return Ok(());
         }
-        let target = fs::canonicalize(path).ok();
-        let path = target.as_deref().unwrap_or(path);
-        let dir = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        fs::create_dir_all(dir).map_err(|e| Error::config_write(dir, e))?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "conf".to_string());
-        // Dropped (and so deleted) on every early return below.
-        let mut tmp = tempfile::Builder::new()
-            .prefix(&format!(".{name}."))
-            .suffix(".va-tmp")
-            .tempfile_in(dir)
-            .map_err(|e| Error::config_write(path, e))?;
-        {
-            use std::io::Write as _;
-            tmp.write_all(self.text.as_bytes())
-                .map_err(|e| Error::config_write(path, e))?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            let existing = fs::metadata(path).ok();
-            let mode = existing
-                .as_ref()
-                .map(|m| m.permissions().mode() & 0o7777)
-                .unwrap_or(0o644);
-            // The rename gives the file the writer's ownership; put back who
-            // owned it. Only root can, which is the case that matters. Before
-            // the mode, since a chown may clear setuid/setgid bits.
-            if let Some(m) = &existing {
-                let _ = std::os::unix::fs::chown(tmp.path(), Some(m.uid()), Some(m.gid()));
-            }
-            fs::set_permissions(tmp.path(), fs::Permissions::from_mode(mode))
-                .map_err(|e| Error::config_write(path, e))?;
-        }
-        tmp.persist(path)
-            .map_err(|e| Error::config_write(path, e.error))?;
-        Ok(())
+        file_replace::replace(path, self.text.as_bytes(), Perms::Keep)
+            .map_err(|e| Error::config_write(path, e))
     }
 }
 
@@ -364,110 +324,12 @@ mod tests {
         assert!(ConfFile::read(dir.path()).is_err());
     }
 
-    fn entries(dir: &Path) -> Vec<String> {
-        let mut v: Vec<String> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .collect();
-        v.sort();
-        v
-    }
-
-    #[cfg(unix)]
     #[test]
-    fn write_keeps_the_mode_and_leaves_no_temp_file() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("defaults.conf");
-        fs::write(&p, "# keep\nauth_mode = file\n").unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
-        let mut c = ConfFile::read(&p).unwrap();
-        c.set("auth_mode", "prompt").unwrap();
-        c.write(&p).unwrap();
-        assert_eq!(
-            fs::read_to_string(&p).unwrap(),
-            "# keep\nauth_mode = prompt\n"
-        );
-        assert_eq!(
-            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
-        assert_eq!(entries(dir.path()), vec!["defaults.conf"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_new_file_is_0644_and_its_directory_is_created() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("sub/defaults.conf");
-        let mut c = ConfFile::read(&p).unwrap();
-        c.set("k", "v").unwrap();
-        c.write(&p).unwrap();
-        assert_eq!(fs::read_to_string(&p).unwrap(), "k = v\n");
-        assert_eq!(
-            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-            0o644
-        );
-    }
-
-    #[test]
-    fn an_unchanged_file_is_not_touched() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("h.conf");
-        fs::write(&p, "workdir  = caller\n").unwrap();
-        let before = fs::metadata(&p).unwrap().modified().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let mut c = ConfFile::read(&p).unwrap();
+    fn setting_the_value_already_there_is_no_change() {
+        let mut c = ConfFile::parse("workdir  = caller\n");
         c.set("workdir", "caller").unwrap();
         assert!(!c.is_changed());
-        // A write would rename a new file over it: a new inode.
-        #[cfg(unix)]
-        let ino = {
-            use std::os::unix::fs::MetadataExt;
-            fs::metadata(&p).unwrap().ino()
-        };
-        c.write(&p).unwrap();
-        assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), before);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(fs::metadata(&p).unwrap().ino(), ino);
-        }
-        assert_eq!(entries(dir.path()), vec!["h.conf"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_failed_write_leaves_no_temp_file() {
-        // Renaming over a directory fails after the temp file exists.
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("defaults.conf");
-        fs::create_dir(&p).unwrap();
-        fs::write(p.join("inside"), "x").unwrap();
-        let mut c = ConfFile::parse("");
-        c.set("k", "v").unwrap();
-        assert!(c.write(&p).is_err());
-        assert_eq!(entries(dir.path()), vec!["defaults.conf"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_conf_keeps_its_link() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("real.conf");
-        let link = dir.path().join("defaults.conf");
-        fs::write(&real, "auth_mode = file\n").unwrap();
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let mut c = ConfFile::read(&link).unwrap();
-        c.set("auth_mode", "prompt").unwrap();
-        c.write(&link).unwrap();
-        assert!(fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(fs::read_to_string(&real).unwrap(), "auth_mode = prompt\n");
-        assert_eq!(entries(dir.path()), vec!["defaults.conf", "real.conf"]);
+        assert_eq!(c.text(), "workdir  = caller\n");
     }
 
     #[test]

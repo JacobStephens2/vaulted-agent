@@ -741,76 +741,30 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     )))
 }
 
-/// Write `KEY=token` with mode 0640. When running as root and `service_user` is
-/// set, chown to `root:service_user` so the service account can read the file
-/// after sudo re-exec (stories #11, #40).
+/// Write `KEY=token` with mode 0640 through File replace. When running as root
+/// and `service_user` is set, the group is the service user's, so the service
+/// account can read the file after sudo re-exec (stories #11, #40).
 ///
-/// Creates the file with mode 0600 first so it is never briefly world-readable.
+/// The token is staged in a 0600 temp file and renamed over the old one, so it
+/// is never briefly world-readable nor truncated in place. An unchanged token
+/// is not rewritten, but its mode and group are still repaired.
 pub fn write_token_file(
     path: &Path,
     key: &str,
     token: &ManagerToken,
     service_user: Option<&str>,
 ) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| Error::config_write(parent, e))?;
-    }
     let body = format!("{}={}\n", key, token.expose());
-
-    // State (b): the file already holds exactly these bytes. Rewriting a
-    // credential that has not changed buys nothing and briefly truncates a file
-    // other processes may be reading; the mode/ownership repair below still runs.
-    let unchanged = fs::read_to_string(path)
-        .map(|cur| cur == body)
-        .unwrap_or(false);
-
-    #[cfg(unix)]
-    {
-        use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        if !unchanged {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|e| Error::config_write(path, e))?;
-            f.write_all(body.as_bytes())
-                .map_err(|e| Error::config_write(path, e))?;
-            f.sync_all().ok();
-            drop(f);
-        }
-        let mut perms = fs::metadata(path)
-            .map_err(|e| Error::config_write(path, e))?
-            .permissions();
-        perms.set_mode(0o640);
-        fs::set_permissions(path, perms).map_err(|e| Error::config_write(path, e))?;
-
-        // root:SERVICE_USER so mode 0640 is useful under a service-account install.
-        if is_euid_root() {
-            if let Some(user) = service_user.filter(|u| !u.is_empty()) {
-                if let Some(gid) = gid_for_user(user) {
-                    if let Err(e) = std::os::unix::fs::chown(path, Some(0), Some(gid)) {
-                        eprintln!(
-                            "vaulted-agent: warn: could not chown root:{user} on {}: {e}",
-                            path.display()
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
-        if !unchanged {
-            fs::write(path, body).map_err(|e| Error::config_write(path, e))?;
-        }
-        let _ = service_user;
-    }
-
-    Ok(())
+    // root:SERVICE_USER so mode 0640 is useful under a service-account install.
+    let gid = service_user
+        .filter(|u| !u.is_empty() && is_euid_root())
+        .and_then(gid_for_user);
+    crate::file_replace::replace(
+        path,
+        body.as_bytes(),
+        crate::file_replace::Perms::Exact { mode: 0o640, gid },
+    )
+    .map_err(|e| Error::config_write(path, e))
 }
 
 #[cfg(unix)]
