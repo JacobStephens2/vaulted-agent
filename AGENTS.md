@@ -287,6 +287,7 @@ Interpret carefully:
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
 | `no manager token yet and no terminal to paste one` | `setup` with `auth_mode=file` and nothing to capture; pipe it with `--set-token`, export the token, or `va auth-mode prompt` |
 | `--set-token: … rejected by the vault` | Token verified live before write; nothing was stored. Check you pasted a Machine Account access token / service-account token |
+| `exported OP_SERVICE_ACCOUNT_TOKEN rejected by the vault` / `… in <file> rejected by the vault` on `setup` | `setup` verifies an exported or on-disk token too; nothing was written and the token file is unchanged. Unset or fix the export; rotate the file with `printf %s "$TOKEN" \| sudo va setup <backend> --set-token` |
 
 ## Launch path (invariants)
 

@@ -1,5 +1,6 @@
 //! #30: setup onepassword writes op.env when auth_mode=file.
 //! Non-interactive setup must not rewrite auth_mode (TTY prompts only).
+//! #156: the exported token is verified first, so each test installs the fake `op`.
 
 mod common;
 
@@ -9,6 +10,7 @@ use std::fs;
 #[test]
 fn setup_noninteractive_preserves_existing_auth_mode() {
     let seam = CliSeam::new();
+    seam.install_fake_op();
     fs::write(
         seam.config_dir.join("defaults.conf"),
         "auth_mode = prompt\n",
@@ -38,6 +40,7 @@ fn setup_noninteractive_preserves_existing_auth_mode() {
 #[test]
 fn setup_onepassword_writes_op_env_file_mode() {
     let seam = CliSeam::new();
+    seam.install_fake_op();
     fs::write(seam.config_dir.join("defaults.conf"), "auth_mode = file\n").unwrap();
     let out = seam
         .vaulted_agent()
@@ -69,6 +72,7 @@ fn setup_onepassword_writes_op_env_file_mode() {
 #[test]
 fn setup_onepassword_prompt_mode_does_not_write_file() {
     let seam = CliSeam::new();
+    seam.install_fake_op();
     fs::write(
         seam.config_dir.join("defaults.conf"),
         "auth_mode = prompt\n",

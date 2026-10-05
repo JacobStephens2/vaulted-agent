@@ -1,3 +1,23 @@
+# Migration: `setup <backend>` verifies an exported or existing token (unreleased)
+
+**Behaviour change.** `vaulted-agent setup bitwarden|onepassword` now verifies
+the Manager token whichever way it arrives, not only a paste or
+`--set-token`. An exported `OP_SERVICE_ACCOUNT_TOKEN` / `BWS_ACCESS_TOKEN`, or
+the token already in `op.env` / `bws.env`, is checked live (`op whoami` /
+`bws secret list`) before anything is stored.
+
+- **A rejected one fails `setup`.** The exit is non-zero, the message names
+  where the token came from, and nothing is written. An existing token file is
+  left byte-identical; rotate it with
+  `printf %s "$TOKEN" | sudo vaulted-agent setup <backend> --set-token`.
+  Before, an exported token was written to the token file unverified.
+- **Verifying needs `op` / `bws` on PATH** even when a token is already
+  present. `setup onepassword` used to succeed without `op` installed when a
+  token was exported or on disk.
+- Under `auth_mode = prompt` an exported token is verified too, and still
+  never written. A `-p` paste on `setup` is shape-checked and verified like
+  any other paste.
+
 # Migration: the installer delegates vault setup to the launcher (unreleased)
 
 **Behaviour change.** `install.sh` keeps its questions and flags, but every

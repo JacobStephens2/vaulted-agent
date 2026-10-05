@@ -765,6 +765,13 @@ works. Verification failure exits non-zero with nothing written. Running
 `--set-token` with stdin still attached to a terminal is an error, not a wait:
 it tells you to pipe it, or to drop the flag and paste interactively.
 
+A token that is already exported, or already in the token file, goes through
+capture too: it is **verified live** before setup keeps it, and stored again
+under `auth_mode=file` (identical bytes are not rewritten; mode and group are
+repaired). A rejected one fails setup with nothing written, and a rejected token
+file is left as it is - rotate it with `--set-token`. Verifying needs `op` /
+`bws` on PATH even when a token is already present.
+
 Capture never fires for a token file that exists but **cannot be read** - that is
 a permissions fault, and overwriting it would clobber a working credential and
 hide the fault. It never runs on the launch path either: stdin there belongs to

@@ -263,16 +263,24 @@ pub(crate) enum TokenFile {
     Unreadable,
 }
 
+/// Where Token capture takes the Manager token from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Door {
+    /// `--set-token`: the token is piped on stdin.
+    Stdin,
+    /// A no-echo paste on the terminal.
+    Prompt,
+    /// The manager-token env var is exported and non-empty.
+    Env,
+    /// The token file is readable and carries a value for this key.
+    File,
+}
+
 /// What `setup` should do about the manager token. Pure decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureDecision {
-    /// Ask on the terminal (no echo) and store what is pasted.
-    Prompt,
-    /// Read the token from stdin (`--set-token`).
-    Stdin,
-    /// A token is already available, or this mode stores nothing: do not
-    /// capture, let the caller load the token the usual way.
-    UseExisting,
+    /// Obtain the token through `door`, verify it, then store it when `store`.
+    Obtain { door: Door, store: bool },
     /// Capture cannot run here; the message says why.
     Fail(String),
 }
@@ -285,6 +293,8 @@ pub(crate) struct CaptureFacts {
     /// The token's env var is exported and non-empty.
     pub env_token: bool,
     pub mode: AuthMode,
+    /// `-p` / `VAULTED_AGENT_PROMPT_AUTH=1`: paste rather than read the file.
+    pub force_prompt: bool,
     /// A terminal is available for a no-echo paste.
     pub tty: bool,
     /// `--set-token` was passed to `setup`.
@@ -301,16 +311,15 @@ impl CaptureFacts {
     pub(crate) fn from_runtime(
         paths: &Paths,
         kind: TokenKind,
-        mode: AuthMode,
+        source: TokenSource,
         set_token: bool,
     ) -> Self {
         let path = kind.file(paths);
         let file = match token_file_status(path) {
             TokenFileStatus::Missing => TokenFile::Missing,
             TokenFileStatus::Unreadable { .. } => TokenFile::Unreadable,
-            // A file that opens but holds no value for this key is nothing to
-            // defer to — treat it as missing so setup captures instead of
-            // handing the operator the launch-time prompt.
+            // A file that opens but holds no value for this key is not a
+            // door: treat it as missing so setup asks for a token instead.
             TokenFileStatus::Present => match read_token_file(path, kind.env_var()) {
                 Ok(Some(t)) if !t.expose().is_empty() => TokenFile::Present,
                 Ok(_) => TokenFile::Missing,
@@ -323,7 +332,8 @@ impl CaptureFacts {
             env_token: std::env::var(kind.env_var())
                 .map(|v| !v.is_empty())
                 .unwrap_or(false),
-            mode,
+            mode: source.auth_mode(),
+            force_prompt: source.forces_prompt(),
             tty: interactive_tty(),
             set_token,
             token_path: path.display().to_string(),
@@ -333,11 +343,16 @@ impl CaptureFacts {
 }
 
 /// Pure planning: no IO, no prompts, no process spawn.
+///
+/// Precedence follows Token source routing, so `setup` keeps today's order:
+/// an explicit pipe beats ambient env, env beats `-p`, `-p` beats the file.
 pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
     let key = facts.kind.env_var();
+    let backend = facts.kind.backend_name();
 
-    // auth_mode=prompt stores nothing on disk, so there is nothing to capture.
+    // auth_mode=prompt stores nothing on disk and never reads the token file.
     if facts.mode != AuthMode::File {
+        let obtain = |door| CaptureDecision::Obtain { door, store: false };
         if facts.set_token {
             return CaptureDecision::Fail(format!(
                 "--set-token stores {key} in {}, but auth_mode=prompt\n  \
@@ -345,8 +360,20 @@ pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
                 facts.token_path
             ));
         }
-        return CaptureDecision::UseExisting;
+        if facts.env_token {
+            return obtain(Door::Env);
+        }
+        if facts.tty {
+            return obtain(Door::Prompt);
+        }
+        return CaptureDecision::Fail(format!(
+            "no manager token to verify and no terminal to paste one (auth_mode=prompt)\n  \
+             export: {key}\n  \
+             or store it on disk: vaulted-agent auth-mode file, then\n  \
+             printf %s \"$TOKEN\" | vaulted-agent setup {backend} --set-token"
+        ));
     }
+    let obtain = |door| CaptureDecision::Obtain { door, store: true };
 
     // Invariant 6 / issue #51: an existing token file this process cannot read
     // is a permissions fault. Capturing over it would clobber a working
@@ -375,27 +402,30 @@ pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
             return CaptureDecision::Fail(format!(
                 "--set-token reads the token from stdin, but stdin is a terminal\n  \
                  pipe it:  printf %s \"$TOKEN\" | vaulted-agent setup {backend} --set-token\n  \
-                 or drop --set-token to paste it interactively",
-                backend = facts.kind.backend_name(),
+                 or drop --set-token to paste it interactively"
             ));
         }
-        return CaptureDecision::Stdin;
+        return obtain(Door::Stdin);
     }
 
-    if facts.env_token || facts.file == TokenFile::Present {
-        return CaptureDecision::UseExisting;
+    if facts.env_token {
+        return obtain(Door::Env);
     }
-
+    if facts.force_prompt && facts.tty {
+        return obtain(Door::Prompt);
+    }
+    if facts.file == TokenFile::Present {
+        return obtain(Door::File);
+    }
     if facts.tty {
-        return CaptureDecision::Prompt;
+        return obtain(Door::Prompt);
     }
 
     CaptureDecision::Fail(format!(
         "no manager token yet and no terminal to paste one\n  \
          pipe it:   printf %s \"$TOKEN\" | vaulted-agent setup {backend} --set-token\n  \
          or export: {key}\n  \
-         or paste each launch: vaulted-agent auth-mode prompt",
-        backend = facts.kind.backend_name(),
+         or paste each launch: vaulted-agent auth-mode prompt"
     ))
 }
 
@@ -428,17 +458,11 @@ pub(crate) fn normalize_piped_token(kind: TokenKind, raw: &str) -> Result<String
     Ok(body.to_string())
 }
 
-/// Outcome of `capture_token`.
-///
-/// Three-way rather than `Option`: a declined prompt ("write it later") must
-/// not be confused with "a token already exists", or the caller would fall
-/// through and prompt the operator a second time.
-pub(crate) enum Capture {
-    /// Captured, verified against the backend, and written to the token file.
-    Token(ManagerToken),
-    /// No capture: the caller loads the token the usual way.
-    UseExisting,
-    /// Operator declined at the prompt; nothing was written.
+/// Outcome of `capture_token`. `V` is what the Backend's verify produced.
+pub(crate) enum Capture<V> {
+    /// Verified against the backend, and stored when the auth mode is `file`.
+    Token(ManagerToken, V),
+    /// Operator declined at the prompt; nothing was verified or written.
     Skipped,
 }
 
@@ -449,6 +473,7 @@ fn tty_write(line: &str) {
     }
 }
 
+/// The only Manager-token write outside `write_token_file` itself.
 fn store_captured(paths: &Paths, kind: TokenKind, token: &ManagerToken) -> Result<()> {
     let path = kind.file(paths).to_path_buf();
     let svc = Defaults::load(paths)?.service_user;
@@ -459,75 +484,132 @@ fn store_captured(paths: &Paths, kind: TokenKind, token: &ManagerToken) -> Resul
 
 /// `setup`-only token capture. Never called from the launch path.
 ///
-/// `verify` is the backend liveness check (`bws secret list` / `op whoami`);
-/// an invalid token never lands on disk.
-pub(crate) fn capture_token(
+/// Owns every way `setup` obtains a token (pasted, piped, exported, already
+/// on disk). Each door ends the same way: `verify` (`bws secret list` /
+/// `op whoami`) against the backend, then the token file is written when
+/// `source`'s auth mode is `file`. An invalid token never lands on disk.
+pub(crate) fn capture_token<V>(
     paths: &Paths,
     kind: TokenKind,
-    mode: AuthMode,
+    source: TokenSource,
     set_token: bool,
-    verify: &dyn Fn(&ManagerToken) -> Result<()>,
-) -> Result<Capture> {
-    let facts = CaptureFacts::from_runtime(paths, kind, mode, set_token);
-    match plan_token_capture(&facts) {
-        CaptureDecision::UseExisting => Ok(Capture::UseExisting),
-        CaptureDecision::Fail(msg) => Err(Error::Message(msg)),
-        CaptureDecision::Stdin => capture_from_stdin(paths, kind, verify),
-        CaptureDecision::Prompt => capture_from_prompt(paths, kind, verify),
+    verify: &dyn Fn(&ManagerToken) -> Result<V>,
+) -> Result<Capture<V>> {
+    let facts = CaptureFacts::from_runtime(paths, kind, source, set_token);
+    let (door, store) = match plan_token_capture(&facts) {
+        CaptureDecision::Fail(msg) => return Err(Error::Message(msg)),
+        CaptureDecision::Obtain { door, store } => (door, store),
+    };
+    let captured = match door {
+        Door::Stdin => capture_from_stdin(kind, verify)?,
+        Door::Prompt => capture_from_prompt(paths, kind, store, verify)?,
+        Door::Env => capture_from_env(kind, verify)?,
+        Door::File => capture_from_file(paths, kind, verify)?,
+    };
+    if let Capture::Token(token, _) = &captured {
+        if store {
+            store_captured(paths, kind, token)?;
+        } else {
+            println!("auth_mode=prompt — token not written to disk (good).");
+            println!(
+                "  To store it: vaulted-agent auth-mode file, then re-run setup {}.",
+                kind.backend_name()
+            );
+        }
     }
+    Ok(captured)
 }
 
-/// Verify a candidate against the backend, then store it. Shared by both
-/// capture doors so "an invalid token never lands on disk" has one home.
-/// `Err` carries why the vault refused it; nothing is written in that case.
-fn verify_and_store(
-    paths: &Paths,
+fn capture_from_stdin<V>(
     kind: TokenKind,
-    value: String,
-    verify: &dyn Fn(&ManagerToken) -> Result<()>,
-) -> Result<ManagerToken> {
-    let token = ManagerToken::new(value);
-    verify(&token)?;
-    store_captured(paths, kind, &token)?;
-    Ok(token)
-}
-
-fn capture_from_stdin(
-    paths: &Paths,
-    kind: TokenKind,
-    verify: &dyn Fn(&ManagerToken) -> Result<()>,
-) -> Result<Capture> {
+    verify: &dyn Fn(&ManagerToken) -> Result<V>,
+) -> Result<Capture<V>> {
     use std::io::Read as _;
     let mut raw = String::new();
     io::stdin()
         .read_to_string(&mut raw)
         .map_err(|e| Error::Message(format!("--set-token: reading stdin: {e}")))?;
-    let value = normalize_piped_token(kind, &raw)?;
+    let token = ManagerToken::new(normalize_piped_token(kind, &raw)?);
     // No shape check here. A pipe is deliberate and often a rotation, and the
-    // live verify below is the authority on whether the token works — a
-    // heuristic that has not caught up with a new token format must not be
-    // what blocks it. Verify before write: no re-prompt, just a non-zero exit.
-    let token = verify_and_store(paths, kind, value, verify).map_err(|e| {
+    // live verify is the authority on whether the token works — a heuristic
+    // that has not caught up with a new token format must not be what blocks
+    // it. No re-prompt, just a non-zero exit.
+    let verified = verify(&token).map_err(|e| {
         Error::Message(format!(
             "--set-token: {} rejected by the vault (nothing written)\n  {e}",
             kind.env_var()
         ))
     })?;
-    Ok(Capture::Token(token))
+    Ok(Capture::Token(token, verified))
 }
 
-fn capture_from_prompt(
+/// The exported env var. Nobody is at a paste to correct it, so a rejection
+/// fails right away.
+fn capture_from_env<V>(
+    kind: TokenKind,
+    verify: &dyn Fn(&ManagerToken) -> Result<V>,
+) -> Result<Capture<V>> {
+    let key = kind.env_var();
+    let token = ManagerToken::new(std::env::var(key).unwrap_or_default());
+    let verified = verify(&token).map_err(|e| {
+        Error::Message(format!(
+            "exported {key} rejected by the vault (nothing written)\n  \
+             unset it, or export a working token, then re-run setup {}\n  {e}",
+            kind.backend_name()
+        ))
+    })?;
+    Ok(Capture::Token(token, verified))
+}
+
+/// The token already on disk. A rejected one is never overwritten here:
+/// rotating it is the operator's explicit `--set-token`.
+fn capture_from_file<V>(
     paths: &Paths,
     kind: TokenKind,
-    verify: &dyn Fn(&ManagerToken) -> Result<()>,
-) -> Result<Capture> {
+    verify: &dyn Fn(&ManagerToken) -> Result<V>,
+) -> Result<Capture<V>> {
+    let key = kind.env_var();
+    let path = kind.file(paths);
+    let token = match read_token_file(path, key) {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+            return Err(Error::Message(format!(
+                "{} no longer holds {key}",
+                path.display()
+            )))
+        }
+        Err(Error::Io { path, source }) => return Err(token_file_unreadable(paths, &path, source)),
+        Err(e) => return Err(e),
+    };
+    let verified = verify(&token).map_err(|e| {
+        Error::Message(format!(
+            "{key} in {} rejected by the vault (nothing written; the file is unchanged)\n  \
+             rotate it:  printf %s \"$TOKEN\" | vaulted-agent setup {} --set-token\n  {e}",
+            path.display(),
+            kind.backend_name()
+        ))
+    })?;
+    Ok(Capture::Token(token, verified))
+}
+
+fn capture_from_prompt<V>(
+    paths: &Paths,
+    kind: TokenKind,
+    store: bool,
+    verify: &dyn Fn(&ManagerToken) -> Result<V>,
+) -> Result<Capture<V>> {
+    let path = kind.file(paths);
+    let fate = if store {
+        format!("will be written to {}", path.display())
+    } else {
+        "not written to disk".to_string()
+    };
     tty_write(&format!("\nGet it at: {}", kind.console_url()));
     // Two attempts: one paste, one correction.
     for attempt in 0..2 {
         tty_write(&format!(
-            "{}\n(hidden; will be written to {}, empty to skip): ",
-            kind.prompt_label(),
-            kind.file(paths).display()
+            "{}\n(hidden; {fate}, empty to skip): ",
+            kind.prompt_label()
         ));
         let raw = rpassword::read_password().map_err(|e| {
             Error::Message(format!(
@@ -539,20 +621,27 @@ fn capture_from_prompt(
         let value = raw.trim().to_string();
         if value.is_empty() {
             // install.sh parity: an empty paste is a deliberate skip.
-            println!(
-                "no token provided; write {} later, or: vaulted-agent auth-mode prompt",
-                kind.file(paths).display()
-            );
+            if store {
+                println!(
+                    "no token provided; write {} later, or: vaulted-agent auth-mode prompt",
+                    path.display()
+                );
+            } else {
+                println!("no token provided; nothing verified.");
+            }
             return Ok(Capture::Skipped);
         }
         // Shape first, so a master password or a login API key is named for
         // what it is instead of coming back as an opaque vault rejection.
         let problem = match kind.shape_problem(&value) {
             Some(problem) => problem,
-            None => match verify_and_store(paths, kind, value, verify) {
-                Ok(token) => return Ok(Capture::Token(token)),
-                Err(e) => format!("the vault rejected it ({e})"),
-            },
+            None => {
+                let token = ManagerToken::new(value);
+                match verify(&token) {
+                    Ok(verified) => return Ok(Capture::Token(token, verified)),
+                    Err(e) => format!("the vault rejected it ({e})"),
+                }
+            }
         };
         if attempt == 0 {
             eprintln!("vaulted-agent: {problem} — try again (nothing written).");
@@ -638,6 +727,11 @@ impl TokenSource {
     /// Effective auth mode for this invocation (env override, else config).
     pub fn auth_mode(&self) -> AuthMode {
         self.mode
+    }
+
+    /// `-p` / `VAULTED_AGENT_PROMPT_AUTH=1` asked for a paste this invocation.
+    pub(crate) fn forces_prompt(&self) -> bool {
+        self.force_prompt
     }
 
     /// Pure: where the token comes from, given whether its env var is set.
@@ -843,6 +937,7 @@ mod tests {
             file: TokenFile::Missing,
             env_token: false,
             mode: AuthMode::File,
+            force_prompt: false,
             tty: true,
             set_token: false,
             token_path: "/etc/vaulted-agent/bws.env".into(),
@@ -850,137 +945,234 @@ mod tests {
         }
     }
 
-    #[test]
-    fn capture_prompts_only_when_file_missing_no_env_and_mode_file() {
-        assert_eq!(plan_token_capture(&facts()), CaptureDecision::Prompt);
+    fn stored(door: Door) -> CaptureDecision {
+        CaptureDecision::Obtain { door, store: true }
     }
 
+    fn unstored(door: Door) -> CaptureDecision {
+        CaptureDecision::Obtain { door, store: false }
+    }
+
+    fn fail_message(decision: CaptureDecision) -> String {
+        match decision {
+            CaptureDecision::Fail(msg) => msg,
+            other => panic!("expected Fail, got {other:?}"),
+        }
+    }
+
+    // --- auth_mode = file ------------------------------------------------
+
     #[test]
-    fn capture_defers_to_existing_token_file() {
-        assert_eq!(
-            plan_token_capture(&CaptureFacts {
-                file: TokenFile::Present,
+    fn file_mode_row_1_unreadable_token_file_fails_whatever_else_is_available() {
+        // Invariant 6 / issue #51: overwriting would clobber a working
+        // credential and hide the permissions fault.
+        for (env_token, tty, set_token, force_prompt) in [
+            (false, true, false, false),
+            (true, true, false, false),
+            (false, false, true, false),
+            (true, false, true, false),
+            (false, true, false, true),
+        ] {
+            let msg = fail_message(plan_token_capture(&CaptureFacts {
+                file: TokenFile::Unreadable,
+                env_token,
+                tty,
+                set_token,
+                force_prompt,
                 ..facts()
-            }),
-            CaptureDecision::UseExisting
-        );
+            }));
+            assert!(msg.contains("cannot be read"), "{msg}");
+            assert!(msg.contains("bws.env"), "{msg}");
+        }
     }
 
     #[test]
-    fn capture_defers_to_exported_token() {
-        assert_eq!(
-            plan_token_capture(&CaptureFacts {
-                env_token: true,
-                ..facts()
-            }),
-            CaptureDecision::UseExisting
-        );
-    }
-
-    #[test]
-    fn capture_never_fires_in_prompt_mode() {
-        for file in [TokenFile::Missing, TokenFile::Present] {
+    fn file_mode_row_2_set_token_reads_stdin_over_env_file_and_force_prompt() {
+        // Rotation door: an explicit argument beats ambient env, so a rotation
+        // never silently stores the stale exported value.
+        for (file, env_token, force_prompt) in [
+            (TokenFile::Missing, false, false),
+            (TokenFile::Present, true, false),
+            (TokenFile::Missing, true, false),
+            (TokenFile::Present, false, true),
+        ] {
             assert_eq!(
                 plan_token_capture(&CaptureFacts {
-                    mode: AuthMode::Prompt,
                     file,
+                    env_token,
+                    force_prompt,
+                    tty: false,
+                    set_token: true,
                     ..facts()
                 }),
-                CaptureDecision::UseExisting
+                stored(Door::Stdin)
             );
         }
     }
 
     #[test]
-    fn set_token_in_prompt_mode_is_a_contradiction() {
-        match plan_token_capture(&CaptureFacts {
-            mode: AuthMode::Prompt,
-            tty: false,
+    fn file_mode_row_2_set_token_at_a_terminal_says_to_pipe_instead_of_blocking() {
+        // Reading stdin from a terminal waits for ^D and reads like a hang.
+        let msg = fail_message(plan_token_capture(&CaptureFacts {
             set_token: true,
             ..facts()
-        }) {
-            CaptureDecision::Fail(msg) => assert!(msg.contains("auth-mode file"), "{msg}"),
-            other => panic!("expected Fail, got {other:?}"),
+        }));
+        assert!(msg.contains("stdin is a terminal"), "{msg}");
+        assert!(msg.contains("printf"), "{msg}");
+    }
+
+    #[test]
+    fn file_mode_row_3_exported_token_beats_force_prompt_and_the_file() {
+        for (file, force_prompt, tty) in [
+            (TokenFile::Missing, false, true),
+            (TokenFile::Present, false, false),
+            (TokenFile::Present, true, true),
+        ] {
+            assert_eq!(
+                plan_token_capture(&CaptureFacts {
+                    env_token: true,
+                    file,
+                    force_prompt,
+                    tty,
+                    ..facts()
+                }),
+                stored(Door::Env)
+            );
         }
     }
 
     #[test]
-    fn set_token_outranks_exported_token_and_existing_file() {
-        // Rotation door: an explicit argument beats ambient env, so a rotation
-        // never silently stores the stale exported value.
+    fn file_mode_row_4_force_prompt_at_a_terminal_beats_the_file() {
+        assert_eq!(
+            plan_token_capture(&CaptureFacts {
+                force_prompt: true,
+                file: TokenFile::Present,
+                ..facts()
+            }),
+            stored(Door::Prompt)
+        );
+    }
+
+    #[test]
+    fn file_mode_row_5_token_file_is_a_door_and_is_stored_again() {
+        // Stored again so File replace repairs mode and group; identical bytes
+        // are never rewritten.
+        for tty in [true, false] {
+            assert_eq!(
+                plan_token_capture(&CaptureFacts {
+                    file: TokenFile::Present,
+                    tty,
+                    ..facts()
+                }),
+                stored(Door::File)
+            );
+        }
+        // -p with no terminal cannot paste, so the file still answers.
         assert_eq!(
             plan_token_capture(&CaptureFacts {
                 file: TokenFile::Present,
-                env_token: true,
+                force_prompt: true,
                 tty: false,
-                set_token: true,
                 ..facts()
             }),
-            CaptureDecision::Stdin
-        );
-        assert_eq!(
-            plan_token_capture(&CaptureFacts {
-                env_token: true,
-                tty: false,
-                set_token: true,
-                ..facts()
-            }),
-            CaptureDecision::Stdin
+            stored(Door::File)
         );
     }
 
     #[test]
-    fn set_token_at_a_terminal_says_to_pipe_instead_of_blocking() {
-        // Reading stdin from a terminal waits for ^D and reads like a hang.
-        match plan_token_capture(&CaptureFacts {
-            set_token: true,
+    fn file_mode_row_6_terminal_with_nothing_else_prompts() {
+        assert_eq!(plan_token_capture(&facts()), stored(Door::Prompt));
+    }
+
+    #[test]
+    fn file_mode_row_7_no_token_and_no_terminal_names_set_token() {
+        for force_prompt in [false, true] {
+            let msg = fail_message(plan_token_capture(&CaptureFacts {
+                tty: false,
+                force_prompt,
+                ..facts()
+            }));
+            assert!(msg.contains("no manager token yet"), "{msg}");
+            assert!(msg.contains("--set-token"), "{msg}");
+            assert!(msg.contains("BWS_ACCESS_TOKEN"), "{msg}");
+        }
+    }
+
+    // --- auth_mode = prompt ----------------------------------------------
+
+    fn prompt_mode() -> CaptureFacts {
+        CaptureFacts {
+            mode: AuthMode::Prompt,
             ..facts()
-        }) {
-            CaptureDecision::Fail(msg) => {
-                assert!(msg.contains("stdin is a terminal"), "{msg}");
-                assert!(msg.contains("printf"), "{msg}");
-            }
-            other => panic!("expected Fail, got {other:?}"),
         }
     }
 
     #[test]
-    fn unreadable_token_file_never_becomes_a_paste() {
-        // Invariant 6 / issue #51: overwriting would clobber a working
-        // credential and hide the permissions fault.
-        for (env_token, tty, set_token) in [
-            (false, true, false),
-            (true, true, false),
-            (false, false, true),
-            (true, false, true),
+    fn prompt_mode_row_1_set_token_is_a_contradiction() {
+        for (env_token, file) in [
+            (false, TokenFile::Missing),
+            (true, TokenFile::Present),
+            (false, TokenFile::Unreadable),
         ] {
-            match plan_token_capture(&CaptureFacts {
-                file: TokenFile::Unreadable,
+            let msg = fail_message(plan_token_capture(&CaptureFacts {
+                tty: false,
+                set_token: true,
                 env_token,
-                tty,
-                set_token,
-                ..facts()
-            }) {
-                CaptureDecision::Fail(msg) => {
-                    assert!(msg.contains("cannot be read"), "{msg}");
-                    assert!(msg.contains("bws.env"), "{msg}");
-                }
-                other => panic!("expected Fail, got {other:?}"),
+                file,
+                ..prompt_mode()
+            }));
+            assert!(msg.contains("auth-mode file"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn prompt_mode_row_2_exported_token_is_verified_but_not_stored() {
+        for tty in [true, false] {
+            assert_eq!(
+                plan_token_capture(&CaptureFacts {
+                    env_token: true,
+                    tty,
+                    ..prompt_mode()
+                }),
+                unstored(Door::Env)
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_mode_row_3_terminal_pastes_and_never_reads_the_token_file() {
+        for file in [
+            TokenFile::Missing,
+            TokenFile::Present,
+            TokenFile::Unreadable,
+        ] {
+            for force_prompt in [false, true] {
+                assert_eq!(
+                    plan_token_capture(&CaptureFacts {
+                        file,
+                        force_prompt,
+                        ..prompt_mode()
+                    }),
+                    unstored(Door::Prompt)
+                );
             }
         }
     }
 
     #[test]
-    fn no_tty_and_no_token_names_set_token() {
-        match plan_token_capture(&CaptureFacts {
-            tty: false,
-            ..facts()
-        }) {
-            CaptureDecision::Fail(msg) => {
-                assert!(msg.contains("--set-token"), "{msg}");
-                assert!(msg.contains("BWS_ACCESS_TOKEN"), "{msg}");
-            }
-            other => panic!("expected Fail, got {other:?}"),
+    fn prompt_mode_row_4_no_token_and_no_terminal_says_export_or_auth_mode_file() {
+        for file in [
+            TokenFile::Missing,
+            TokenFile::Present,
+            TokenFile::Unreadable,
+        ] {
+            let msg = fail_message(plan_token_capture(&CaptureFacts {
+                file,
+                tty: false,
+                ..prompt_mode()
+            }));
+            assert!(msg.contains("export: BWS_ACCESS_TOKEN"), "{msg}");
+            assert!(msg.contains("auth-mode file"), "{msg}");
         }
     }
 
