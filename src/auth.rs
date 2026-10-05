@@ -746,9 +746,35 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     )))
 }
 
-/// Write `KEY=token` with mode 0640 through File replace. When running as root
-/// and `service_user` is set, the group is the service user's, so the service
-/// account can read the file after sudo re-exec (stories #11, #40).
+/// The group a Manager-token file written now should carry, as a gid. Pure:
+/// `gid_of` resolves an account's primary group (`None` for unknown).
+///
+/// Only root changes a file's group. The Service user wins, so the service
+/// account can read the file after the sudo re-exec (stories #11, #40); an
+/// unknown Service user means no change, never a fallback to the invoker.
+/// With no Service user the launch account is the invoker, so `SUDO_USER`'s
+/// group is used when it names a real, non-root account (issue #150), the
+/// same choice the installer has always made.
+pub(crate) fn token_file_gid(
+    service_user: Option<&str>,
+    sudo_user: Option<&str>,
+    euid_root: bool,
+    gid_of: impl Fn(&str) -> Option<u32>,
+) -> Option<u32> {
+    if !euid_root {
+        return None;
+    }
+    match service_user.map(str::trim).filter(|u| !u.is_empty()) {
+        Some(svc) => gid_of(svc),
+        None => sudo_user
+            .map(str::trim)
+            .filter(|u| !u.is_empty() && *u != "root")
+            .and_then(gid_of),
+    }
+}
+
+/// Write `KEY=token` with mode 0640 through File replace, group chosen by
+/// [`token_file_gid`] from `service_user`, `SUDO_USER` and the effective uid.
 ///
 /// The token is staged in a 0600 temp file and renamed over the old one, so it
 /// is never briefly world-readable nor truncated in place. An unchanged token
@@ -762,10 +788,13 @@ pub fn write_token_file(
     service_user: Option<&str>,
 ) -> Result<()> {
     let body = format!("{}={}\n", key, token.expose());
-    // root:SERVICE_USER so mode 0640 is useful under a service-account install.
-    let gid = service_user
-        .filter(|u| !u.is_empty() && is_euid_root())
-        .and_then(gid_for_user);
+    let sudo_user = std::env::var("SUDO_USER").ok();
+    let gid = token_file_gid(
+        service_user,
+        sudo_user.as_deref(),
+        is_euid_root(),
+        gid_for_user,
+    );
     file_replace::replace(path, body.as_bytes(), Perms::Exact { mode: 0o640, gid })
         .map_err(|e| Error::config_write(path, e))
 }
@@ -790,7 +819,7 @@ pub(crate) fn is_euid_root() -> bool {
 }
 
 fn gid_for_user(user: &str) -> Option<u32> {
-    // Prefer primary group of the service account (`id -g user`).
+    // Primary group of the account (`id -g user`); None when it is unknown.
     let out = std::process::Command::new("id")
         .args(["-g", user])
         .output()
@@ -1094,6 +1123,59 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("op.env");
         assert!(matches!(token_file_status(&path), TokenFileStatus::Missing));
+    }
+
+    /// Accounts the group tests know: everyone else is unknown.
+    fn gid_of(user: &str) -> Option<u32> {
+        match user {
+            "root" => Some(0),
+            "svc" => Some(900),
+            "jacob" => Some(1000),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn token_file_group_is_the_service_users_over_sudo_user() {
+        assert_eq!(
+            token_file_gid(Some("svc"), Some("jacob"), true, gid_of),
+            Some(900)
+        );
+        // An unknown Service user still wins: no fallback to the invoker.
+        assert_eq!(
+            token_file_gid(Some("ghost"), Some("jacob"), true, gid_of),
+            None
+        );
+    }
+
+    #[test]
+    fn token_file_group_is_sudo_users_under_root_with_no_service_user() {
+        assert_eq!(
+            token_file_gid(None, Some("jacob"), true, gid_of),
+            Some(1000)
+        );
+        assert_eq!(
+            token_file_gid(Some("  "), Some("jacob"), true, gid_of),
+            Some(1000),
+            "a blank Service user is no Service user"
+        );
+    }
+
+    #[test]
+    fn token_file_group_unchanged_for_sudo_user_root_or_unknown() {
+        assert_eq!(token_file_gid(None, Some("root"), true, gid_of), None);
+        assert_eq!(token_file_gid(None, Some("ghost"), true, gid_of), None);
+        assert_eq!(token_file_gid(None, Some(""), true, gid_of), None);
+        assert_eq!(token_file_gid(None, None, true, gid_of), None);
+    }
+
+    #[test]
+    fn token_file_group_unchanged_when_not_root() {
+        assert_eq!(token_file_gid(None, Some("jacob"), false, gid_of), None);
+        assert_eq!(
+            token_file_gid(Some("svc"), Some("jacob"), false, gid_of),
+            None
+        );
     }
 
     #[test]
