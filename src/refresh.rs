@@ -124,7 +124,7 @@ pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) ->
             take_all,
             mode,
             prune,
-            interactive: std::io::IsTerminal::is_terminal(&io::stdin()),
+            interactive: io::IsTerminal::is_terminal(&io::stdin()),
         },
         &mut read_stdin_line,
     )
@@ -324,19 +324,19 @@ impl RefreshStep {
 
     /// List, let the operator choose, and turn the choice into mappings. The
     /// manager token, when one is needed, is loaded and dropped in here, so it
-    /// is gone before the flow writes anything. `ask` is `None` when the run
+    /// is gone before the flow writes anything. `select` is `None` when the run
     /// takes everything without asking.
     fn gather(
         &self,
         paths: &Paths,
         listing: ListingSource,
         path: &Path,
-        ask: Option<&mut LineReader>,
+        select: Option<&mut LineReader>,
     ) -> Result<Gathered> {
         match (self, listing) {
-            (RefreshStep::Bitwarden, listing) => gather_bitwarden(paths, listing, ask),
+            (RefreshStep::Bitwarden, listing) => gather_bitwarden(paths, listing, select),
             (RefreshStep::OnePassword { exclusions }, ListingSource::Fetch(token_source)) => {
-                gather_onepassword(paths, token_source, path, ask, exclusions)
+                gather_onepassword(paths, token_source, path, select, exclusions)
             }
             // Only `setup bitwarden` hands a listing in, and it is a `bws` one.
             (RefreshStep::OnePassword { .. }, ListingSource::Given(_)) => Err(Error::Message(
@@ -515,7 +515,7 @@ fn refresh_refs(
 fn gather_bitwarden(
     paths: &Paths,
     listing: ListingSource,
-    ask: Option<&mut LineReader>,
+    select: Option<&mut LineReader>,
 ) -> Result<Gathered> {
     let listing = match listing {
         ListingSource::Fetch(token_source) => {
@@ -532,7 +532,7 @@ fn gather_bitwarden(
         ));
     }
 
-    let indices = match ask {
+    let indices = match select {
         None => None, // all
         Some(read) => {
             println!("Secrets:");
@@ -917,6 +917,19 @@ struct Gate {
     interactive: bool,
 }
 
+impl Gate {
+    /// [`ref_fix_choice`] for `pending` planned edits.
+    fn choice(&self, pending: usize) -> RefFixChoice {
+        ref_fix_choice(
+            self.origin,
+            pending,
+            self.prune,
+            self.mode == WriteMode::Replace,
+            self.interactive,
+        )
+    }
+}
+
 /// Decide what to do about a report's planned edits, then do it.
 ///
 /// Shared by both backends: the gate (`--prune`, an interactive yes, or report
@@ -933,13 +946,7 @@ fn apply_ref_edits(
     }
     let what = describe_ref_edits(edits);
 
-    let apply = match ref_fix_choice(
-        gate.origin,
-        edits.len(),
-        gate.prune,
-        gate.mode == WriteMode::Replace,
-        gate.interactive,
-    ) {
+    let apply = match gate.choice(edits.len()) {
         RefFixChoice::NothingPending => return Ok(()),
         RefFixChoice::ReplaceRegenerates => {
             println!("  --replace rewrites the file, so these go with it.\n");
@@ -1032,7 +1039,7 @@ fn gather_onepassword(
     paths: &Paths,
     token_source: TokenSource,
     path: &Path,
-    ask: Option<&mut LineReader>,
+    select: Option<&mut LineReader>,
     exclusions: &[String],
 ) -> Result<Gathered> {
     let token = token_source.load(paths, TokenKind::Op)?;
@@ -1046,7 +1053,7 @@ fn gather_onepassword(
         ));
     }
 
-    let chosen = match ask {
+    let chosen = match select {
         None => None,
         Some(read) => {
             println!("Items visible to this token:");
@@ -1639,21 +1646,24 @@ mod tests {
 
     #[test]
     fn the_selection_question_reads_blank_or_failure_as_all() {
-        let ask = |read: &mut LineReader| ask_selection(read, "? ", 5);
-        assert_eq!(ask(&mut scripted(&[""])).unwrap(), None);
-        assert_eq!(ask(&mut scripted(&["   "])).unwrap(), None);
-        assert_eq!(ask(&mut failing()).unwrap(), None);
+        let select = |read: &mut LineReader| ask_selection(read, "? ", 5);
+        assert_eq!(select(&mut scripted(&[""])).unwrap(), None);
+        assert_eq!(select(&mut scripted(&["   "])).unwrap(), None);
+        assert_eq!(select(&mut failing()).unwrap(), None);
         assert_eq!(
-            ask(&mut scripted(&["all"])).unwrap(),
+            select(&mut scripted(&["all"])).unwrap(),
             Some(vec![0, 1, 2, 3, 4])
         );
         assert_eq!(
-            ask(&mut scripted(&["1-3,5"])).unwrap(),
+            select(&mut scripted(&["1-3,5"])).unwrap(),
             Some(vec![0, 1, 2, 4])
         );
-        assert_eq!(ask(&mut scripted(&["4-2"])).unwrap(), Some(vec![1, 2, 3]));
-        assert!(ask(&mut scripted(&["6"])).is_err());
-        assert!(ask(&mut scripted(&["x"])).is_err());
+        assert_eq!(
+            select(&mut scripted(&["4-2"])).unwrap(),
+            Some(vec![1, 2, 3])
+        );
+        assert!(select(&mut scripted(&["6"])).is_err());
+        assert!(select(&mut scripted(&["x"])).is_err());
     }
 
     // ---- the 1Password item fold ----
