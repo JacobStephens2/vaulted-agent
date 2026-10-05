@@ -5,8 +5,8 @@
 //!
 //! What a run finds in the lines already in the file is a [`RefreshReport`]:
 //! data, built before anything is decided, printed by one renderer. The Refs
-//! module owns the file's grammar and its writes, which `setup`, `edit-manifest`
-//! and the launch share; this module owns the policy about what to report and
+//! module owns the file's grammar and its writes, which this module,
+//! `edit-manifest` and the launch share; this module owns the policy about what to report and
 //! what to change.
 
 use std::fs;
@@ -116,12 +116,14 @@ pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) ->
     refresh_refs(
         paths,
         Origin::Refresh,
-        Listing::Fetch(token_source),
+        ListingSource::Fetch(token_source),
         step,
-        man_path,
-        take_all,
-        mode,
-        prune,
+        RunOptions {
+            man_path,
+            take_all,
+            mode,
+            prune,
+        },
     )
 }
 
@@ -135,12 +137,14 @@ pub(crate) fn setup_refs(paths: &Paths, listing: BwListing) -> Result<()> {
     refresh_refs(
         paths,
         Origin::Setup,
-        Listing::Given(listing),
+        ListingSource::Given(listing),
         RefreshStep::Bitwarden,
-        None,
-        true,
-        None,
-        false,
+        RunOptions {
+            man_path: None,
+            take_all: true,
+            mode: None,
+            prune: false,
+        },
     )
 }
 
@@ -172,8 +176,19 @@ impl Origin {
     }
 }
 
+/// What the command line asked of one run. `setup` asks for every secret,
+/// with the write mode settled by the file's presence, and never prunes.
+struct RunOptions {
+    /// An explicit Refs file; `None` is Vault wiring's choice.
+    man_path: Option<String>,
+    take_all: bool,
+    /// `--merge` / `--replace`; `None` settles on whether the file exists.
+    mode: Option<WriteMode>,
+    prune: bool,
+}
+
 /// Where the flow's listing comes from.
-enum Listing {
+enum ListingSource {
     /// Load the manager token and ask the vault (`refresh`).
     Fetch(TokenSource),
     /// Already fetched by Token capture (`setup bitwarden`).
@@ -292,17 +307,17 @@ impl RefreshStep {
     fn gather(
         &self,
         paths: &Paths,
-        listing: Listing,
+        listing: ListingSource,
         path: &Path,
         take_all: bool,
     ) -> Result<Gathered> {
         match (self, listing) {
             (RefreshStep::Bitwarden, listing) => gather_bitwarden(paths, listing, take_all),
-            (RefreshStep::OnePassword { exclusions }, Listing::Fetch(token_source)) => {
+            (RefreshStep::OnePassword { exclusions }, ListingSource::Fetch(token_source)) => {
                 gather_onepassword(paths, token_source, path, take_all, exclusions)
             }
             // Only `setup bitwarden` hands a listing in, and it is a `bws` one.
-            (RefreshStep::OnePassword { .. }, Listing::Given(_)) => Err(Error::Message(
+            (RefreshStep::OnePassword { .. }, ListingSource::Given(_)) => Err(Error::Message(
                 "refresh: a Bitwarden listing cannot refresh a 1Password Refs file".into(),
             )),
         }
@@ -385,17 +400,19 @@ impl Fetched {
 
 /// One write of a Refs file, whichever Backend `step` lists from and whichever
 /// verb (`origin`) asked for it.
-#[allow(clippy::too_many_arguments)]
 fn refresh_refs(
     paths: &Paths,
     origin: Origin,
-    listing: Listing,
+    listing: ListingSource,
     mut step: RefreshStep,
-    man_path: Option<String>,
-    take_all: bool,
-    mode: Option<WriteMode>,
-    prune: bool,
+    opts: RunOptions,
 ) -> Result<()> {
+    let RunOptions {
+        man_path,
+        take_all,
+        mode,
+        prune,
+    } = opts;
     let path = match man_path {
         Some(man) => paths.resolve_manifest(&man),
         None => default_refs_file(paths, step.backend())?,
@@ -461,15 +478,15 @@ fn refresh_refs(
 }
 
 /// Bitwarden: pick from the secrets the token can see.
-fn gather_bitwarden(paths: &Paths, listing: Listing, take_all: bool) -> Result<Gathered> {
+fn gather_bitwarden(paths: &Paths, listing: ListingSource, take_all: bool) -> Result<Gathered> {
     let listing = match listing {
-        Listing::Fetch(token_source) => {
+        ListingSource::Fetch(token_source) => {
             let token = token_source.load(paths, TokenKind::Bws)?;
             let listing = backend::bws_listing(&token)?;
             drop(token);
             listing
         }
-        Listing::Given(listing) => listing,
+        ListingSource::Given(listing) => listing,
     };
     if listing.is_empty() {
         return Err(Error::Message(
