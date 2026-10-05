@@ -1,3 +1,25 @@
+# Migration: `setup <backend>` wires day-one Harnesses (unreleased)
+
+**Behaviour change.** `vaulted-agent setup bitwarden|onepassword|pass|sops` now
+does the Vault wiring that only the installer used to do, before it asks for a
+token:
+
+- `default_backend` is set to the chosen Backend.
+- The starter Refs file is created if it is missing: the one the Harnesses on
+  that Backend already use, else `openai.env.refs`, `onepassword.refs` or
+  `pass.refs`. An existing file is never overwritten.
+- Every day-one Harness (`plainfile` + `empty.env`, not env-blind) is pointed
+  at that Backend and Refs file, and gets `workdir = caller` if it has no
+  `workdir`. Any other Harness is left alone.
+- `sops` records `default_backend` only.
+
+A report lists each Harness, wired or left, and why. It replaces the old
+`Point a harness at it with: manifest = …` and `Example harness: backend =
+onepassword` lines. Running setup again changes nothing. A missing or rejected
+token still leaves the machine wired, and setup still exits non-zero with the
+same hint. `setup <backend> --wire-only` wires and stops before the token; it
+needs a named Backend and is refused with `--set-token`.
+
 # Migration: a bad `defaults.conf` stops the run (unreleased)
 
 **Behaviour break.** `defaults.conf` is read once, through Machine defaults,

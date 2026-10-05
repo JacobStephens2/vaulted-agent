@@ -51,9 +51,14 @@ va doctor         # health check as the account a launch would use
 and warns when those two combine on a locked-down home. Non-interactive setup
 leaves existing choices alone.
 
-Day-one harnesses start with **no vault secrets** until you set them up.
-Bitwarden: `va setup bitwarden` builds a refs file (env var → secret *reference*
-only). Point harnesses at it, or use `va run -m …`.
+Day-one harnesses (`plainfile` + `empty.env`) start with **no vault secrets**
+until you set them up. `va setup bitwarden` (or `onepassword`, `pass`) records
+`default_backend`, creates the starter refs file if it is missing, and rewires
+every day-one harness to it, adding `workdir = caller` where none is set; it
+prints which harnesses it wired and which it left alone, and why. Bitwarden
+setup then maps your secrets into that refs file (env var → secret *reference*
+only). `va setup <backend> --wire-only` does the wiring and stops before the
+token. `sops` records `default_backend` only.
 
 ### 3. Launch
 
@@ -825,8 +830,10 @@ over raw `bws` so auth matches launches.
 **Refs file (what setup / refresh write).** After listing secrets, setup (or
 `va refresh`) can write a **refs file** under `/etc/vaulted-agent/manifests/`
 (default name `openai.env.refs`). That is only a filename for lines like
-`OPENAI_API_KEY=name:…` - not a secret, not the access token. Point a harness
-at it with `backend = bitwarden` and `manifest = openai.env.refs`, or:
+`OPENAI_API_KEY=name:…` - not a secret, not the access token. When harnesses
+on `bitwarden` already name a refs file, setup and refresh use that one instead.
+Setup points every day-one harness at it; point another harness at it with
+`backend = bitwarden` and `manifest = openai.env.refs`, or:
 
 ```bash
 va run -m openai.env.refs --backend bitwarden -- your-command

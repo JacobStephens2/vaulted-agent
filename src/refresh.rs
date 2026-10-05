@@ -18,6 +18,7 @@ use crate::error::{Error, Result};
 use crate::inventory::{AliasUse, Inventory};
 use crate::onepassword::{self, OpField, OpItem, OpListing};
 use crate::refs::{self, Mapping, RefEdit, RefFate, RefsStyle, ScannedRef, WriteMode};
+use crate::vault_wiring;
 
 pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     let mut man_path: Option<String> = None;
@@ -121,30 +122,15 @@ fn refresh_backend(paths: &Paths) -> Backend {
 }
 
 /// Resolve the Refs file for a bare `refresh` / setup from harness config
-/// (story #13): the one Manifest the Harnesses on `be` use, the Backend's
-/// fallback under the manifest directory when none does, and a refusal naming
-/// the candidates when several do.
+/// (story #13), through Vault wiring's choice: the one Manifest the Harnesses
+/// on `be` use, the Backend's fallback under the manifest directory when none
+/// does, and a refusal naming the candidates when several do.
 pub(crate) fn default_refs_file(paths: &Paths, be: Backend) -> Result<PathBuf> {
-    Ok(Inventory::load(paths)?
-        .manifest_for(be)?
-        .unwrap_or_else(|| paths.manifest_dir.join(fallback_refs_file(be))))
+    // Only Bitwarden and 1Password have Refs files `refresh` writes;
+    // `RefreshStep::new` refuses the rest before anything asks.
+    vault_wiring::refs_file(paths, &Inventory::load(paths)?, be)?
+        .ok_or_else(|| Error::Message(format!("refresh: {be} has no Refs file")))
 }
-
-/// The Refs file `refresh` and `setup` write on `be` when no Harness names one.
-/// Only Bitwarden and 1Password have Refs files; `RefreshStep::new` refuses
-/// the rest before anything asks.
-fn fallback_refs_file(be: Backend) -> &'static str {
-    match be {
-        Backend::OnePassword => "onepassword.refs",
-        Backend::Bitwarden | Backend::Pass | Backend::Sops | Backend::Plainfile => {
-            BITWARDEN_FALLBACK_REFS
-        }
-    }
-}
-
-/// The Bitwarden Refs file `refresh` and `setup bitwarden` write when no
-/// Harness names one.
-const BITWARDEN_FALLBACK_REFS: &str = "openai.env.refs";
 
 /// The part of `refresh` that differs per Backend: the listing, the selection
 /// menu, turning the selection into mappings, and the facts the lines already
