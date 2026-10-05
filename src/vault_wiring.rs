@@ -23,14 +23,34 @@ use crate::inventory::{HarnessView, Inventory};
 pub(crate) const EMPTY_MANIFEST: &str = "empty.env";
 
 /// The Refs file wiring and `refresh` use on `be` when no Harness on `be`
-/// names one; `None` for a Backend that wires no Harness.
-fn fallback_refs_file(be: Backend) -> Option<&'static str> {
-    match be {
-        Backend::Bitwarden => Some("openai.env.refs"),
-        Backend::OnePassword => Some("onepassword.refs"),
-        Backend::Pass => Some("pass.refs"),
-        Backend::Sops | Backend::Plainfile => None,
-    }
+/// names one, and what its starter header says; `None` for a Backend that
+/// wires no Harness.
+struct Fallback {
+    name: &'static str,
+    what: &'static str,
+    fill: &'static str,
+}
+
+fn fallback(be: Backend) -> Option<Fallback> {
+    let (name, what, fill) = match be {
+        Backend::Bitwarden => (
+            "openai.env.refs",
+            "Bitwarden Secrets Manager",
+            "Map secrets into it with: vaulted-agent refresh",
+        ),
+        Backend::OnePassword => (
+            "onepassword.refs",
+            "1Password",
+            "Map items into it with: vaulted-agent refresh --backend onepassword",
+        ),
+        Backend::Pass => (
+            "pass.refs",
+            "pass (passwordstore.org)",
+            "Add one line per secret, the variable and its store path: vaulted-agent edit-manifest",
+        ),
+        Backend::Sops | Backend::Plainfile => return None,
+    };
+    Some(Fallback { name, what, fill })
 }
 
 /// The Refs file for `be`: the one Manifest the Harnesses on `be` already
@@ -42,13 +62,13 @@ pub(crate) fn refs_file(
     inventory: &Inventory,
     be: Backend,
 ) -> Result<Option<PathBuf>> {
-    let Some(fallback) = fallback_refs_file(be) else {
+    let Some(fallback) = fallback(be) else {
         return Ok(None);
     };
     Ok(Some(
         inventory
             .manifest_for(be)?
-            .unwrap_or_else(|| paths.manifest_dir.join(fallback)),
+            .unwrap_or_else(|| paths.manifest_dir.join(fallback.name)),
     ))
 }
 
@@ -171,24 +191,11 @@ fn manifest_text(paths: &Paths, path: &Path) -> String {
 /// The starter Refs file. No reference shape in it (`op://`, `name:`, a
 /// uuid): `op inject` resolves comments too, and the Manifest check flags one.
 /// Only a Backend with a fallback Refs file gets one, so sops never does.
-fn starter(backend: Backend) -> String {
-    let (what, fill) = match backend {
-        Backend::Bitwarden => (
-            "Bitwarden Secrets Manager",
-            "Map secrets into it with: vaulted-agent refresh",
-        ),
-        Backend::OnePassword => (
-            "1Password",
-            "Map items into it with: vaulted-agent refresh --backend onepassword",
-        ),
-        Backend::Pass | Backend::Sops | Backend::Plainfile => (
-            "pass (passwordstore.org)",
-            "Add one line per secret, the variable and its store path: vaulted-agent edit-manifest",
-        ),
-    };
+fn starter(f: &Fallback) -> String {
     format!(
-        "# {what} Refs file, created by vaulted-agent setup.\n\
-         # References only, never secret values. {fill}\n"
+        "# {} Refs file, created by vaulted-agent setup.\n\
+         # References only, never secret values. {}\n",
+        f.what, f.fill
     )
 }
 
@@ -207,13 +214,14 @@ impl Plan {
     /// and rewire each Harness the plan wires.
     pub(crate) fn apply(&self, paths: &Paths) -> Result<()> {
         config::set_default(paths, "default_backend", Some(self.backend.as_str()))?;
-        if let Some(r) = self.refs.as_ref().filter(|r| r.create) {
-            file_replace::create_new(&r.path, starter(self.backend).as_bytes(), 0o644).map_err(
-                |source| Error::Io {
+        let create = self.refs.as_ref().filter(|r| r.create);
+        if let Some((r, f)) = create.zip(fallback(self.backend)) {
+            file_replace::create_new(&r.path, starter(&f).as_bytes(), 0o644).map_err(|source| {
+                Error::Io {
                     path: r.path.clone(),
                     source,
-                },
-            )?;
+                }
+            })?;
         }
         for h in &self.harnesses {
             let (Fate::Wire { add_workdir }, Some(r)) = (&h.fate, &self.refs) else {

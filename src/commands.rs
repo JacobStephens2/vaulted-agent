@@ -758,8 +758,15 @@ fn setup_backend(name: &str) -> Result<Backend> {
 /// Vault wiring for `be`, then its report.
 fn wire(paths: &Paths, be: Backend) -> Result<()> {
     let inventory = Inventory::load(paths)?;
-    let plan = vault_wiring::plan(paths, &inventory, be)
-        .map_err(|e| Error::Message(format!("setup: cannot wire {be}: {e}")))?;
+    let plan = vault_wiring::plan(paths, &inventory, be).map_err(|e| {
+        let fix = match e {
+            Error::SeveralManifests { .. } => {
+                "\n  Point the Harnesses on it at one Refs file (manifest = …), then re-run setup"
+            }
+            _ => "",
+        };
+        Error::Message(format!("setup: cannot wire {be}: {e}{fix}"))
+    })?;
     plan.apply(paths)?;
     print!("{}", plan.report());
     Ok(())
@@ -946,7 +953,9 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
                 println!("No token file. Ensure `pass` is on PATH for the service account.");
                 Ok(())
             }
-            Backend::Sops | Backend::Plainfile => {
+            // `setup_backend` refuses plainfile: there is nothing to set up.
+            Backend::Plainfile => Ok(()),
+            Backend::Sops => {
                 println!(
                     "\nsops backend uses age identity at {}",
                     paths.age_key_file.display()

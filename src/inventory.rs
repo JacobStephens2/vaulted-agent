@@ -184,18 +184,14 @@ impl Inventory {
         match candidates.as_slice() {
             [] => Ok(None),
             [one] => Ok(Some(one.to_path_buf())),
-            many => Err(Error::Message(format!(
-                "multiple {} manifests ({}); pass one explicitly: vaulted-agent refresh <file>",
-                backend.as_str(),
-                many.iter()
-                    .map(|p| p
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("?")
-                        .to_string())
+            many => Err(Error::SeveralManifests {
+                backend,
+                names: many
+                    .iter()
+                    .map(|p| p.file_name().and_then(|s| s.to_str()).unwrap_or("?"))
                     .collect::<Vec<_>>()
-                    .join(", ")
-            ))),
+                    .join(", "),
+            }),
         }
     }
 

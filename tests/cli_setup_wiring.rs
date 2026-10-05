@@ -37,12 +37,16 @@ fn run_with_stdin(cmd: &mut Command, stdin: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn");
-    child
+    // A refusal exits before reading stdin; the pipe closing then is no failure.
+    match child
         .stdin
         .as_mut()
         .expect("stdin")
         .write_all(stdin.as_bytes())
-        .expect("write stdin");
+    {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => panic!("write stdin: {e}"),
+        _ => {}
+    }
     child.wait_with_output().expect("wait")
 }
 
@@ -263,4 +267,28 @@ fn wire_only_may_come_before_the_backend() {
         .expect("run");
     assert!(out.status.success(), "{}", combined(&out));
     assert_wired(&seam, "bitwarden", "openai.env.refs");
+}
+
+#[test]
+fn several_refs_files_on_the_backend_refuse_with_a_setup_hint() {
+    let seam = day_one_seam();
+    seam.write_harness(
+        "codex",
+        "backend = bitwarden\nmanifest = a.refs\ncommand = codex\n",
+    );
+    seam.write_harness(
+        "grok",
+        "backend = bitwarden\nmanifest = b.refs\ncommand = grok\n",
+    );
+    let out = seam
+        .vaulted_agent()
+        .args(["setup", "bitwarden", "--wire-only"])
+        .output()
+        .unwrap();
+    let text = combined(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("a.refs, b.refs"), "{text}");
+    assert!(!text.contains("vaulted-agent refresh <file>"), "{text}");
+    assert!(text.contains("one Refs file"), "{text}");
+    assert_eq!(read(&seam, "harnesses.d/claude.conf"), DAY_ONE);
 }

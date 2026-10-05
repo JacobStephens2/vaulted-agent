@@ -125,7 +125,13 @@ fn refresh_backend(paths: &Paths) -> Backend {
 pub(crate) fn default_refs_file(paths: &Paths, be: Backend) -> Result<PathBuf> {
     // Only Bitwarden and 1Password have Refs files `refresh` writes;
     // `RefreshStep::new` refuses the rest before anything asks.
-    vault_wiring::refs_file(paths, &Inventory::load(paths)?, be)?
+    vault_wiring::refs_file(paths, &Inventory::load(paths)?, be)
+        .map_err(|e| match e {
+            Error::SeveralManifests { .. } => Error::Message(format!(
+                "{e}; pass one explicitly: vaulted-agent refresh <file>"
+            )),
+            e => e,
+        })?
         .ok_or_else(|| Error::Message(format!("refresh: {be} has no Refs file")))
 }
 

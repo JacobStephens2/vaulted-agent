@@ -11,6 +11,10 @@ with `auth_mode = file`, the token piped to `setup <backend> --set-token`.
   install still finishes, says the token was not stored, and shows the
   launcher's reason. Store it later with
   `printf %s "$TOKEN" | sudo vaulted-agent setup <backend> --set-token`.
+- **An accepted Bitwarden token also maps secrets.** `setup bitwarden
+  --set-token` merges every secret the token can see into the Refs file, as
+  `setup bitwarden` always has; the old installer only stored the token. Drop
+  mappings you do not want with `vaulted-agent edit-manifest`.
 - **`--op-env PATH` is a token source.** It used to write the token to PATH,
   which the launcher never read. Now the `OP_SERVICE_ACCOUNT_TOKEN` in PATH is
   read and stored in `<config>/op.env`, the only file the launcher reads. It
