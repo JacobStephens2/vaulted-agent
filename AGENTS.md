@@ -78,7 +78,7 @@ elevated launches always read the machine config dir).
 | Remove dangling refs / repair renamed refs | `va refresh --prune` (repair is bitwarden only) |
 | Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
-| Interactive install-time config | `va setup` |
+| Interactive install-time config | `va setup` (the installer asks its own questions, then calls `auth-mode`, `setup <backend> --wire-only` and `setup <backend> --set-token`) |
 | Wire day-one Harnesses to a Backend, no token | `sudo va setup bitwarden --wire-only` (also `onepassword`, `pass`; `sops` records `default_backend` only). Asks no questions and never touches the token |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
 | Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.25` |
