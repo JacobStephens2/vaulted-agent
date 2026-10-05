@@ -1350,15 +1350,17 @@ pub fn usage(paths: &Paths) {
          config: VAULTED_AGENT_CONFIG_DIR (default /etc/vaulted-agent)\n\
          (tests only: VAULTED_AGENT_HANDOFF=spawn spawns instead of exec)"
     );
-    if let Ok(inventory) = Inventory::load(paths) {
+    // Read the Harness confs directly: the list needs no Backend, so a
+    // defaults.conf that does not load must not hide it.
+    if let Ok(names) = list_harness_names(paths) {
         eprintln!("\nharnesses in {}:", paths.harness_dir.display());
-        if inventory.harnesses().is_empty() {
+        if names.is_empty() {
             eprintln!("  (none configured)");
         } else {
-            for e in inventory.harnesses() {
-                match &e.loaded {
-                    Ok(v) => eprintln!("  {:16} {}", e.name, v.harness.command.join(" ")),
-                    Err(_) => eprintln!("  {}", e.name),
+            for name in &names {
+                match Harness::load(paths, name) {
+                    Ok(h) => eprintln!("  {:16} {}", name, h.command.join(" ")),
+                    Err(_) => eprintln!("  {name}"),
                 }
             }
         }

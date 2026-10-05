@@ -45,7 +45,7 @@ fn main() {
             if *fatal {
                 fail(e);
             }
-            eprintln!("vaulted-agent: could not check as the service user: {e}");
+            eprintln!("vaulted-agent: could not take the service-user hop: {e}");
         }
     }
 

@@ -20,8 +20,10 @@ values:
 A missing `defaults.conf`, an empty value (`key =`) and an unknown key still
 read as before. `va auth-mode file|prompt` rewrites the `auth_mode` line
 without reading the rest of the file, so it repairs a typo there. `doctor`,
-`version`, `help`, `update` and `uninstall` still run; `doctor` reports the
-error once and carries on with the built-in values.
+`version`, `help` and `uninstall` still run; `doctor` reports the error once
+and carries on with the built-in values. `update` still replaces the binary,
+then its Harness sync step stops on the error (`binary updated, but Harness
+setup failed`); re-run `va update --sync-harnesses` once the file is fixed.
 
 `update --sync-harnesses` now honours `VAULTED_AGENT_SERVICE_USER` when it
 decides whose home and `PATH` to search, as the launch does.

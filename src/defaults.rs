@@ -1,6 +1,7 @@
-//! **Machine defaults**: what `defaults.conf` says, read once.
+//! **Machine defaults**: what `defaults.conf` says, read once per load.
 //!
-//! Every reader of `defaults.conf` goes through [`Defaults::load`]. The pure
+//! Every reader of `defaults.conf` goes through [`Defaults::load`], which reads
+//! the file once and settles every key; callers load it where they need it. The pure
 //! step, [`Defaults::parse`], takes the conf text and the two env overrides
 //! and returns the typed keys or an error; the adapter reads the file and the
 //! real environment.
@@ -110,12 +111,11 @@ impl Defaults {
                     })?);
                 }
                 "default_backend" if default_backend.is_none() => {
-                    default_backend = Some(Backend::parse_loose(value).ok_or_else(|| {
-                        invalid(
-                            lineno,
-                            format!("default_backend '{value}' is not a Backend ({BACKENDS})"),
-                        )
-                    })?);
+                    default_backend = Some(
+                        value
+                            .parse()
+                            .map_err(|e| invalid(lineno, format!("default_backend: {e}")))?,
+                    );
                 }
                 "service_user" if service_user.is_none() => {
                     service_user = Some(value.to_string());
@@ -139,12 +139,9 @@ impl Defaults {
 
         let builtin = Self::default();
         let default_backend = match env.default_backend.filter(|v| !v.is_empty()) {
-            Some(v) => Backend::parse_loose(v).ok_or_else(|| {
-                Error::Message(format!(
-                    "{DEFAULT_BACKEND_ENV}: '{}' is not a Backend ({BACKENDS})",
-                    v.trim()
-                ))
-            })?,
+            Some(v) => v
+                .parse()
+                .map_err(|e| Error::Message(format!("{DEFAULT_BACKEND_ENV}: {e}")))?,
             None => default_backend.unwrap_or(builtin.default_backend),
         };
         let service_user = match env.service_user.filter(|v| !v.is_empty()) {
@@ -160,8 +157,6 @@ impl Defaults {
         })
     }
 }
-
-const BACKENDS: &str = "want bitwarden, onepassword, pass, sops, plainfile";
 
 fn invalid(lineno: usize, msg: String) -> Error {
     Error::Message(format!("defaults.conf:{lineno}: {msg}"))
@@ -301,7 +296,7 @@ mod tests {
     fn an_unknown_default_backend_names_its_line() {
         let msg = err("\n\ndefault_backend = bitwarde\n");
         assert!(
-            msg.starts_with("defaults.conf:3: default_backend 'bitwarde'"),
+            msg.starts_with("defaults.conf:3: default_backend: unknown backend 'bitwarde'"),
             "{msg}"
         );
         assert!(msg.contains("onepassword"), "{msg}");
@@ -376,7 +371,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            msg.starts_with("VAULTED_AGENT_DEFAULT_BACKEND: 'vault' is not a Backend"),
+            msg.starts_with("VAULTED_AGENT_DEFAULT_BACKEND: unknown backend 'vault'"),
             "{msg}"
         );
     }
