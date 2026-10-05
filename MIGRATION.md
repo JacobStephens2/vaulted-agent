@@ -1,3 +1,35 @@
+# Migration: the installer delegates vault setup to the launcher (unreleased)
+
+**Behaviour change.** `install.sh` keeps its questions and flags, but every
+vault-config write now goes through the launcher it just installed:
+`vaulted-agent auth-mode`, `vaulted-agent setup <backend> --wire-only`, and,
+with `auth_mode = file`, the token piped to `setup <backend> --set-token`.
+
+- **Install-time tokens are verified.** A pasted token, `--bws-token-file`,
+  `--op-token-file`, `--op-env` or an exported token is checked against the
+  vault before it is written. A rejected token no longer lands on disk; the
+  install still finishes, says the token was not stored, and shows the
+  launcher's reason. Store it later with
+  `printf %s "$TOKEN" | sudo vaulted-agent setup <backend> --set-token`.
+- **`--op-env PATH` is a token source.** It used to write the token to PATH,
+  which the launcher never read. Now the `OP_SERVICE_ACCOUNT_TOKEN` in PATH is
+  read and stored in `<config>/op.env`, the only file the launcher reads. It
+  applies with `--backend onepassword`.
+- **Bitwarden starter refs file.** A fresh Bitwarden install creates
+  `openai.env.refs` (the launcher's fallback name, shared with `setup` and
+  `refresh`), not `bitwarden.refs`. A host whose Harnesses already use
+  `bitwarden.refs` keeps it.
+- **Skipping the backend writes nothing about it** (#76). A non-interactive
+  re-install with no `--backend` no longer resets `default_backend` to
+  `onepassword`, and no longer resets `auth_mode` to `file` unless
+  `--auth-mode` says so.
+- **`service_user` only on `--user`.** That is the installer's one remaining
+  `defaults.conf` write; every other line is kept, and no `defaults.conf.bak-*`
+  copy is made.
+- **Only wired Harnesses gain `workdir = caller`.** The installer no longer
+  adds it to every Harness lacking a `workdir`.
+- `--dry-run` prints the launcher commands it would run, with the token elided.
+
 # Migration: `setup <backend>` wires day-one Harnesses (unreleased)
 
 **Behaviour change.** `vaulted-agent setup bitwarden|onepassword|pass|sops` now
