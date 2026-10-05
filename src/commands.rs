@@ -1,7 +1,6 @@
 //! Management subcommands: secrets, doctor, setup, auth-mode, uninstall, pick, run.
 //! `refresh` lives in its own module and is re-exported here for the router.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -772,30 +771,6 @@ fn wire(paths: &Paths, be: Backend) -> Result<()> {
     Ok(())
 }
 
-/// Legacy fallback for `Capture::UseExisting`: load the token the usual way
-/// (env var, existing file, or prompt) and, under `auth_mode=file`, persist it
-/// so rotating through an exported token still lands on disk.
-fn store_existing_token(
-    paths: &Paths,
-    kind: TokenKind,
-    token_source: TokenSource,
-) -> Result<ManagerToken> {
-    let token = token_source.load(paths, kind)?;
-    let path = kind.file(paths).to_path_buf();
-    if token_source.auth_mode() == AuthMode::File {
-        let svc = Defaults::load(paths)?.service_user;
-        auth::write_token_file(&path, kind.env_var(), &token, svc.as_deref())?;
-        println!("wrote {} (0640)", path.display());
-    } else {
-        println!("auth_mode=prompt — token not written to disk (good).");
-        println!(
-            "  To store it: vaulted-agent auth-mode file, then re-run setup {}.",
-            kind.backend_name()
-        );
-    }
-    Ok(token)
-}
-
 fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) -> Result<()> {
     println!("\nBitwarden Secrets Manager");
     println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
@@ -803,33 +778,21 @@ fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) ->
     // Token capture: setup is the only place that may obtain and store a
     // manager token (issue #77). `bws secret list` is both the liveness check
     // that keeps an invalid token off disk and the data the rest of setup
-    // needs, so keep the result instead of paying for a second round trip.
-    let listed: RefCell<Option<BwListing>> = RefCell::new(None);
-    let verify = |t: &ManagerToken| {
-        *listed.borrow_mut() = Some(backend::bws_listing(t)?);
-        Ok(())
-    };
-    let token = match auth::capture_token(
-        paths,
-        TokenKind::Bws,
-        token_source.auth_mode(),
-        set_token,
-        &verify,
-    )? {
-        auth::Capture::Token(t) => t,
-        auth::Capture::UseExisting => store_existing_token(paths, TokenKind::Bws, token_source)?,
-        auth::Capture::Skipped => {
-            // Everything left here needs the token to talk to the vault.
-            println!("Skipping vault work. When you have a token:");
-            println!("  vaulted-agent setup bitwarden");
-            return Ok(());
-        }
-    };
-    let secrets = match listed.borrow_mut().take() {
-        Some(secrets) => secrets,
-        None => backend::bws_listing(&token)?,
-    };
-    drop(token);
+    // needs, so capture hands the listing back instead of a second round trip.
+    let verify = |t: &ManagerToken| backend::bws_listing(t);
+    let secrets: BwListing =
+        match auth::capture_token(paths, TokenKind::Bws, token_source, set_token, &verify)? {
+            auth::Capture::Token(token, secrets) => {
+                drop(token);
+                secrets
+            }
+            auth::Capture::Skipped => {
+                // Everything left here needs the token to talk to the vault.
+                println!("Skipping vault work. When you have a token:");
+                println!("  vaulted-agent setup bitwarden");
+                return Ok(());
+            }
+        };
     if secrets.is_empty() {
         println!("No secrets in this machine account yet. Create one in SM, then:");
         println!("  vaulted-agent secrets list");
@@ -866,17 +829,8 @@ fn setup_onepassword(paths: &Paths, token_source: TokenSource, set_token: bool) 
     println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
     // Token capture (issue #77); `op whoami` verifies before anything is written.
     let verify = |t: &ManagerToken| backend::op_whoami(t);
-    match auth::capture_token(
-        paths,
-        TokenKind::Op,
-        token_source.auth_mode(),
-        set_token,
-        &verify,
-    )? {
-        auth::Capture::Token(token) => drop(token),
-        auth::Capture::UseExisting => {
-            drop(store_existing_token(paths, TokenKind::Op, token_source)?)
-        }
+    match auth::capture_token(paths, TokenKind::Op, token_source, set_token, &verify)? {
+        auth::Capture::Token(token, ()) => drop(token),
         // A declined paste skips the token, not the rest of setup: the guidance
         // below is what tells the operator how to wire a harness (install.sh
         // parity — its skip is a skip of the token write only).
