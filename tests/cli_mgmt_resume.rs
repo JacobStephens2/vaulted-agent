@@ -229,6 +229,12 @@ fn uninstall_dry_run_exits_zero() {
 fn uninstall_purge_keeps_foreign_links_and_credentials() {
     use std::os::unix::fs::symlink;
 
+    // The sudoers rule is not under the temp dirs: never remove a real one.
+    if std::path::Path::new("/etc/sudoers.d/vaulted-agent").exists() {
+        eprintln!("skipped: /etc/sudoers.d/vaulted-agent exists on this machine");
+        return;
+    }
+
     let seam = CliSeam::new();
     let bin = seam.root.join("prefix");
     fs::create_dir(&bin).unwrap();

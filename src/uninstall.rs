@@ -1,6 +1,6 @@
 //! **Uninstall plan**: what one `uninstall` run would remove, leave alone
-//! ("not ours") and keep — Backend credentials always, and config unless
-//! `--purge`.
+//! ("not ours") and keep — the Manager-token files and the age key always,
+//! and config unless `--purge`.
 //!
 //! Three steps. [`Facts::gather`] reads the disk: what is at each candidate
 //! path, and what the config directory holds. [`plan`] decides everything from
@@ -22,7 +22,7 @@ use crate::error::{Error, Result};
 use crate::setup_interview::{ask, LineReader};
 
 /// The sudoers rule `install.sh --allow-user` writes.
-pub(crate) const SUDOERS_FILE: &str = "/etc/sudoers.d/vaulted-agent";
+const SUDOERS_FILE: &str = "/etc/sudoers.d/vaulted-agent";
 
 /// The launcher's file name, and the short alias the installer links to it.
 const LAUNCHER: &str = "vaulted-agent";
@@ -124,13 +124,17 @@ pub(crate) struct ConfigEntry {
     pub dir: bool,
 }
 
+/// `harnesses.d/*.conf` and `manifests/*`, for the "Found:" line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Counts {
+    pub harnesses: usize,
+    pub manifests: usize,
+}
+
 /// What the config directory holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigFacts {
-    pub dir: PathBuf,
-    /// `harnesses.d/*.conf` and `manifests/*`, for the "Found:" line.
-    pub harnesses: usize,
-    pub manifests: usize,
+    pub counts: Counts,
     pub entries: Vec<ConfigEntry>,
 }
 
@@ -144,6 +148,8 @@ pub(crate) struct Facts {
     /// `<bin>/*-conductor`, and `~/.local/bin/{vaulted-agent,va}` per link user.
     pub links: Vec<(PathBuf, Found)>,
     pub sudoers: (PathBuf, Found),
+    pub bin_dir: PathBuf,
+    pub config_dir: PathBuf,
     /// `None` when there is no config directory.
     pub config: Option<ConfigFacts>,
     /// Never removed, even under `--purge`: the Manager-token files and the
@@ -180,6 +186,8 @@ impl Facts {
             launcher: (launcher.clone(), Found::at(&launcher)),
             links,
             sudoers: (sudoers.clone(), Found::at(&sudoers)),
+            bin_dir: bin_dir.to_path_buf(),
+            config_dir: paths.config_dir.clone(),
             config: config_facts(&paths.config_dir),
             credentials: credentials(paths),
             purge,
@@ -188,7 +196,7 @@ impl Facts {
 }
 
 /// The files `--purge` keeps.
-pub(crate) fn credentials(paths: &Paths) -> Vec<PathBuf> {
+fn credentials(paths: &Paths) -> Vec<PathBuf> {
     vec![
         paths.op_env_file.clone(),
         paths.bws_env_file.clone(),
@@ -232,11 +240,12 @@ fn config_facts(dir: &Path) -> Option<ConfigFacts> {
         .collect();
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Some(ConfigFacts {
-        dir: dir.to_path_buf(),
-        harnesses: count("harnesses.d", |p| {
-            p.extension().is_some_and(|x| x == "conf")
-        }),
-        manifests: count("manifests", |_| true),
+        counts: Counts {
+            harnesses: count("harnesses.d", |p| {
+                p.extension().is_some_and(|x| x == "conf")
+            }),
+            manifests: count("manifests", |_| true),
+        },
         entries,
     })
 }
@@ -267,17 +276,11 @@ pub(crate) struct Removal {
 pub(crate) enum ConfigPlan {
     Absent,
     /// No `--purge`: kept as it is.
-    Kept {
-        dir: PathBuf,
-        harnesses: usize,
-        manifests: usize,
-    },
+    Kept(Counts),
     /// `--purge`: every entry but the credentials, and the directory itself
     /// only when nothing was kept in it.
     Purged {
-        dir: PathBuf,
-        harnesses: usize,
-        manifests: usize,
+        counts: Counts,
         remove: Vec<Removal>,
         kept: Vec<PathBuf>,
     },
@@ -291,6 +294,8 @@ pub(crate) struct Plan {
     /// At a candidate path, but not ours: left alone.
     pub not_ours: Vec<PathBuf>,
     pub config: ConfigPlan,
+    pub bin_dir: PathBuf,
+    pub config_dir: PathBuf,
     /// Every credential file name, for the closing line.
     pub credential_names: Vec<String>,
 }
@@ -327,11 +332,7 @@ pub(crate) fn plan(facts: &Facts) -> Plan {
 
     let config = match &facts.config {
         None => ConfigPlan::Absent,
-        Some(c) if !facts.purge => ConfigPlan::Kept {
-            dir: c.dir.clone(),
-            harnesses: c.harnesses,
-            manifests: c.manifests,
-        },
+        Some(c) if !facts.purge => ConfigPlan::Kept(c.counts),
         Some(c) => {
             let (kept, purged): (Vec<&ConfigEntry>, Vec<&ConfigEntry>) = c
                 .entries
@@ -342,12 +343,10 @@ pub(crate) fn plan(facts: &Facts) -> Plan {
                 .map(|e| removal(&e.path, if e.dir { How::Tree } else { How::File }))
                 .collect();
             if kept.is_empty() {
-                remove.push(removal(&c.dir, How::EmptyDir));
+                remove.push(removal(&facts.config_dir, How::EmptyDir));
             }
             ConfigPlan::Purged {
-                dir: c.dir.clone(),
-                harnesses: c.harnesses,
-                manifests: c.manifests,
+                counts: c.counts,
                 remove,
                 kept: kept.iter().map(|e| e.path.clone()).collect(),
             }
@@ -358,13 +357,18 @@ pub(crate) fn plan(facts: &Facts) -> Plan {
         remove,
         not_ours,
         config,
-        credential_names: facts
-            .credentials
-            .iter()
-            .filter_map(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect(),
+        bin_dir: facts.bin_dir.clone(),
+        config_dir: facts.config_dir.clone(),
+        credential_names: file_names(&facts.credentials),
     }
+}
+
+fn file_names(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .filter_map(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect()
 }
 
 fn removal(path: &Path, how: How) -> Removal {
@@ -389,31 +393,39 @@ impl Plan {
         self.remove.iter().chain(purged)
     }
 
+    /// The config directory's counts, when there is one.
+    fn config_counts(&self) -> Option<Counts> {
+        match &self.config {
+            ConfigPlan::Absent => None,
+            ConfigPlan::Kept(counts) | ConfigPlan::Purged { counts, .. } => Some(*counts),
+        }
+    }
+
+    /// "Nothing to remove", naming where it looked.
+    pub(crate) fn nothing_to_remove(&self) -> String {
+        format!(
+            "Nothing to remove: no launcher at {} and no config at {}.",
+            self.bin_dir.display(),
+            self.config_dir.display()
+        )
+    }
+
     /// "Found:" — ours, the config directory, and what is not ours.
     pub(crate) fn found(&self) -> String {
         let mut out = String::from("Found:\n");
         for r in &self.remove {
             let _ = writeln!(out, "  {}", r.path.display());
         }
-        match &self.config {
-            ConfigPlan::Absent => {}
-            ConfigPlan::Kept {
-                dir,
-                harnesses,
-                manifests,
-            }
-            | ConfigPlan::Purged {
-                dir,
-                harnesses,
-                manifests,
-                ..
-            } => {
-                let _ = writeln!(
-                    out,
-                    "  {}  ({harnesses} live harnesses, {manifests} manifests)",
-                    dir.display()
-                );
-            }
+        if let Some(Counts {
+            harnesses,
+            manifests,
+        }) = self.config_counts()
+        {
+            let _ = writeln!(
+                out,
+                "  {}  ({harnesses} live harnesses, {manifests} manifests)",
+                self.config_dir.display()
+            );
         }
         for p in &self.not_ours {
             let _ = writeln!(out, "  {}  (not ours, will be left alone)", p.display());
@@ -464,25 +476,20 @@ impl Plan {
         }
         match &self.config {
             ConfigPlan::Absent => {}
-            ConfigPlan::Kept { dir, .. } => {
+            ConfigPlan::Kept(_) => {
                 let _ = writeln!(
                     out,
                     "\nkept {}. Add --purge, or choose 2 interactively, to remove it too.",
-                    dir.display()
+                    self.config_dir.display()
                 );
             }
             ConfigPlan::Purged { kept, .. } if kept.is_empty() => {}
-            ConfigPlan::Purged { dir, kept, .. } => {
-                let names: Vec<String> = kept
-                    .iter()
-                    .filter_map(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .collect();
+            ConfigPlan::Purged { kept, .. } => {
                 let _ = writeln!(
                     out,
                     "\nkept {}: it still holds {}.",
-                    dir.display(),
-                    names.join(", ")
+                    self.config_dir.display(),
+                    file_names(kept).join(", ")
                 );
             }
         }
@@ -552,15 +559,12 @@ pub(crate) fn confirm_reply(reply: &str) -> bool {
 /// Offer keep config / also purge config / dry run / quit until a reply
 /// parses. End of input quits.
 pub(crate) fn ask_menu(plan: &Plan, read: &mut LineReader) -> Result<Choice> {
-    let config = match &plan.config {
-        ConfigPlan::Kept { dir, .. } | ConfigPlan::Purged { dir, .. } => Some(dir),
-        ConfigPlan::Absent => None,
-    };
+    let has_config = plan.config != ConfigPlan::Absent;
     println!("\n  1) Remove the launcher, its symlinks and the sudoers rule; keep config");
-    if let Some(dir) = config {
+    if has_config {
         println!(
             "  2) Remove all of that, and {} as well (credential files are kept)",
-            dir.display()
+            plan.config_dir.display()
         );
     }
     println!("  3) Show what would happen, change nothing");
@@ -570,7 +574,7 @@ pub(crate) fn ask_menu(plan: &Plan, read: &mut LineReader) -> Result<Choice> {
         if line.is_empty() {
             return Ok(Choice::Quit);
         }
-        match menu_reply(&line, config.is_some()) {
+        match menu_reply(&line, has_config) {
             Ok(choice) => return Ok(choice),
             Err(note) => println!("  {note}"),
         }
@@ -598,29 +602,29 @@ pub(crate) fn run(
 ) -> Result<()> {
     let interactive = interactive && !cmd.yes && !cmd.dry_run;
     let mut dry = cmd.dry_run;
-    let mut plan = plan(&facts);
+    let mut planned = plan(&facts);
 
     println!("vaulted-agent uninstall\n");
-    if plan.is_empty() {
-        println!("Nothing to remove: no launcher and no config directory found.");
+    if planned.is_empty() {
+        println!("{}", planned.nothing_to_remove());
         return Ok(());
     }
-    print!("{}", plan.found());
+    print!("{}", planned.found());
 
     if interactive {
         if facts.purge {
-            if let ConfigPlan::Purged { dir, .. } = &plan.config {
+            if let ConfigPlan::Purged { .. } = &planned.config {
                 println!(
                     "\n--purge given: {} will be removed too (credential files are kept).",
-                    dir.display()
+                    planned.config_dir.display()
                 );
             }
         } else {
-            match ask_menu(&plan, read)? {
+            match ask_menu(&planned, read)? {
                 Choice::Keep => {}
                 Choice::Purge => {
                     facts.purge = true;
-                    plan = self::plan(&facts);
+                    planned = plan(&facts);
                 }
                 Choice::DryRun => dry = true,
                 Choice::Quit => {
@@ -629,7 +633,7 @@ pub(crate) fn run(
                 }
             }
         }
-        if !dry && !ask_confirm(&plan, read)? {
+        if !dry && !ask_confirm(&planned, read)? {
             println!("Nothing removed.");
             return Ok(());
         }
@@ -637,11 +641,11 @@ pub(crate) fn run(
 
     println!();
     if dry {
-        print!("{}", plan.dry_run());
+        print!("{}", planned.dry_run());
         return Ok(());
     }
-    let failed = apply(&plan);
-    print!("{}", plan.outcome(&failed));
+    let failed = apply(&planned);
+    print!("{}", planned.outcome(&failed));
     if failed.is_empty() {
         Ok(())
     } else {
@@ -679,6 +683,8 @@ mod tests {
             launcher_canonical: Some(p(LAUNCHER_PATH)),
             links: vec![],
             sudoers: (p(SUDOERS_FILE), Found::Nothing),
+            bin_dir: p("/bin-dir"),
+            config_dir: p("/cfg"),
             config: None,
             credentials: credentials(&paths),
             purge: false,
@@ -687,9 +693,10 @@ mod tests {
 
     fn config(entries: &[(&str, bool)]) -> Option<ConfigFacts> {
         Some(ConfigFacts {
-            dir: p("/cfg"),
-            harnesses: 2,
-            manifests: 1,
+            counts: Counts {
+                harnesses: 2,
+                manifests: 1,
+            },
             entries: entries
                 .iter()
                 .map(|(name, dir)| ConfigEntry {
@@ -754,6 +761,10 @@ mod tests {
         assert!(plan.remove.is_empty());
         assert_eq!(plan.not_ours, vec![p("/bin-dir/va")]);
         assert!(plan.is_empty(), "nothing of ours and no config");
+        assert_eq!(
+            plan.nothing_to_remove(),
+            "Nothing to remove: no launcher at /bin-dir and no config at /cfg."
+        );
     }
 
     #[test]
@@ -995,7 +1006,9 @@ mod tests {
         std::os::unix::fs::symlink(bin.join(LAUNCHER), bin.join("a-conductor")).unwrap();
         std::os::unix::fs::symlink("/bin/true", bin.join("b-conductor")).unwrap();
         let paths = Paths::from_config_dir(tmp.path().join("cfg"));
-        let f = Facts::gather(&bin, &paths, &[], false);
+        let mut f = Facts::gather(&bin, &paths, &[], false);
+        // The sudoers rule is the one candidate outside the temp dir.
+        f.sudoers.1 = Found::Nothing;
         let plan = plan(&f);
         assert_eq!(
             removed(&plan),

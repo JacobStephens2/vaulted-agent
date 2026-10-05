@@ -9,6 +9,16 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// True when this machine's real sudoers rule is visible: `uninstall` would
+/// plan to remove it, so a test that runs `uninstall` for real must not.
+fn real_sudoers_rule() -> bool {
+    let visible = Path::new("/etc/sudoers.d/vaulted-agent").exists();
+    if visible {
+        eprintln!("skipped: /etc/sudoers.d/vaulted-agent exists on this machine");
+    }
+    visible
+}
+
 struct Tree {
     tmp: tempfile::TempDir,
     prefix: PathBuf,
@@ -72,6 +82,9 @@ fn assert_credentials_and_foreign_link_survive(tree: &Tree, out: &str) {
 
 #[test]
 fn uninstall_runs_the_installed_launcher() {
+    if real_sudoers_rule() {
+        return;
+    }
     let tree = Tree::new();
     let launcher = tree.prefix.join("vaulted-agent");
     fs::copy(env!("CARGO_BIN_EXE_vaulted-agent"), &launcher).unwrap();
@@ -86,6 +99,9 @@ fn uninstall_runs_the_installed_launcher() {
 
 #[test]
 fn uninstall_without_an_install_runs_the_binary_an_install_would_use() {
+    if real_sudoers_rule() {
+        return;
+    }
     let tree = Tree::new();
     let bin = Path::new(env!("CARGO_BIN_EXE_vaulted-agent"));
 
