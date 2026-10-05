@@ -167,12 +167,11 @@ impl<'a> BwsRefResolver<'a> {
     fn resolve_id(&mut self, r: &str) -> Result<Option<String>> {
         // Saves one `bws secret list` per manifest of UUID refs. The answer is
         // the same: `bws secret get` on an id the token cannot see fails just
-        // as a listing miss would. A malformed reference needs no listing to
-        // say so; the launch's validate pass has already refused it.
-        match BwRef::parse(r) {
-            Ok(BwRef::Id(id)) => return Ok(Some(id.to_string())),
-            Err(fault) => return Err(Error::Message(fault.to_string())),
-            Ok(_) => {}
+        // as a listing miss would. A placeholder UUID is a fault, not an id, so
+        // it fails in the lookup below; the launch's validate pass has already
+        // refused it.
+        if let Ok(BwRef::Id(id)) = BwRef::parse(r) {
+            return Ok(Some(id.to_string()));
         }
         let listing = match self.listing {
             Some(ref listing) => listing,

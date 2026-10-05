@@ -17,6 +17,8 @@
 //! Pure and in-process: the listing is built from JSON text, and the `bws`
 //! process calls stay in `backend`.
 
+use std::fmt;
+
 use crate::error::{Error, Result};
 use crate::validate::{is_placeholder_ref, is_uuid, validate_var_name};
 
@@ -83,7 +85,7 @@ impl<'a> BwRef<'a> {
         }
         if let Some(key) = reference.strip_prefix("name:") {
             return if key.is_empty() {
-                Err(BwRefFault::EmptyName)
+                fault(BwRefFault::EmptyName)
             } else {
                 Ok(BwRef::Name(key))
             };
@@ -115,8 +117,7 @@ impl<'a> BwRef<'a> {
 }
 
 /// Why a Bitwarden reference is malformed. Each variant carries the
-/// reference it was found in (except `EmptyName`, whose reference is always
-/// `name:`), and its `Display` is the one wording every caller prints: the
+/// reference it was found in, and its `Display` is the one wording every caller prints: the
 /// Manifest check as `<VAR> <fault>`, the launch's lookup and `secrets get`
 /// bare.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,22 +130,22 @@ pub enum BwRefFault {
     /// `uuid:` followed by something that is not a UUID.
     NotAUuid(String),
     /// `name:` with no key.
-    EmptyName,
+    EmptyName(String),
     /// `project:` without both a project and a key.
     BadProject(String),
     /// None of the four forms.
     UnknownForm(String),
 }
 
-impl std::fmt::Display for BwRefFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for BwRefFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BwRefFault::Placeholder(r) => write!(f, "still has placeholder ref {r}"),
             BwRefFault::ContainsEquals(r) => {
                 write!(f, "bad bitwarden ref {r} (a reference cannot contain '=')")
             }
             BwRefFault::NotAUuid(r) => write!(f, "uuid: value is not a UUID: {r}"),
-            BwRefFault::EmptyName => f.write_str("empty name: ref"),
+            BwRefFault::EmptyName(_) => f.write_str("empty name: ref"),
             BwRefFault::BadProject(r) => write!(f, "want project:PROJECT/SECRET (got {r})"),
             BwRefFault::UnknownForm(r) => write!(
                 f,
@@ -285,7 +286,7 @@ pub fn key_to_var(key: &str) -> String {
 ///
 /// Bitwarden refs only. A dotenv manifest holds secret *values*, where a `#`
 /// is ordinary material.
-pub fn split_annotation(value: &str) -> (&str, Option<&str>) {
+fn split_annotation(value: &str) -> (&str, Option<&str>) {
     let mut prev_ws = false;
     for (i, c) in value.char_indices() {
         if c == '#' && prev_ws {
@@ -301,10 +302,8 @@ pub fn reference_of(value: &str) -> &str {
     split_annotation(value).0
 }
 
-/// The source UUID a Bitwarden refs value records, if it records one.
-///
-/// A placeholder records nothing: invariant 4 keeps placeholders loud, and a
-/// zero UUID must never be the evidence that turns a line into a rename.
+/// The source UUID a Bitwarden refs value records, if it records one that
+/// [`is_recordable`].
 pub fn recorded_uuid(value: &str) -> Option<&str> {
     split_annotation(value)
         .1?
@@ -519,7 +518,11 @@ mod tests {
                 BwRefFault::NotAUuid("uuid:not-a-uuid".into()),
                 "uuid: value is not a UUID: uuid:not-a-uuid",
             ),
-            ("name:", BwRefFault::EmptyName, "empty name: ref"),
+            (
+                "name:",
+                BwRefFault::EmptyName("name:".into()),
+                "empty name: ref",
+            ),
             (
                 "project:P/",
                 BwRefFault::BadProject("project:P/".into()),
