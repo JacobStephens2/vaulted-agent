@@ -152,7 +152,7 @@ while (( $# )); do
     --op-token-file)   OP_TOKEN_FILE="${2:?}"; shift 2 ;;
     --bws-token-file)  BWS_TOKEN_FILE="${2:?}"; shift 2 ;;
     --allow-debug-binary) ALLOW_DEBUG_BINARY=1; shift ;;
-    -h|--help)         sed -n "2,43p" "$0"; exit 0 ;;
+    -h|--help)         awk 'NR > 2 && /^# ---/ { exit } NR >= 2' "$0"; exit 0 ;;
     *)                 die "unknown option '$1'" ;;
   esac
 done
@@ -354,10 +354,16 @@ done
 # dry run asks the binary it would install, which writes nothing.
 if (( ! NO_AUTO_HARNESS )); then
   printf '\n'
-  if (( DRY )); then discoverer="$RUST_BIN"; sync_args=(--dry-run); else discoverer="$PREFIX/vaulted-agent"; sync_args=(); fi
+  if (( DRY )); then
+    discoverer="$RUST_BIN"
+    sync_args=(--dry-run)
+  else
+    discoverer="$PREFIX/vaulted-agent"
+    sync_args=()
+  fi
   VAULTED_AGENT_CONFIG_DIR="$CONFIG" VAULTED_AGENT_SERVICE_USER="$SERVICE_USER" \
     "$discoverer" update --sync-harnesses ${sync_args[@]+"${sync_args[@]}"} \
-    || die "Harness discovery failed (message above). Retry: sudo vaulted-agent update --sync-harnesses"
+    || die "Harness discovery failed (message above). Retry: sudo VAULTED_AGENT_CONFIG_DIR=$CONFIG vaulted-agent update --sync-harnesses"
   unset discoverer sync_args
 else
   printf '\nskipped auto-harness detect (--no-auto-harness)\n'

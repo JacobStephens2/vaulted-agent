@@ -179,8 +179,19 @@ fn auto_harnesses(list: &str) -> Vec<String> {
         .collect()
 }
 
-fn harness_name(command: &str) -> &str {
+/// The program an auto-harness command runs: its first word.
+fn program(command: &str) -> &str {
     command.split_whitespace().next().unwrap_or(command)
+}
+
+/// The Harness an auto-harness command is added as: its program's basename,
+/// so a command naming a path still gets a conf directly in `harnesses.d`.
+fn harness_name(command: &str) -> &str {
+    let program = program(command);
+    Path::new(program)
+        .file_name()
+        .and_then(|b| b.to_str())
+        .unwrap_or(program)
 }
 
 /// Where an auto-harness binary was found.
@@ -284,8 +295,10 @@ fn addition(
     env_blind: impl Fn(&str) -> bool,
 ) -> Result<Addition> {
     let name = harness_name(command);
-    let basename = Path::new(name).file_name().and_then(|b| b.to_str());
-    let blind = [basename, Some(name)].into_iter().flatten().any(&env_blind);
+    let basename = Path::new(program(command))
+        .file_name()
+        .and_then(|b| b.to_str());
+    let blind = config::env_blind_name(basename, name, env_blind).is_some();
     let (backend, manifest) = facts
         .shared
         .filter(|_| !blind)
@@ -674,6 +687,10 @@ mod tests {
         for (command, listed) in [("/opt/x/blind", "blind"), ("blind --flag", "blind")] {
             let f = facts(&[command], &[], shared);
             let plan = plan(&paths(), &f, at("/usr/bin"), |n| n == listed).unwrap();
+            assert_eq!(
+                plan.entries[0].conf,
+                Path::new("/cfg/harnesses.d/blind.conf")
+            );
             let Fate::Add(a) = &plan.entries[0].fate else {
                 panic!("{plan:?}")
             };

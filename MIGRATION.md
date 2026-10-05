@@ -18,6 +18,10 @@ write byte-identical Harness confs and print the same per-agent report.
   `/usr/bin` and `/bin` join its search; `va update` gains the other account's
   `PATH` through a silent `sudo -n` probe.
 - **A Harness `bin` expands only a leading `$HOME`**, as the launch does.
+- **A discovery error stops the install.** The binary is already installed,
+  but an error from `update --sync-harnesses` (an `empty.env` that is not
+  empty, a `defaults.conf` that will not load) now stops `install.sh` before
+  vault setup, naming the retry. The old detect loop could not fail.
 - **One conf body.** Installer-written confs gain `labels = no` and a header
   that names Harness discovery instead of `install.sh`.
 
