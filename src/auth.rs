@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::config::{AuthMode, Paths};
+use crate::config::{AuthMode, Backend, Paths};
 use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 use crate::file_replace::{self, Perms};
@@ -41,7 +41,7 @@ pub(crate) fn token_file_status(path: &Path) -> TokenFileStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Bws,
     Op,
@@ -71,12 +71,17 @@ impl TokenKind {
         }
     }
 
+    /// The Backend this token unlocks.
+    pub fn backend(self) -> Backend {
+        match self {
+            Self::Bws => Backend::Bitwarden,
+            Self::Op => Backend::OnePassword,
+        }
+    }
+
     /// The `setup` subcommand that configures this token's backend.
     pub fn backend_name(self) -> &'static str {
-        match self {
-            Self::Bws => "bitwarden",
-            Self::Op => "onepassword",
-        }
+        self.backend().as_str()
     }
 
     /// Vault console the operator gets the token from. Printed, never opened:
@@ -195,7 +200,10 @@ fn token_file_unreadable(paths: &Paths, path: &Path, source: io::Error) -> Error
 ///
 /// Both halves matter. Under `cmd | vaulted-agent setup` stdin is a pipe, so a
 /// "paste it now" prompt would read the pipe instead of the operator.
-fn interactive_tty() -> bool {
+///
+/// The one "can a human answer a prompt" predicate: Token capture, the Setup
+/// interview, `auth-mode` and `edit-manifest` all ask it.
+pub(crate) fn interactive_tty() -> bool {
     io::IsTerminal::is_terminal(&io::stdin()) && tty_usable()
 }
 
@@ -315,6 +323,33 @@ impl CaptureFacts {
         set_token: bool,
     ) -> Self {
         let path = kind.file(paths);
+        let doors = DoorFacts::from_runtime(paths, kind);
+        Self {
+            kind,
+            file: doors.file,
+            env_token: doors.env_token,
+            mode: source.auth_mode(),
+            force_prompt: source.forces_prompt(),
+            tty: interactive_tty(),
+            set_token,
+            token_path: path.display().to_string(),
+            current_user: privilege::current_user(),
+        }
+    }
+}
+
+/// The two token doors that exist before `setup` runs, for one kind: what
+/// [`CaptureFacts`] reads, and all that setup's no-backend auto-pick reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DoorFacts {
+    /// The token's env var is exported and non-empty.
+    pub env_token: bool,
+    pub file: TokenFile,
+}
+
+impl DoorFacts {
+    pub(crate) fn from_runtime(paths: &Paths, kind: TokenKind) -> Self {
+        let path = kind.file(paths);
         let file = match token_file_status(path) {
             TokenFileStatus::Missing => TokenFile::Missing,
             TokenFileStatus::Unreadable { .. } => TokenFile::Unreadable,
@@ -327,19 +362,28 @@ impl CaptureFacts {
             },
         };
         Self {
-            kind,
-            file,
             env_token: std::env::var(kind.env_var())
                 .map(|v| !v.is_empty())
                 .unwrap_or(false),
-            mode: source.auth_mode(),
-            force_prompt: source.forces_prompt(),
-            tty: interactive_tty(),
-            set_token,
-            token_path: path.display().to_string(),
-            current_user: privilege::current_user(),
+            file,
         }
     }
+
+    /// True when this kind has a token door. An unreadable token file counts:
+    /// setup then picks its Backend and Token capture fails with the
+    /// invariant-6 message, instead of setup quietly choosing another vault.
+    pub(crate) fn has_door(self) -> bool {
+        self.env_token || self.file != TokenFile::Missing
+    }
+}
+
+/// The token kind `setup` with no backend named sets up: the first with a
+/// door, Bitwarden before 1Password. `None` when neither has one. Pure.
+pub(crate) fn auto_pick(bws: DoorFacts, op: DoorFacts) -> Option<TokenKind> {
+    [(TokenKind::Bws, bws), (TokenKind::Op, op)]
+        .into_iter()
+        .find(|(_, doors)| doors.has_door())
+        .map(|(kind, _)| kind)
 }
 
 /// Pure planning: no IO, no prompts, no process spawn.
@@ -1117,6 +1161,57 @@ mod tests {
             assert!(msg.contains("--set-token"), "{msg}");
             assert!(msg.contains("BWS_ACCESS_TOKEN"), "{msg}");
         }
+    }
+
+    // --- setup's no-backend auto-pick --------------------------------------
+
+    const NO_DOOR: DoorFacts = DoorFacts {
+        env_token: false,
+        file: TokenFile::Missing,
+    };
+
+    fn doors(env_token: bool, file: TokenFile) -> DoorFacts {
+        DoorFacts { env_token, file }
+    }
+
+    #[test]
+    fn auto_pick_row_1_no_door_on_either_kind_picks_nothing() {
+        // An empty exported var or a token file without the key reads as
+        // env_token=false / Missing in `DoorFacts::from_runtime`.
+        assert_eq!(auto_pick(NO_DOOR, NO_DOOR), None);
+    }
+
+    #[test]
+    fn auto_pick_row_2_each_door_alone_picks_its_kind() {
+        for door in [
+            doors(true, TokenFile::Missing),
+            doors(false, TokenFile::Present),
+            doors(false, TokenFile::Unreadable),
+        ] {
+            assert_eq!(auto_pick(door, NO_DOOR), Some(TokenKind::Bws), "{door:?}");
+            assert_eq!(auto_pick(NO_DOOR, door), Some(TokenKind::Op), "{door:?}");
+        }
+    }
+
+    #[test]
+    fn auto_pick_row_3_bitwarden_wins_over_onepassword() {
+        let op = doors(true, TokenFile::Present);
+        for bws in [
+            doors(true, TokenFile::Missing),
+            doors(false, TokenFile::Present),
+            doors(false, TokenFile::Unreadable),
+        ] {
+            assert_eq!(auto_pick(bws, op), Some(TokenKind::Bws), "{bws:?}");
+        }
+    }
+
+    #[test]
+    fn a_token_file_without_the_key_is_not_a_door() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        fs::write(&paths.bws_env_file, "OTHER=x\n").unwrap();
+        let facts = DoorFacts::from_runtime(&paths, TokenKind::Bws);
+        assert_eq!(facts.file, TokenFile::Missing);
     }
 
     // --- auth_mode = prompt ----------------------------------------------

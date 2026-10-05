@@ -23,6 +23,7 @@ pub mod refs;
 pub mod resume;
 pub mod route;
 pub mod secret;
+mod setup_interview;
 pub mod update;
 pub mod validate;
 mod vault_wiring;

@@ -12,8 +12,8 @@ use crate::auth::{self, TokenKind, TokenSource};
 use crate::backend;
 use crate::bitwarden::BwListing;
 use crate::config::{
-    env_blind_agent_reason, list_harness_names, parse_dotenv_keys, set_default,
-    set_harnesses_workdir, AuthMode, Backend, Harness, Paths,
+    env_blind_agent_reason, list_harness_names, parse_dotenv_keys, AuthMode, Backend, Harness,
+    Paths,
 };
 use crate::defaults::Defaults;
 use crate::error::{Error, Result};
@@ -25,6 +25,7 @@ use crate::refresh;
 pub use crate::refresh::cmd_refresh;
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
+use crate::setup_interview::{self, read_tty_line, write_auth_mode, BackendChoice, Interview};
 use crate::validate::validate_manifest_file;
 use crate::vault_wiring;
 use crate::workdir::{self, CallerContext};
@@ -48,7 +49,7 @@ pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
     let sub = args.first().map(|s| s.as_str());
     match sub {
         None => {
-            if can_prompt_user() {
+            if auth::interactive_tty() {
                 // The menu's default is the configured mode, so it needs the
                 // file to load. The explicit form below does not.
                 let current = Defaults::load(paths)
@@ -59,7 +60,7 @@ pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
                         ))
                     })?
                     .auth_mode;
-                let mode = prompt_auth_mode_choice(current)?;
+                let mode = setup_interview::ask_auth_mode(current, &mut read_tty_line)?;
                 write_auth_mode(paths, mode)?;
                 println!("auth_mode={}", mode.as_str());
             } else {
@@ -84,176 +85,6 @@ pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
             "unknown auth-mode '{other}' (want file, prompt, or show)"
         ))),
     }
-}
-
-/// True when a human can answer interactive menus (setup / auth-mode).
-/// Match install.sh: require a usable controlling terminal, not merely /dev/tty present.
-fn can_prompt_user() -> bool {
-    io::IsTerminal::is_terminal(&io::stdin())
-        && fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/tty")
-            .is_ok()
-}
-
-fn read_tty_line() -> Result<String> {
-    let mut line = String::new();
-    let mut tty = io::BufReader::new(
-        fs::File::open("/dev/tty").map_err(|e| Error::Message(format!("tty: {e}")))?,
-    );
-    tty.read_line(&mut line)
-        .map_err(|e| Error::Message(format!("tty read: {e}")))?;
-    Ok(line)
-}
-
-/// Parse an auth-mode menu reply. Empty keeps `current`. Unknown keeps `current`.
-fn parse_auth_mode_choice(choice: &str, current: AuthMode) -> AuthMode {
-    match choice.trim() {
-        "1" | "file" | "disk" => AuthMode::File,
-        "2" | "prompt" | "p" => AuthMode::Prompt,
-        "" => current,
-        _ => current,
-    }
-}
-
-/// Interactive auth-mode menu (install.sh parity). Writes nothing; caller persists.
-fn prompt_auth_mode_choice(current: AuthMode) -> Result<AuthMode> {
-    let default = current.as_str();
-    eprintln!("\nHow should vault tokens be supplied at launch?");
-    eprintln!("  1) file    — store once in op.env / bws.env (no prompt each run)");
-    eprintln!("  2) prompt  — paste token each launch; nothing stored on disk");
-    eprintln!("     (same as always running with -p / --prompt-auth)");
-    eprint!("choice [1-2, default {default}]: ");
-    let _ = io::stderr().flush();
-    let line = read_tty_line()?;
-    let trimmed = line.trim();
-    if !trimmed.is_empty() && !matches!(trimmed, "1" | "file" | "disk" | "2" | "prompt" | "p") {
-        eprintln!("  unknown choice '{trimmed}'; keeping {default}");
-    }
-    Ok(parse_auth_mode_choice(trimmed, current))
-}
-
-/// When interactive, ask how manager tokens are obtained and persist the choice.
-/// Non-interactive runs leave the existing defaults.conf value alone.
-fn ensure_auth_mode_for_setup(paths: &Paths, token_source: TokenSource) -> Result<TokenSource> {
-    if !can_prompt_user() {
-        return Ok(token_source);
-    }
-    let current = Defaults::load(paths)?.auth_mode;
-    let mode = prompt_auth_mode_choice(current)?;
-    write_auth_mode(paths, mode)?;
-    Ok(token_source.with_auth_mode(mode))
-}
-
-fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
-    set_default(paths, "auth_mode", Some(mode.as_str()))
-}
-
-/// Interactive: who agents run as (defaults to "you" = no service_user).
-/// Non-interactive: leave defaults alone.
-fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
-    let configured = || Defaults::load(paths).map(|d| d.service_user);
-    if !can_prompt_user() {
-        return configured();
-    }
-    let me = crate::privilege::current_user();
-    let me_label = if me.is_empty() {
-        "you".to_string()
-    } else {
-        me.clone()
-    };
-    let current = configured()?;
-    eprintln!("\nRun agents as:");
-    eprintln!("  1) you ({me_label})            [default]");
-    eprintln!("  2) a dedicated service account");
-    if let Some(ref svc) = current {
-        eprintln!("     (currently service_user = {svc})");
-    }
-    eprint!("choice [1-2, default 1]: ");
-    let _ = io::stderr().flush();
-    let line = read_tty_line()?;
-    let choice = line.trim();
-    match choice {
-        "" | "1" | "you" | "me" => {
-            set_default(paths, "service_user", None)?;
-            println!("service_user: (unset — agents run as the invoking user)");
-            Ok(None)
-        }
-        "2" | "service" | "svc" => {
-            eprint!("service account name: ");
-            let _ = io::stderr().flush();
-            let name = read_tty_line()?.trim().to_string();
-            if name.is_empty() {
-                eprintln!("  empty name; leaving service_user unchanged");
-                return configured();
-            }
-            set_default(paths, "service_user", Some(&name))?;
-            println!("service_user = {name}");
-            eprintln!(
-                "  NOTE: with service_user, `va run` is disabled unless allow_run = yes \
-                 in defaults.conf."
-            );
-            eprintln!(
-                "  Token files written by setup will be chowned root:{name} (mode 0640) \
-                 when run as root."
-            );
-            Ok(Some(name))
-        }
-        other => {
-            eprintln!("  unknown choice '{other}'; leaving service_user unchanged");
-            configured()
-        }
-    }
-}
-
-/// Interactive: where agents start (default = caller cwd).
-/// Non-interactive: leave harnesses alone.
-fn ensure_workdir_for_setup(paths: &Paths, service_user: Option<&str>) -> Result<()> {
-    if !can_prompt_user() {
-        return Ok(());
-    }
-    eprintln!("\nStart agents in:");
-    eprintln!("  1) the directory you run the command from   [default]");
-    eprintln!("  2) a fixed directory");
-    eprint!("choice [1-2, default 1]: ");
-    let _ = io::stderr().flush();
-    let line = read_tty_line()?;
-    let workdir = match line.trim() {
-        "" | "1" | "caller" => "caller".to_string(),
-        "2" | "fixed" | "absolute" => {
-            eprint!("absolute path (or $HOME/…): ");
-            let _ = io::stderr().flush();
-            let p = read_tty_line()?.trim().to_string();
-            if p.is_empty() {
-                eprintln!("  empty path; using workdir = caller");
-                "caller".to_string()
-            } else {
-                p
-            }
-        }
-        other => {
-            eprintln!("  unknown choice '{other}'; using workdir = caller");
-            "caller".to_string()
-        }
-    };
-
-    let n = set_harnesses_workdir(paths, &workdir)?;
-    if n == 0 {
-        println!(
-            "workdir = {workdir} (no harness confs yet — new harnesses should set this; \
-             install auto-harness uses caller)"
-        );
-    } else {
-        println!("workdir = {workdir} on {n} harness conf(s)");
-    }
-
-    if workdir == "caller" {
-        if let Some(svc) = service_user.filter(|s| !s.is_empty()) {
-            eprintln!("  {}", workdir::setup_note(svc, &CallerContext::from_env()));
-        }
-    }
-    Ok(())
 }
 
 pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
@@ -744,16 +575,6 @@ fn yn(b: bool) -> &'static str {
     }
 }
 
-/// The Backend `setup <name>` sets up. `plainfile` is not a vault.
-fn setup_backend(name: &str) -> Result<Backend> {
-    match Backend::parse_loose(name) {
-        Some(be) if be != Backend::Plainfile => Ok(be),
-        _ => Err(Error::Message(format!(
-            "setup: unknown backend '{name}' (want bitwarden, onepassword, pass, sops)"
-        ))),
-    }
-}
-
 /// Vault wiring for `be`, then its report.
 fn wire(paths: &Paths, be: Backend) -> Result<()> {
     let inventory = Inventory::load(paths)?;
@@ -773,7 +594,10 @@ fn wire(paths: &Paths, be: Backend) -> Result<()> {
 
 fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) -> Result<()> {
     println!("\nBitwarden Secrets Manager");
-    println!("  Needs a Machine Account access token (BWS_ACCESS_TOKEN),");
+    println!(
+        "  Needs a Machine Account access token ({}),",
+        TokenKind::Bws.env_var()
+    );
     println!("  not your personal vault master password or login API key.\n");
     // Token capture: setup is the only place that may obtain and store a
     // manager token (issue #77). `bws secret list` is both the liveness check
@@ -826,7 +650,10 @@ fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) ->
 
 fn setup_onepassword(paths: &Paths, token_source: TokenSource, set_token: bool) -> Result<()> {
     println!("\n1Password service account");
-    println!("  Needs OP_SERVICE_ACCOUNT_TOKEN (not your personal account password).\n");
+    println!(
+        "  Needs {} (not your personal account password).\n",
+        TokenKind::Op.env_var()
+    );
     // Token capture (issue #77); `op whoami` verifies before anything is written.
     let verify = |t: &ManagerToken| backend::op_whoami(t);
     match auth::capture_token(paths, TokenKind::Op, token_source, set_token, &verify)? {
@@ -841,143 +668,81 @@ fn setup_onepassword(paths: &Paths, token_source: TokenSource, set_token: bool) 
 }
 
 pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
-    // `--set-token` is the piped-capture / rotation door. Not `auth-mode`:
-    // that verb is about *how* tokens are supplied, not *what* the token is.
-    let set_token = args.iter().any(|a| a == "--set-token");
-    // `--wire-only` is the installer's door: Vault wiring, then stop before
-    // Token capture, so a machine with no token yet still gets wired.
-    let wire_only = args.iter().any(|a| a == "--wire-only");
+    // The command line is checked, then every question asked, before anything
+    // is written: a refused setup leaves the machine as it was.
+    let (set_token, answers, backend) = match setup_interview::interview(
+        args,
+        &paths.config_dir,
+        || setup_interview::Context::from_runtime(paths),
+        &mut read_tty_line,
+    )? {
+        Interview::WireOnly(be) => return wire(paths, be),
+        Interview::Setup {
+            set_token,
+            answers,
+            backend,
+        } => (set_token, answers, backend),
+    };
 
-    // Explicit backend: setup [bitwarden|onepassword|bws|op|pass|sops]
-    let want = args
-        .iter()
-        .map(|s| s.as_str())
-        .find(|s| !s.starts_with('-'));
-
-    if wire_only && set_token {
-        return Err(Error::Message(
-            "setup: --wire-only stops before Token capture; it cannot be used with --set-token"
-                .into(),
-        ));
-    }
-    if wire_only && want.is_none() {
-        return Err(Error::Message(
-            "setup --wire-only: name the backend, e.g.\n  \
-             vaulted-agent setup bitwarden --wire-only"
-                .into(),
-        ));
-    }
-
-    println!("vaulted-agent setup");
-    println!("config: {}", paths.config_dir.display());
-
-    if wire_only {
-        // The installer asks its own questions and then calls this: asking
-        // them again here would ask twice.
-        return wire(paths, setup_backend(want.unwrap_or_default())?);
-    }
-
-    // Ask how manager tokens are obtained (file on disk vs paste each launch)
-    // before any backend work that may write op.env / bws.env.
-    let token_source = ensure_auth_mode_for_setup(paths, token_source)?;
-    println!("auth_mode: {}", token_source.auth_mode().as_str());
-
-    // Who agents run as, and where they start — both shape every later launch,
-    // and interact (service_user + workdir=caller on a 0700 home). Ask before
-    // token write so chown root:service_user is right (issue #55).
-    let service_user = ensure_service_user_for_setup(paths)?;
-    ensure_workdir_for_setup(paths, service_user.as_deref())?;
-
-    // Vault wiring first: it needs no token, so a missing or rejected token
-    // still leaves the machine wired (installer order).
-    let choose = |name: &str| -> Result<()> {
-        let be = setup_backend(name)?;
-        if set_token && !be.needs_manager_token() {
-            return Err(Error::Message(format!(
-                "setup --set-token: {be} has no manager token file \
-                 (pass uses GPG, sops uses an age key)"
-            )));
+    // Machine defaults and the Workdir first: Token capture's file group
+    // reads service_user (issue #55).
+    let token_source = match &answers {
+        Some(a) => {
+            a.apply(paths)?;
+            token_source.with_auth_mode(a.auth_mode)
         }
-        wire(paths, be)?;
-        match be {
-            Backend::Bitwarden => setup_bitwarden(paths, token_source, set_token),
-            Backend::OnePassword => setup_onepassword(paths, token_source, set_token),
-            Backend::Pass => {
-                println!("\npass backend uses the passwordstore.org store (GPG).");
-                println!("No token file. Ensure `pass` is on PATH for the service account.");
-                Ok(())
-            }
-            // `setup_backend` refuses plainfile: there is nothing to set up.
-            Backend::Plainfile => Ok(()),
-            Backend::Sops => {
-                println!(
-                    "\nsops backend uses age identity at {}",
-                    paths.age_key_file.display()
-                );
-                println!("Place the age key there (0640) and encrypt manifests with sops.");
-                Ok(())
-            }
+        None => {
+            println!("auth_mode: {}", token_source.auth_mode().as_str());
+            token_source
         }
     };
 
-    if let Some(name) = want {
-        return choose(name);
-    }
+    let be = match backend {
+        BackendChoice::Use(be) => be,
+        BackendChoice::Skipped => {
+            println!("Nothing configured. Re-run: vaulted-agent setup bitwarden|onepassword");
+            return Ok(());
+        }
+        BackendChoice::Undecided => {
+            let (bws, op) = (TokenKind::Bws, TokenKind::Op);
+            println!(
+                "No vault token yet. Non-interactive examples:\n\
+                 \x20 export {}=… && vaulted-agent setup {}\n\
+                 \x20 export {}=… && vaulted-agent setup {}\n\
+                 \x20 Or write {} / {} and re-run setup.",
+                bws.env_var(),
+                bws.backend_name(),
+                op.env_var(),
+                op.backend_name(),
+                bws.file(paths).display(),
+                op.file(paths).display()
+            );
+            return Ok(());
+        }
+    };
 
-    // Auto: prefer whichever token is already available (env or file).
-    if env::var_os("BWS_ACCESS_TOKEN").is_some() || paths.bws_env_file.is_file() {
-        return choose("bitwarden");
+    // Vault wiring first: it needs no token, so a missing or rejected token
+    // still leaves the machine wired (installer order).
+    wire(paths, be)?;
+    match be {
+        Backend::Bitwarden => setup_bitwarden(paths, token_source, set_token),
+        Backend::OnePassword => setup_onepassword(paths, token_source, set_token),
+        Backend::Pass => {
+            println!("\npass backend uses the passwordstore.org store (GPG).");
+            println!("No token file. Ensure `pass` is on PATH for the service account.");
+            Ok(())
+        }
+        // The Setup interview refuses plainfile: there is nothing to set up.
+        Backend::Plainfile => Ok(()),
+        Backend::Sops => {
+            println!(
+                "\nsops backend uses age identity at {}",
+                paths.age_key_file.display()
+            );
+            println!("Place the age key there (0640) and encrypt manifests with sops.");
+            Ok(())
+        }
     }
-    if env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || paths.op_env_file.is_file() {
-        return choose("onepassword");
-    }
-
-    // Nothing on disk or in env to infer from: a piped token has no backend to
-    // go with, and guessing would store a credential against the wrong vault.
-    if set_token {
-        return Err(Error::Message(
-            "setup --set-token: name the backend, e.g.\n  \
-             printf %s \"$TOKEN\" | vaulted-agent setup bitwarden --set-token"
-                .into(),
-        ));
-    }
-
-    // Interactive menu when TTY; else print usage.
-    if can_prompt_user() {
-        eprintln!("\nChoose vault backend:");
-        eprintln!("  1) bitwarden   (Bitwarden Secrets Manager)");
-        eprintln!("  2) onepassword (1Password service account)");
-        eprintln!("  3) pass");
-        eprintln!("  4) sops");
-        eprint!("backend [1-4]: ");
-        let _ = io::stderr().flush();
-        let line = read_tty_line()?;
-        let choice = line.trim();
-        let name = match choice {
-            "1" | "bitwarden" | "bws" => "bitwarden",
-            "2" | "onepassword" | "op" | "1password" => "onepassword",
-            "3" | "pass" => "pass",
-            "4" | "sops" => "sops",
-            "" => {
-                println!("Nothing configured. Re-run: vaulted-agent setup bitwarden|onepassword");
-                return Ok(());
-            }
-            other => {
-                return Err(Error::Message(format!("setup: bad choice '{other}'")));
-            }
-        };
-        return choose(name);
-    }
-
-    println!(
-        "No vault token yet. Non-interactive examples:\n\
-         \x20 export BWS_ACCESS_TOKEN=… && vaulted-agent setup bitwarden\n\
-         \x20 export OP_SERVICE_ACCOUNT_TOKEN=… && vaulted-agent setup onepassword\n\
-         \x20 Or write {} / {} and re-run setup.",
-        paths.bws_env_file.display(),
-        paths.op_env_file.display()
-    );
-    Ok(())
 }
 
 pub fn cmd_uninstall(args: &[String]) -> Result<()> {
@@ -1563,7 +1328,7 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
             path
         }
         None => {
-            if !can_prompt_user() {
+            if !auth::interactive_tty() {
                 return Err(Error::Message(
                     "edit-manifest: no terminal to choose from — name the manifest".into(),
                 ));
@@ -1607,7 +1372,7 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
         }
         // Saved already — sudoedit wrote it back before we could look. Offer the
         // editor again rather than pretending the file is still clean.
-        if !can_prompt_user() {
+        if !auth::interactive_tty() {
             return Err(Error::Message(
                 "manifest saved with problems; re-run edit-manifest to fix".into(),
             ));
@@ -1649,34 +1414,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_auth_mode_choice_accepts_aliases() {
-        assert_eq!(
-            parse_auth_mode_choice("1", AuthMode::Prompt),
-            AuthMode::File
-        );
-        assert_eq!(
-            parse_auth_mode_choice("file", AuthMode::Prompt),
-            AuthMode::File
-        );
-        assert_eq!(
-            parse_auth_mode_choice("disk", AuthMode::Prompt),
-            AuthMode::File
-        );
-        assert_eq!(
-            parse_auth_mode_choice("2", AuthMode::File),
-            AuthMode::Prompt
-        );
-        assert_eq!(
-            parse_auth_mode_choice("prompt", AuthMode::File),
-            AuthMode::Prompt
-        );
-        assert_eq!(
-            parse_auth_mode_choice("p", AuthMode::File),
-            AuthMode::Prompt
-        );
-    }
-
-    #[test]
     fn run_is_refused_once_a_service_user_exists() {
         let msg = run_refusal(Some("conductor"), false).expect("should refuse");
         assert!(msg.contains("conductor"));
@@ -1693,23 +1430,6 @@ mod tests {
     #[test]
     fn allow_run_restores_it_explicitly() {
         assert_eq!(run_refusal(Some("conductor"), true), None);
-    }
-
-    #[test]
-    fn parse_auth_mode_choice_empty_or_unknown_keeps_current() {
-        assert_eq!(parse_auth_mode_choice("", AuthMode::File), AuthMode::File);
-        assert_eq!(
-            parse_auth_mode_choice("", AuthMode::Prompt),
-            AuthMode::Prompt
-        );
-        assert_eq!(
-            parse_auth_mode_choice("nope", AuthMode::Prompt),
-            AuthMode::Prompt
-        );
-        assert_eq!(
-            parse_auth_mode_choice("  file  ", AuthMode::Prompt),
-            AuthMode::File
-        );
     }
 
     #[test]

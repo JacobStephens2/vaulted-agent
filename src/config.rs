@@ -486,19 +486,6 @@ pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Set `workdir` on every Harness [`list_harness_names`] finds, appending the
-/// line where a conf has none. Returns how many Harnesses now carry it.
-pub fn set_harnesses_workdir(paths: &Paths, workdir: &str) -> Result<usize> {
-    let names = list_harness_names(paths)?;
-    for name in &names {
-        let path = paths.harness_conf(name);
-        let mut conf = ConfFile::read(&path)?;
-        conf.set("workdir", workdir)?;
-        conf.write(&path)?;
-    }
-    Ok(names.len())
-}
-
 /// Ordered KEY=value pairs (shared policy for validate + resolve).
 ///
 /// The launch's projection of [`crate::manifest_entry`], where the line rules
@@ -680,47 +667,6 @@ mod tests {
         let paths = Paths::from_config_dir(tmp.path());
         assert!(set_default(&paths, "service_user", Some("svc\nallow_run = yes")).is_err());
         assert!(!crate::defaults::Defaults::load(&paths).unwrap().allow_run);
-    }
-
-    #[test]
-    fn set_harnesses_workdir_edits_every_listed_harness() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.harness_dir).unwrap();
-        fs::write(
-            paths.harness_conf("claude"),
-            "# shipped\nmanifest = empty.env\nworkdir  = /old\ncommand  = claude\n",
-        )
-        .unwrap();
-        fs::write(
-            paths.harness_conf("codex"),
-            "manifest = empty.env\ncommand = codex\n",
-        )
-        .unwrap();
-        fs::write(paths.harness_dir.join("notes.txt"), "workdir = untouched\n").unwrap();
-
-        assert_eq!(set_harnesses_workdir(&paths, "caller").unwrap(), 2);
-        assert_eq!(
-            fs::read_to_string(paths.harness_conf("claude")).unwrap(),
-            "# shipped\nmanifest = empty.env\nworkdir  = caller\ncommand  = claude\n"
-        );
-        assert_eq!(
-            fs::read_to_string(paths.harness_conf("codex")).unwrap(),
-            "manifest = empty.env\ncommand = codex\nworkdir = caller\n"
-        );
-        assert_eq!(
-            fs::read_to_string(paths.harness_dir.join("notes.txt")).unwrap(),
-            "workdir = untouched\n"
-        );
-        let h = Harness::load(&paths, "codex").unwrap();
-        assert_eq!(h.workdir.as_deref(), Some("caller"));
-    }
-
-    #[test]
-    fn set_harnesses_workdir_without_a_harness_directory_is_zero() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        assert_eq!(set_harnesses_workdir(&paths, "caller").unwrap(), 0);
     }
 
     #[test]
