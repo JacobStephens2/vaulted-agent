@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::bitwarden::BwRef;
+use crate::bitwarden::{reference_of, split_glued_bitwarden_line, BwRef, BwRefFault};
 use crate::config::Backend;
 use crate::error::{Error, Result};
 use crate::onepassword;
@@ -78,17 +78,17 @@ pub fn validate_var_name(var: &str) -> bool {
 }
 
 /// Why a Bitwarden reference will not resolve, or `None` when it is well-formed.
+///
+/// The shared parse decides what is well-formed and words the fault, so
+/// anything this accepts the launch and `refresh` read the same way (issue
+/// #120), and `secrets get` says the same thing about a bad reference.
 fn bitwarden_ref_problem(var: &str, r: &str) -> Option<String> {
-    if is_placeholder_ref(r) {
-        return Some(format!("{var} still has placeholder ref {r}"));
-    }
-    // None of the four Bitwarden reference forms contain `=`. A second
-    // `VAR=name:KEY` glued onto this one is the bash 0.3.0 refresh merge
-    // (command substitution strips the trailing newline). Fail closed with
-    // the recovered lines rather than sending the blob to the vault.
-    if r.contains('=') {
-        let glued = format!("{var}={r}");
-        if let Some(parts) = crate::refs::split_glued_bitwarden_line(&glued) {
+    let fault = BwRef::parse(r).err()?;
+    // A second `VAR=name:KEY` glued onto this one is the bash 0.3.0 refresh
+    // merge (command substitution strips the trailing newline). Fail closed
+    // with the recovered lines rather than sending the blob to the vault.
+    if let BwRefFault::ContainsEquals(_) = fault {
+        if let Some(parts) = split_glued_bitwarden_line(&format!("{var}={r}")) {
             let listed = parts
                 .iter()
                 .map(|p| format!("  {p}"))
@@ -101,27 +101,8 @@ fn bitwarden_ref_problem(var: &str, r: &str) -> Option<String> {
                  Or run: vaulted-agent refresh"
             ));
         }
-        return Some(format!(
-            "{var} bad bitwarden ref {r} (a reference cannot contain '=')"
-        ));
     }
-    // The shared parse decides what is well-formed, so anything this accepts
-    // the launch and `refresh` read the same way (issue #120). What follows is
-    // only the wording for each way of being malformed.
-    if BwRef::parse(r).is_some() {
-        return None;
-    }
-    Some(if r.starts_with("uuid:") {
-        format!("{var} uuid: value is not a UUID: {r}")
-    } else if r.starts_with("name:") {
-        format!("{var} empty name: ref")
-    } else if r.starts_with("project:") {
-        format!("{var} want project:PROJECT/SECRET (got {r})")
-    } else {
-        format!(
-            "{var} bad bitwarden ref {r} (use UUID, uuid:UUID, name:KEY, or project:PROJECT/KEY)"
-        )
-    })
+    Some(format!("{var} {fault}"))
 }
 
 /// The reference `backend` reads from a Manifest entry's value.
@@ -136,7 +117,7 @@ fn bitwarden_ref_problem(var: &str, r: &str) -> Option<String> {
 /// `#` is material and dropping the tail would truncate it.
 fn reference_for(backend: Option<Backend>, value: &str) -> &str {
     match backend {
-        Some(Backend::Bitwarden) => crate::refs::reference_of(value),
+        Some(Backend::Bitwarden) => reference_of(value),
         _ => value,
     }
 }
@@ -392,32 +373,6 @@ GOOD=op://Vault/item/field\n\
     #[test]
     fn accepts_name_ref() {
         assert!(bitwarden_ref_problem("OPENAI_API_KEY", "name:openai-api-key").is_none());
-    }
-
-    #[test]
-    fn validate_accepts_exactly_what_the_shared_parse_accepts() {
-        for r in [
-            "6a1c0e94-1111-2222-3333-444444444444",
-            "uuid:6a1c0e94-1111-2222-3333-444444444444",
-            "uuid:not-a-uuid",
-            "name:KEY",
-            "name:a/b",
-            "name:",
-            "project:P/a/b",
-            "project:P",
-            "project:/KEY",
-            "project:P/",
-            "REPLACE_WITH_BITWARDEN_SECRET_UUID",
-            "00000000-0000-0000-0000-000000000000",
-            "name:A=name:B",
-            "junk",
-        ] {
-            assert_eq!(
-                bitwarden_ref_problem("X", r).is_none(),
-                BwRef::parse(r).is_some(),
-                "{r}"
-            );
-        }
     }
 
     #[test]

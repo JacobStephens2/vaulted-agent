@@ -2,6 +2,12 @@
 //! `bws secret list` returns them, and the one place a Bitwarden reference is
 //! parsed and looked up against them.
 //!
+//! It also owns the rest of the Bitwarden refs-line grammar: why a reference
+//! is malformed ([`BwRefFault`]), the trailing annotation that carries a
+//! **Source recording**, the generated `name:` line, key → variable naming and
+//! 0.3.0 glued-line recovery. The Refs file module only scans, judges and
+//! writes; 1Password keeps its own grammar in `onepassword`.
+//!
 //! The launch, `refresh`'s scan, the Refs file writer and the offline shape
 //! check all ask this module, so they give the same answer by construction.
 //! Four private matchers used to disagree: `refresh` called a `name:` that
@@ -11,8 +17,10 @@
 //! Pure and in-process: the listing is built from JSON text, and the `bws`
 //! process calls stay in `backend`.
 
+use std::fmt;
+
 use crate::error::{Error, Result};
-use crate::validate::{is_placeholder_ref, is_uuid};
+use crate::validate::{is_placeholder_ref, is_uuid, validate_var_name};
 
 /// One secret as `bws secret list` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,28 +64,45 @@ pub enum BwRef<'a> {
 }
 
 impl<'a> BwRef<'a> {
-    /// Parse a reference (annotation already removed). `None` when it is not
-    /// one of the four forms, or is a placeholder: invariant 4 keeps those
-    /// loud, and nothing should look one up.
-    pub fn parse(reference: &'a str) -> Option<BwRef<'a>> {
+    /// Parse a reference (annotation already removed): one of the four forms,
+    /// or the fault that says why it is none. A placeholder is a fault:
+    /// invariant 4 keeps those loud, and nothing should look one up.
+    pub fn parse(reference: &'a str) -> std::result::Result<BwRef<'a>, BwRefFault> {
+        let fault = |make: fn(String) -> BwRefFault| Err(make(reference.to_string()));
+        if is_placeholder_ref(reference) {
+            return fault(BwRefFault::Placeholder);
+        }
         // No form contains `=`; one that does is a glued 0.3.0 line.
-        if is_placeholder_ref(reference) || reference.contains('=') {
-            return None;
+        if reference.contains('=') {
+            return fault(BwRefFault::ContainsEquals);
         }
         if let Some(rest) = reference.strip_prefix("uuid:") {
-            return is_uuid(rest).then_some(BwRef::Id(rest));
+            return if is_uuid(rest) {
+                Ok(BwRef::Id(rest))
+            } else {
+                fault(BwRefFault::NotAUuid)
+            };
         }
         if let Some(key) = reference.strip_prefix("name:") {
-            return (!key.is_empty()).then_some(BwRef::Name(key));
+            return if key.is_empty() {
+                fault(BwRefFault::EmptyName)
+            } else {
+                Ok(BwRef::Name(key))
+            };
         }
         if let Some(rest) = reference.strip_prefix("project:") {
-            let (project, key) = rest.split_once('/')?;
-            if project.is_empty() || key.is_empty() {
-                return None;
-            }
-            return Some(BwRef::Project { project, key });
+            return match rest.split_once('/') {
+                Some((project, key)) if !project.is_empty() && !key.is_empty() => {
+                    Ok(BwRef::Project { project, key })
+                }
+                _ => fault(BwRefFault::BadProject),
+            };
         }
-        is_uuid(reference).then_some(BwRef::Id(reference))
+        if is_uuid(reference) {
+            Ok(BwRef::Id(reference))
+        } else {
+            fault(BwRefFault::UnknownForm)
+        }
     }
 
     /// True when this reference selects `secret`: the same id, the same key
@@ -87,6 +112,45 @@ impl<'a> BwRef<'a> {
             BwRef::Id(id) => secret.id == id,
             BwRef::Name(key) => secret.key == key,
             BwRef::Project { project, key } => secret.project == project && secret.key == key,
+        }
+    }
+}
+
+/// Why a Bitwarden reference is malformed. Each variant carries the
+/// reference it was found in, and its `Display` is the one wording every caller prints: the
+/// Manifest check as `<VAR> <fault>`, the launch's lookup and `secrets get`
+/// bare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BwRefFault {
+    /// A placeholder, never looked up (invariant 4).
+    Placeholder(String),
+    /// Contains `=`, which no form does: often a glued 0.3.0 line
+    /// ([`split_glued_bitwarden_line`]).
+    ContainsEquals(String),
+    /// `uuid:` followed by something that is not a UUID.
+    NotAUuid(String),
+    /// `name:` with no key.
+    EmptyName(String),
+    /// `project:` without both a project and a key.
+    BadProject(String),
+    /// None of the four forms.
+    UnknownForm(String),
+}
+
+impl fmt::Display for BwRefFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BwRefFault::Placeholder(r) => write!(f, "still has placeholder ref {r}"),
+            BwRefFault::ContainsEquals(r) => {
+                write!(f, "bad bitwarden ref {r} (a reference cannot contain '=')")
+            }
+            BwRefFault::NotAUuid(r) => write!(f, "uuid: value is not a UUID: {r}"),
+            BwRefFault::EmptyName(_) => f.write_str("empty name: ref"),
+            BwRefFault::BadProject(r) => write!(f, "want project:PROJECT/SECRET (got {r})"),
+            BwRefFault::UnknownForm(r) => write!(
+                f,
+                "bad bitwarden ref {r} (use UUID, uuid:UUID, name:KEY, or project:PROJECT/KEY)"
+            ),
         }
     }
 }
@@ -102,8 +166,8 @@ pub enum Lookup<'a> {
     /// is not a contract `bws` makes, so picking one could inject the wrong
     /// credential.
     Ambiguous(Vec<&'a BwSecret>),
-    /// Not one of the four forms, or a placeholder.
-    NotARef,
+    /// Not one of the four forms, or a placeholder: why, as the fault.
+    NotARef(BwRefFault),
 }
 
 /// The secrets one manager token can see.
@@ -174,8 +238,9 @@ impl BwListing {
 
     /// Look a reference (annotation already removed) up against the listing.
     pub fn lookup(&self, reference: &str) -> Lookup<'_> {
-        let Some(r) = BwRef::parse(reference) else {
-            return Lookup::NotARef;
+        let r = match BwRef::parse(reference) {
+            Ok(r) => r,
+            Err(fault) => return Lookup::NotARef(fault),
         };
         let mut hits: Vec<&BwSecret> = self.secrets.iter().filter(|s| r.selects(s)).collect();
         match hits.len() {
@@ -184,6 +249,134 @@ impl BwListing {
             _ => Lookup::Ambiguous(hits),
         }
     }
+}
+
+/// The variable a generated line names a secret key with.
+pub fn key_to_var(key: &str) -> String {
+    let mut s: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let needs_prefix = !matches!(s.chars().next(), Some(c) if c.is_ascii_alphabetic() || c == '_');
+    if needs_prefix {
+        s = format!("SECRET_{s}");
+    }
+    s
+}
+
+/// Split a Bitwarden refs value into its reference and trailing annotation.
+///
+/// Generated lines record which secret they came from, so a vault-side rename
+/// stays detectable after the key it was named for is gone (ADR-0004):
+///
+/// ```text
+/// ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY # uuid:ea6db86f-…
+/// ```
+///
+/// The split needs whitespace before the `#`. No Bitwarden reference form
+/// contains whitespace, so ` #` unambiguously ends one — while a bare `#` may
+/// sit inside a secret key, and treating that as a comment would send a
+/// truncated reference to the vault.
+///
+/// Bitwarden refs only. A dotenv manifest holds secret *values*, where a `#`
+/// is ordinary material.
+fn split_annotation(value: &str) -> (&str, Option<&str>) {
+    let mut prev_ws = false;
+    for (i, c) in value.char_indices() {
+        if c == '#' && prev_ws {
+            return (value[..i].trim_end(), Some(value[i + 1..].trim()));
+        }
+        prev_ws = c.is_whitespace();
+    }
+    (value, None)
+}
+
+/// The reference a Bitwarden refs value carries, annotation removed.
+pub fn reference_of(value: &str) -> &str {
+    split_annotation(value).0
+}
+
+/// The source UUID a Bitwarden refs value records, if it records one that
+/// [`is_recordable`].
+pub fn recorded_uuid(value: &str) -> Option<&str> {
+    split_annotation(value)
+        .1?
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("uuid:"))
+        .filter(|u| is_recordable(u))
+}
+
+/// Is this id worth recording on a line?
+///
+/// A placeholder is not: invariant 4 keeps placeholders loud, and a zero UUID
+/// must never be the evidence that turns a line into a rename.
+fn is_recordable(id: &str) -> bool {
+    is_uuid(id) && !is_placeholder_ref(id)
+}
+
+/// A `name:` mapping line, carrying its source recording when there is one.
+///
+/// The single place the annotated form is spelled out — generation and repair
+/// must not be able to disagree about it.
+pub fn name_line(var: &str, key: &str, id: &str) -> String {
+    if is_recordable(id) {
+        format!("{var}=name:{key} # uuid:{id}")
+    } else {
+        format!("{var}=name:{key}")
+    }
+}
+
+/// Recover the one-mapping-per-line form of a 0.3.0 glued Bitwarden refs line.
+///
+/// `va refresh` on the bash launcher captured each `VAR=name:KEY\n` with
+/// `$(…)`, which strips the trailing newline, then concatenated. When the SM
+/// secret key was already env-shaped, VAR equals KEY and the file held:
+///
+/// ```text
+/// META_AI_API_KEY=name:META_AI_API_KEYFIREWORKS_API_KEY=name:FIREWORKS_API_KEY
+/// ```
+///
+/// KEY and the next VAR share the `[A-Z0-9_]` charset, so there is no
+/// delimiter between them. The writer always emitted `VAR=name:VAR` in this
+/// case, and that identity is what makes the split unambiguous.
+///
+/// Returns `None` when the line is a single mapping (or not this shape).
+pub fn split_glued_bitwarden_line(line: &str) -> Option<Vec<String>> {
+    let mut rest = line.trim();
+    if rest.is_empty() || rest.starts_with('#') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    while !rest.is_empty() {
+        let (var, after_eq) = rest.split_once('=')?;
+        if !validate_var_name(var) {
+            return None;
+        }
+        let after_form = after_eq.strip_prefix("name:")?;
+        if !after_form.starts_with(var) {
+            return None;
+        }
+        let after_key = &after_form[var.len()..];
+        if !after_key.is_empty() && !starts_with_name_assignment(after_key) {
+            return None;
+        }
+        parts.push(format!("{var}=name:{var}"));
+        rest = after_key;
+    }
+    (parts.len() >= 2).then_some(parts)
+}
+
+fn starts_with_name_assignment(s: &str) -> bool {
+    let Some((var, after_eq)) = s.split_once('=') else {
+        return false;
+    };
+    validate_var_name(var) && after_eq.starts_with("name:")
 }
 
 #[cfg(test)]
@@ -301,8 +494,62 @@ mod tests {
             "name:REPLACE_WITH_KEY",
             "project:P/REPLACE_WITH_KEY",
         ] {
-            assert_eq!(listing().lookup(r), Lookup::NotARef, "{r}");
-            assert_eq!(BwRef::parse(r), None, "{r}");
+            let fault = BwRef::parse(r).expect_err(r);
+            assert_eq!(listing().lookup(r), Lookup::NotARef(fault), "{r}");
+        }
+    }
+
+    #[test]
+    fn each_malformed_reference_has_one_fault_and_one_wording() {
+        let u = "6a1c0e94-1111-2222-3333-444444444444";
+        for (r, fault, wording) in [
+            (
+                "REPLACE_WITH_BITWARDEN_SECRET_UUID",
+                BwRefFault::Placeholder("REPLACE_WITH_BITWARDEN_SECRET_UUID".into()),
+                "still has placeholder ref REPLACE_WITH_BITWARDEN_SECRET_UUID",
+            ),
+            (
+                "name:A=name:B",
+                BwRefFault::ContainsEquals("name:A=name:B".into()),
+                "bad bitwarden ref name:A=name:B (a reference cannot contain '=')",
+            ),
+            (
+                "uuid:not-a-uuid",
+                BwRefFault::NotAUuid("uuid:not-a-uuid".into()),
+                "uuid: value is not a UUID: uuid:not-a-uuid",
+            ),
+            (
+                "name:",
+                BwRefFault::EmptyName("name:".into()),
+                "empty name: ref",
+            ),
+            (
+                "project:P/",
+                BwRefFault::BadProject("project:P/".into()),
+                "want project:PROJECT/SECRET (got project:P/)",
+            ),
+            (
+                "junk",
+                BwRefFault::UnknownForm("junk".into()),
+                "bad bitwarden ref junk (use UUID, uuid:UUID, name:KEY, or project:PROJECT/KEY)",
+            ),
+        ] {
+            assert_eq!(BwRef::parse(r), Err(fault.clone()), "{r}");
+            assert_eq!(fault.to_string(), wording, "{r}");
+        }
+        // A placeholder is caught before its form: a zero UUID is not an id.
+        assert!(matches!(
+            BwRef::parse("uuid:00000000-0000-0000-0000-000000000000"),
+            Err(BwRefFault::Placeholder(_))
+        ));
+        for r in [
+            u,
+            &format!("uuid:{u}"),
+            "name:KEY",
+            "name:a/b",
+            "project:P/a/b",
+        ] {
+            assert!(BwRef::parse(r).is_ok(), "{r}");
         }
     }
 
@@ -314,5 +561,70 @@ mod tests {
         assert!(BwRef::parse("project:P/a/b").unwrap().selects(&s));
         assert!(!BwRef::parse("project:Q/a/b").unwrap().selects(&s));
         assert!(!BwRef::parse("name:b").unwrap().selects(&s));
+    }
+
+    // ---- the refs-line grammar (issue #82, ADR-0004) ----
+
+    #[test]
+    fn an_annotation_needs_whitespace_and_a_hash_to_start() {
+        // No Bitwarden reference form contains whitespace, so ` #` is an
+        // unambiguous end-of-reference marker.
+        assert_eq!(
+            split_annotation("name:FOO # uuid:11111111-1111-1111-1111-111111111111"),
+            (
+                "name:FOO",
+                Some("uuid:11111111-1111-1111-1111-111111111111")
+            )
+        );
+        assert_eq!(
+            split_annotation("name:FOO\t# note"),
+            ("name:FOO", Some("note"))
+        );
+        // A `#` welded to the reference is part of it: a Bitwarden key may hold
+        // one, and guessing otherwise would resolve the wrong secret.
+        assert_eq!(split_annotation("name:FOO#BAR"), ("name:FOO#BAR", None));
+        assert_eq!(split_annotation("name:FOO"), ("name:FOO", None));
+    }
+
+    #[test]
+    fn a_recorded_uuid_is_read_out_of_the_annotation() {
+        let u = "11111111-1111-1111-1111-111111111111";
+        assert_eq!(recorded_uuid(&format!("name:FOO # uuid:{u}")), Some(u));
+        // Prose in the comment is not a recording.
+        assert_eq!(recorded_uuid("name:FOO # hand pinned, do not touch"), None);
+        // Not a UUID, so not a recording.
+        assert_eq!(recorded_uuid("name:FOO # uuid:nope"), None);
+        // Invariant 4: a placeholder records nothing, so it can never be the
+        // evidence that makes a line a rename.
+        assert_eq!(
+            recorded_uuid("name:FOO # uuid:00000000-0000-0000-0000-000000000000"),
+            None
+        );
+    }
+
+    #[test]
+    fn split_glued_line_recovers_the_0_3_0_refresh_blob() {
+        // The exact shape that landed on disk: one physical line, 13 mappings.
+        let line = "META_AI_API_KEY=name:META_AI_API_KEYFIREWORKS_API_KEY=name:FIREWORKS_API_KEYELEVENLABS_API_KEY=name:ELEVENLABS_API_KEYMUREKA_API_KEY=name:MUREKA_API_KEYGEMINI_API_KEY=name:GEMINI_API_KEYASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEYANTHROPIC_API_KEY=name:ANTHROPIC_API_KEYBASETEN_API_KEY=name:BASETEN_API_KEYTOGETHER_AI_API_KEY=name:TOGETHER_AI_API_KEYDEEPINFRA_API_KEY=name:DEEPINFRA_API_KEYGROQ_API_KEY=name:GROQ_API_KEYHUME_API_KEY=name:HUME_API_KEYHUME_SECRET_KEY=name:HUME_SECRET_KEY";
+        let parts = split_glued_bitwarden_line(line).expect("glued");
+        assert_eq!(
+            parts,
+            vec![
+                "META_AI_API_KEY=name:META_AI_API_KEY",
+                "FIREWORKS_API_KEY=name:FIREWORKS_API_KEY",
+                "ELEVENLABS_API_KEY=name:ELEVENLABS_API_KEY",
+                "MUREKA_API_KEY=name:MUREKA_API_KEY",
+                "GEMINI_API_KEY=name:GEMINI_API_KEY",
+                "ASSEMBLY_AI_API_KEY=name:ASSEMBLY_AI_API_KEY",
+                "ANTHROPIC_API_KEY=name:ANTHROPIC_API_KEY",
+                "BASETEN_API_KEY=name:BASETEN_API_KEY",
+                "TOGETHER_AI_API_KEY=name:TOGETHER_AI_API_KEY",
+                "DEEPINFRA_API_KEY=name:DEEPINFRA_API_KEY",
+                "GROQ_API_KEY=name:GROQ_API_KEY",
+                "HUME_API_KEY=name:HUME_API_KEY",
+                "HUME_SECRET_KEY=name:HUME_SECRET_KEY",
+            ]
+        );
+        assert!(split_glued_bitwarden_line("OPENAI_API_KEY=name:OPENAI_API_KEY").is_none());
     }
 }

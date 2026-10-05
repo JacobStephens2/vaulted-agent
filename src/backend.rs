@@ -12,7 +12,7 @@ use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
 use crate::onepassword::{self, OpListing};
 use crate::secret::{ManagerToken, SecretValue};
-use crate::validate::{is_placeholder_secret_value, is_uuid, validate_manifest_file};
+use crate::validate::{is_placeholder_secret_value, validate_manifest_file};
 
 /// Run `program` to completion. Failing to start it is an error; a non-zero
 /// exit is the caller's to judge.
@@ -135,7 +135,7 @@ pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<Option<Str
         Lookup::Found(s) => Ok(Some(s.id.clone())),
         Lookup::Absent => Ok(None),
         Lookup::Ambiguous(_) => Err(match BwRef::parse(r) {
-            Some(BwRef::Name(key)) => Error::Message(format!(
+            Ok(BwRef::Name(key)) => Error::Message(format!(
                 "multiple secrets named {key}; use project:PROJECT/{key}"
             )),
             // Same key in the same project: only the id tells them apart.
@@ -143,14 +143,9 @@ pub(crate) fn id_from_listing(listing: &BwListing, r: &str) -> Result<Option<Str
                 "multiple secrets match {r}; use the secret's UUID (uuid:UUID)"
             )),
         }),
-        // The launch validates first, so only `secrets get` reaches these. Each
-        // keeps the wording it had before the shared parse (issue #120).
-        Lookup::NotARef => Err(Error::Message(match r.strip_prefix("project:") {
-            Some(rest) if !rest.contains('/') => "project: ref needs PROJECT/SECRET".into(),
-            Some(_) => format!("no secret matched {r}"),
-            None if r.starts_with("name:") => format!("no secret matched {r}"),
-            None => format!("bad bitwarden ref {r}"),
-        })),
+        // The launch validates first, so only `secrets get` reaches this. The
+        // fault words it as the Manifest check does, without the variable.
+        Lookup::NotARef(fault) => Err(Error::Message(fault.to_string())),
     }
 }
 
@@ -172,14 +167,11 @@ impl<'a> BwsRefResolver<'a> {
     fn resolve_id(&mut self, r: &str) -> Result<Option<String>> {
         // Saves one `bws secret list` per manifest of UUID refs. The answer is
         // the same: `bws secret get` on an id the token cannot see fails just
-        // as a listing miss would.
-        //
-        // Checked on the UUID shape alone, as before the shared parse: a
-        // placeholder UUID reaches `bws secret get` here, and the launch's
-        // validate pass has already refused it.
-        let bare = r.strip_prefix("uuid:").unwrap_or(r);
-        if is_uuid(bare) {
-            return Ok(Some(bare.to_string()));
+        // as a listing miss would. A placeholder UUID is a fault, not an id, so
+        // it fails in the lookup below; the launch's validate pass has already
+        // refused it.
+        if let Ok(BwRef::Id(id)) = BwRef::parse(r) {
+            return Ok(Some(id.to_string()));
         }
         let listing = match self.listing {
             Some(ref listing) => listing,
@@ -449,11 +441,25 @@ mod tests {
             "{e}"
         );
         assert!(e.contains("uuid:UUID"), "{e}");
-        // Malformed refs keep their old wording (`secrets get` skips validate).
-        assert_eq!(err("project:tools"), "project: ref needs PROJECT/SECRET");
-        assert_eq!(err("project:/DUP"), "no secret matched project:/DUP");
-        assert_eq!(err("name:"), "no secret matched name:");
-        assert_eq!(err("junk"), "bad bitwarden ref junk");
+        // Malformed refs read as the Manifest check words them, without the
+        // variable (`secrets get` skips validate).
+        assert_eq!(
+            err("project:tools"),
+            "want project:PROJECT/SECRET (got project:tools)"
+        );
+        assert_eq!(
+            err("project:/DUP"),
+            "want project:PROJECT/SECRET (got project:/DUP)"
+        );
+        assert_eq!(
+            err("project:tools/"),
+            "want project:PROJECT/SECRET (got project:tools/)"
+        );
+        assert_eq!(err("name:"), "empty name: ref");
+        assert_eq!(
+            err("junk"),
+            "bad bitwarden ref junk (use UUID, uuid:UUID, name:KEY, or project:PROJECT/KEY)"
+        );
     }
 
     fn failure(cause: ResolveCause) -> ResolveFailure {
