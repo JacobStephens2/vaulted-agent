@@ -18,8 +18,7 @@ use crate::error::{Error, Result};
 use crate::file_replace;
 use crate::inventory::{HarnessView, Inventory};
 
-/// The Manifest the installer and `update --sync-harnesses` give a Harness
-/// that has no vault yet.
+/// The Manifest Harness discovery gives a Harness that has no vault yet.
 pub(crate) const EMPTY_MANIFEST: &str = "empty.env";
 
 /// The Refs file wiring and `refresh` use on `be` when no Harness on `be`
@@ -164,11 +163,9 @@ fn fate(v: &HarnessView, empty: &Path, wires: bool, env_blind: impl Fn(&str) -> 
             manifest: v.harness.manifest.clone(),
         });
     }
-    let listed = [v.harness.command_basename(), Some(v.harness.name.as_str())]
-        .into_iter()
-        .flatten()
-        .find(|n| env_blind(n));
-    if let Some(name) = listed {
+    if let Some(name) =
+        config::env_blind_name(v.harness.command_basename(), &v.harness.name, &env_blind)
+    {
         return Fate::Left(Left::EnvBlind(name.to_string()));
     }
     if !wires {

@@ -321,12 +321,18 @@ running. A dedicated account with nothing else in it makes "the same user" as
 small a set as possible, and makes the audit trail say "the agent did this"
 rather than naming a person. Running as root is refused outright.
 
-Agent CLIs are auto-detected for the account that runs the harness
-(`--user`, defaulting to you): the installer's `command -v` probe plus that
-account's `~/.local/bin`, `~/.grok/bin`, and system directories. A CLI
-installed only for the invoking user is skipped with a message naming both
-accounts — install it for the service account, or configure that
-`harnesses.d/<name>.conf` explicitly.
+Agent CLIs are detected by the installed launcher: the installer's detection
+*is* `vaulted-agent update --sync-harnesses` (Harness discovery), run with
+`--user` (defaulting to you) as the launch account. It searches that account's
+`PATH` (through a `sudo -n` `command -v` probe when it is another account),
+its `~/.local/bin` and `~/.grok/bin`, the `bin` directories of existing
+Harnesses, and the system directories. A CLI installed only for the invoking
+user is skipped with a message naming both accounts — install it for the
+service account, or configure that `harnesses.d/<name>.conf` explicitly. A
+re-install on a host whose Harnesses agree on a Backend and Manifest gives new
+Harnesses that binding, as `va update` does; a fresh install starts them on
+`plainfile` + `empty.env`. `--dry-run` asks the release binary with
+`--dry-run`, which writes nothing.
 
 `install.sh` installs the Rust binary and never overwrites a config file you
 have edited. Its vault questions become launcher calls: `vaulted-agent
@@ -344,7 +350,7 @@ used to be `bitwarden.refs`; hosts that have one keep using it). Useful flags:
 | `--user NAME` | the service account to run agents as; defaults to you (writes `service_user` in defaults.conf when explicit) |
 | `--no-link` | skip the default `~/.local/bin` symlink |
 | `--no-va` | skip the short `va` alias (default is to install it) |
-| `--no-auto-harness` | do not detect claude/codex/grok/kimi/agy/muse/bash or write live harnesses |
+| `--no-auto-harness` | skip Harness discovery (`update --sync-harnesses`): detect no agent CLI and write no live harness |
 | `--no-setup` | skip interactive vault backend questions |
 | `--backend NAME` | `onepassword`, `bitwarden`, `pass`, `sops`, or `skip`. Runs `setup NAME --wire-only` (also under `--no-setup`); `skip` writes nothing about the backend |
 | `--auth-mode MODE` | `file` (token on disk) or `prompt` (paste each launch). A fresh install records `file`; a re-install without it keeps the current mode |
@@ -509,9 +515,11 @@ their Backend and Manifest. Existing nonempty `empty.env` files are refused as
 starters. Agent-specific aliases and permission settings from other profiles
 are not copied. New Harnesses use the installer’s default command and caller directory.
 
-Root-owned machine configuration triggers a sudo retry. Discovery considers the
-configured Service user (or the invoking user under sudo), their local binary
-directories, and existing Harness `bin` directories. Custom config directories
+Root-owned machine configuration triggers a sudo retry. Discovery searches as
+the configured Service user (or the invoking user under sudo): that account's
+`PATH`, local binary directories, existing Harness `bin` directories and the
+system directories. A CLI found only for the invoking account is reported with
+the remedy and no Harness is written for it. Custom config directories
 must be writable by the caller; their paths are not forwarded through sudo.
 
 `va update --sync-harnesses` adds missing Harnesses without downloading or

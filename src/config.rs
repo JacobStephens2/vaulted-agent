@@ -383,6 +383,20 @@ pub fn is_env_blind_agent(name: &str) -> bool {
     false
 }
 
+/// The name under which a Harness is an Env-blind agent: its command's
+/// basename, else its Harness name. Vault wiring and Harness discovery match
+/// it the same way.
+pub(crate) fn env_blind_name<'a>(
+    command_basename: Option<&'a str>,
+    harness_name: &'a str,
+    env_blind: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    [command_basename, Some(harness_name)]
+        .into_iter()
+        .flatten()
+        .find(|n| env_blind(n))
+}
+
 /// Doctor copy when `command_basename` is listed in `etc/env-blind-agents`.
 pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
     is_env_blind_agent(command_basename).then_some(

@@ -115,7 +115,15 @@ which nothing read). A fresh Bitwarden install's starter Refs file is
 `openai.env.refs`, not `bitwarden.refs`. Skipping the backend leaves
 `default_backend` as it is.
 
-`va update --sync-harnesses` performs only Harness discovery/setup. Updaters
+`va update --sync-harnesses` performs only Harness discovery/setup, and it is
+also the installer's detection: `install.sh` runs it (unless
+`--no-auto-harness`) with the install's service account as
+`VAULTED_AGENT_SERVICE_USER`, and keeps no detection of its own. Both entry
+points search the same directories for the launch account, write the same
+Harness conf, and report each agent as added, kept, found only for the invoking
+account (with the remedy), or not found. A re-install on a host whose Harnesses
+already agree on a Backend and Manifest gives new Harnesses that binding, not
+day-one. Updaters
 through v0.4.23 replace only the binary: after upgrading from one of those,
 run `va update --sync-harnesses` (or `va update` again) with the new binary.
 
@@ -319,6 +327,7 @@ can still read its own env (and so can anything as that user). Manifests are
 | `VAULTED_AGENT_SERVICE_USER` | Override service account |
 | `VAULTED_AGENT_NO_REEXEC=1` | Skip sudo hop (debug / doctor as caller) |
 | `VAULTED_AGENT_HANDOFF=spawn` | Tests only: spawn instead of exec |
+| `VAULTED_AGENT_AUTO_HARNESSES` | Tests only: a file read as the auto-harness list in place of the built-in one |
 | `BWS_ACCESS_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN` | Manager token if already in env (wins over file) |
 | `KIMI_CODE_LEGACY_FLAG` | Optional; shipped on `kimi.conf` via `env=` until kimi-code#2746 is in a release (issue #70). Delete the harness line to drop it. |
 
