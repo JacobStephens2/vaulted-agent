@@ -117,6 +117,25 @@ fn a_rejected_token_file_fails_setup_and_is_left_byte_identical() {
 }
 
 #[test]
+fn a_rejected_bitwarden_token_file_fails_setup_and_is_left_byte_identical() {
+    let seam = seam_with_auth_mode("file");
+    seam.write_executable("bws", REJECTING);
+    let path = seam.config_dir.join("bws.env");
+    let body = format!("BWS_ACCESS_TOKEN={BWS_TOKEN}\n");
+    fs::write(&path, &body).unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .args(["setup", "bitwarden"])
+        .output()
+        .expect("run");
+    let text = combined(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("--set-token"), "{text}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), body);
+}
+
+#[test]
 fn a_working_token_file_is_verified_and_kept() {
     let seam = seam_with_auth_mode("file");
     seam.install_fake_op();

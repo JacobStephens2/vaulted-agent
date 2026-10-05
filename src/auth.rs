@@ -346,6 +346,17 @@ impl CaptureFacts {
 ///
 /// Precedence follows Token source routing, so `setup` keeps today's order:
 /// an explicit pipe beats ambient env, env beats `-p`, `-p` beats the file.
+/// The unit tests are named after the rows, first match wins:
+///
+/// | row | `auth_mode = file`                         | `auth_mode = prompt` (never stores) |
+/// |-----|--------------------------------------------|-------------------------------------|
+/// | 1   | token file unreadable: fail                | `--set-token`: fail                 |
+/// | 2   | `--set-token`: Stdin (fail at a terminal)  | env token: Env                      |
+/// | 3   | env token: Env                             | terminal: Prompt                    |
+/// | 4   | `-p` at a terminal: Prompt                 | otherwise fail                      |
+/// | 5   | token file present: File                   |                                     |
+/// | 6   | terminal: Prompt                           |                                     |
+/// | 7   | otherwise fail                             |                                     |
 pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
     let key = facts.kind.env_var();
     let backend = facts.kind.backend_name();
@@ -520,6 +531,19 @@ pub(crate) fn capture_token<V>(
     Ok(captured)
 }
 
+/// Verify a token that has no operator at a paste to correct it: a rejection
+/// is final, and `rejected` says where the token came from.
+fn verify_once<V>(
+    token: ManagerToken,
+    verify: &dyn Fn(&ManagerToken) -> Result<V>,
+    rejected: impl FnOnce(Error) -> String,
+) -> Result<Capture<V>> {
+    match verify(&token) {
+        Ok(verified) => Ok(Capture::Token(token, verified)),
+        Err(e) => Err(Error::Message(rejected(e))),
+    }
+}
+
 fn capture_from_stdin<V>(
     kind: TokenKind,
     verify: &dyn Fn(&ManagerToken) -> Result<V>,
@@ -534,13 +558,12 @@ fn capture_from_stdin<V>(
     // live verify is the authority on whether the token works — a heuristic
     // that has not caught up with a new token format must not be what blocks
     // it. No re-prompt, just a non-zero exit.
-    let verified = verify(&token).map_err(|e| {
-        Error::Message(format!(
+    verify_once(token, verify, |e| {
+        format!(
             "--set-token: {} rejected by the vault (nothing written)\n  {e}",
             kind.env_var()
-        ))
-    })?;
-    Ok(Capture::Token(token, verified))
+        )
+    })
 }
 
 /// The exported env var. Nobody is at a paste to correct it, so a rejection
@@ -551,14 +574,13 @@ fn capture_from_env<V>(
 ) -> Result<Capture<V>> {
     let key = kind.env_var();
     let token = ManagerToken::new(std::env::var(key).unwrap_or_default());
-    let verified = verify(&token).map_err(|e| {
-        Error::Message(format!(
+    verify_once(token, verify, |e| {
+        format!(
             "exported {key} rejected by the vault (nothing written)\n  \
              unset it, or export a working token, then re-run setup {}\n  {e}",
             kind.backend_name()
-        ))
-    })?;
-    Ok(Capture::Token(token, verified))
+        )
+    })
 }
 
 /// The token already on disk. A rejected one is never overwritten here:
@@ -581,15 +603,14 @@ fn capture_from_file<V>(
         Err(Error::Io { path, source }) => return Err(token_file_unreadable(paths, &path, source)),
         Err(e) => return Err(e),
     };
-    let verified = verify(&token).map_err(|e| {
-        Error::Message(format!(
+    verify_once(token, verify, |e| {
+        format!(
             "{key} in {} rejected by the vault (nothing written; the file is unchanged)\n  \
              rotate it:  printf %s \"$TOKEN\" | vaulted-agent setup {} --set-token\n  {e}",
             path.display(),
             kind.backend_name()
-        ))
-    })?;
-    Ok(Capture::Token(token, verified))
+        )
+    })
 }
 
 fn capture_from_prompt<V>(
