@@ -152,7 +152,7 @@ while (( $# )); do
     --op-token-file)   OP_TOKEN_FILE="${2:?}"; shift 2 ;;
     --bws-token-file)  BWS_TOKEN_FILE="${2:?}"; shift 2 ;;
     --allow-debug-binary) ALLOW_DEBUG_BINARY=1; shift ;;
-    -h|--help)         sed -n "2,40p" "$0"; exit 0 ;;
+    -h|--help)         sed -n "2,43p" "$0"; exit 0 ;;
     *)                 die "unknown option '$1'" ;;
   esac
 done
