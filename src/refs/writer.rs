@@ -4,7 +4,7 @@
 //! generated, a write mode and a Backend style. What differs between Backends —
 //! the header, how "already mapped" is recognised, glued-line recovery and
 //! `# exclude:` directives — is decided here, so a fix like #80's lands for
-//! both at once. Every write goes through File replace (`replace_file`): a
+//! both at once. Every write goes through File replace (`replace_refs_file`): a
 //! truncated manifest is an install that launches nothing.
 
 use std::collections::HashSet;
@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{
-    key_to_var, name_line, read_exclusions, recorded_uuid, replace_file, split_annotation,
+    key_to_var, name_line, read_exclusions, recorded_uuid, replace_refs_file, split_annotation,
     split_glued_bitwarden_line, EXCLUDE_KEYWORD,
 };
 use crate::bitwarden::{BwListing, BwRef, BwSecret};
@@ -176,7 +176,7 @@ pub fn write_refs(
         if mode == WriteMode::Merge && added == 0 && fresh.is_empty() {
             return Ok(RefsWrite::default());
         }
-        replace_file(path, &body)?;
+        replace_refs_file(path, &body)?;
         return Ok(RefsWrite {
             added,
             recovered: 0,
@@ -228,7 +228,7 @@ pub fn write_refs(
     } else {
         format!("{existing}\n\n{}\n{block}", banner_line(source))
     };
-    replace_file(path, &body)?;
+    replace_refs_file(path, &body)?;
     Ok(RefsWrite {
         added,
         recovered,

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::bitwarden::{BwListing, BwSecret, Lookup};
 use crate::error::{Error, Result};
+use crate::file_replace::{self, Perms};
 use crate::onepassword::{Lookup as OpLookup, OpListing};
 
 mod writer;
@@ -353,19 +354,17 @@ pub fn edit_refs_lines(path: &Path, edits: &[(String, RefEdit)]) -> Result<Vec<(
     if applied.is_empty() {
         return Ok(applied);
     }
-    replace_file(path, &body)?;
+    replace_refs_file(path, &body)?;
     Ok(applied)
 }
 
 /// Write a whole Refs file through File replace: whole or not at all, keeping
 /// the manifest's owner, group and mode so the Service user can still read it.
-fn replace_file(path: &Path, body: &str) -> Result<()> {
-    crate::file_replace::replace(path, body.as_bytes(), crate::file_replace::Perms::Keep).map_err(
-        |e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        },
-    )
+fn replace_refs_file(path: &Path, body: &str) -> Result<()> {
+    file_replace::replace(path, body.as_bytes(), Perms::Keep).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })
 }
 
 /// Classify every mapping line in a 1Password refs file against the

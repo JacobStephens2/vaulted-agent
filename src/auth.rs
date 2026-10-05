@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::config::{self, AuthMode, Paths};
 use crate::error::{Error, Result};
+use crate::file_replace::{self, Perms};
 use crate::privilege;
 use crate::secret::ManagerToken;
 
@@ -748,6 +749,8 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
 /// The token is staged in a 0600 temp file and renamed over the old one, so it
 /// is never briefly world-readable nor truncated in place. An unchanged token
 /// is not rewritten, but its mode and group are still repaired.
+/// A group that cannot be set fails the write before the rename, leaving the
+/// old token file in place.
 pub fn write_token_file(
     path: &Path,
     key: &str,
@@ -759,15 +762,10 @@ pub fn write_token_file(
     let gid = service_user
         .filter(|u| !u.is_empty() && is_euid_root())
         .and_then(gid_for_user);
-    crate::file_replace::replace(
-        path,
-        body.as_bytes(),
-        crate::file_replace::Perms::Exact { mode: 0o640, gid },
-    )
-    .map_err(|e| Error::config_write(path, e))
+    file_replace::replace(path, body.as_bytes(), Perms::Exact { mode: 0o640, gid })
+        .map_err(|e| Error::config_write(path, e))
 }
 
-#[cfg(unix)]
 fn is_euid_root() -> bool {
     std::process::Command::new("id")
         .arg("-u")
@@ -787,7 +785,6 @@ fn is_euid_root() -> bool {
         == 0
 }
 
-#[cfg(unix)]
 fn gid_for_user(user: &str) -> Option<u32> {
     // Prefer primary group of the service account (`id -g user`).
     let out = std::process::Command::new("id")
