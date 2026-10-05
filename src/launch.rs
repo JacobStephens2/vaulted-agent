@@ -9,7 +9,8 @@ use std::process::{Command, Stdio};
 
 use crate::auth::TokenSource;
 use crate::backend;
-use crate::config::{load_default_backend, load_service_user, Backend, Harness, Paths};
+use crate::config::{Backend, Harness, Paths};
+use crate::defaults::Defaults;
 use crate::env_scrub::{parent_env_snapshot, MANAGER_TOKEN_VARS};
 use crate::error::{Error, Result};
 pub use crate::launch_plan::LaunchPlan;
@@ -60,9 +61,8 @@ pub fn build_launch_plan(
         });
     }
 
-    let backend_name = harness
-        .backend
-        .unwrap_or_else(|| load_default_backend(paths));
+    let defaults = Defaults::load(paths)?;
+    let backend_name = harness.backend.unwrap_or(defaults.default_backend);
 
     // A resolver failure names what the vault could not find — an item title,
     // or a reference its scanner could not read — and the operator needs the
@@ -115,7 +115,7 @@ pub fn build_launch_plan(
     let workdir = workdir::preflight(
         harness.workdir.as_deref(),
         &caller,
-        load_service_user(paths).as_deref(),
+        defaults.service_user.as_deref(),
     )?;
 
     // Snapshot after the token clear above, so the launcher holds no ambient

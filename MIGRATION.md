@@ -1,3 +1,33 @@
+# Migration: a bad `defaults.conf` stops the run (unreleased)
+
+**Behaviour break.** `defaults.conf` is read once, through Machine defaults,
+and a misconfiguration now stops the run instead of falling back to built-in
+values:
+
+- **Unreadable file.** A `defaults.conf` that exists but cannot be read stops a
+  launch, `run`, `secrets`, `setup`, `refresh`, `edit-manifest`, `pick` and
+  `update --sync-harnesses` with `<path>: Permission denied`. It used to read
+  as empty, which dropped `service_user`: the Service-user re-exec was skipped
+  and the agent ran as the caller.
+- **Invalid value.** An `auth_mode` other than `file`/`prompt`, an unknown
+  `default_backend`, an `allow_run` other than `yes`/`true`/`1`/`no`/`false`/`0`,
+  or a line with no `=` stops those commands with `defaults.conf:<line>: …`.
+  `auth_mode = promt` used to mean `file`; a bad `default_backend` used to mean
+  `onepassword`; an unrecognised `allow_run` used to mean `no`.
+- **Invalid `VAULTED_AGENT_DEFAULT_BACKEND`.** A non-empty value that names no
+  Backend is an error naming the variable. It used to fall through to the file.
+
+A missing `defaults.conf`, an empty value (`key =`) and an unknown key still
+read as before. `va auth-mode file|prompt` rewrites the `auth_mode` line
+without reading the rest of the file, so it repairs a typo there. `doctor`,
+`version`, `help` and `uninstall` still run; `doctor` reports the error once
+and carries on with the built-in values. `update` still replaces the binary,
+then its Harness sync step stops on the error (`binary updated, but Harness
+setup failed`); re-run `va update --sync-harnesses` once the file is fixed.
+
+`update --sync-harnesses` now honours `VAULTED_AGENT_SERVICE_USER` when it
+decides whose home and `PATH` to search, as the launch does.
+
 # Migration: ambiguous Bitwarden refs fail closed (unreleased)
 
 **Behaviour break.** A `project:PROJECT/KEY` reference that matches more than

@@ -270,6 +270,7 @@ Interpret carefully:
 | `secrets validate` needs token / fails without | Live gate by design; use `--offline` only for shape |
 | A manifest on a validate line you did not expect | An `extra_manifest` from `defaults.conf`: a file the machine reads that no harness launches from (ADR-0006). Fix it where it lives, not in `harnesses.d` |
 | Validate FAILs on a manifest that is not on disk | An `extra_manifest` path that no longer exists. Fail-closed on purpose: correct the path or drop the line |
+| `defaults.conf:<line>: …` / `<config dir>/defaults.conf: Permission denied` | `defaults.conf` has a value it does not recognise (or a line with no `=`), or exists but cannot be read by the launch account. Fails closed: nothing falls back to built-in values. Fix a typo'd `auth_mode` with `va auth-mode file\|prompt`; otherwise edit the named line, or fix the file's mode/owner. `va doctor` still runs and reports it |
 | Legacy `*_ADD_MORE_*` names | Old 1Password refresh naming; still works; next refresh renames - see MIGRATION.md |
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
 | `no manager token yet and no terminal to paste one` | `setup` with `auth_mode=file` and nothing to capture; pipe it with `--set-token`, export the token, or `va auth-mode prompt` |

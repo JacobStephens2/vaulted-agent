@@ -6,6 +6,7 @@ pub mod bitwarden;
 pub mod commands;
 pub mod conf_file;
 pub mod config;
+pub mod defaults;
 pub mod env_scrub;
 pub mod error;
 mod file_replace;
@@ -26,6 +27,6 @@ pub mod update;
 pub mod validate;
 mod workdir;
 
-pub use config::{list_harness_names, load_auth_mode, AuthMode, Backend, Harness, Paths};
+pub use config::{list_harness_names, AuthMode, Backend, Harness, Paths};
 pub use error::{Error, Result};
 pub use secret::{ManagerToken, SecretValue};

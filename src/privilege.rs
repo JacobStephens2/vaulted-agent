@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::Paths;
+use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 
 /// Pure decision for whether to re-exec under `service_user`.
@@ -78,9 +79,11 @@ pub fn account_home(user: &str) -> Option<PathBuf> {
 }
 
 impl ReexecFacts {
-    pub fn from_runtime(paths: &Paths, argv0: &str, orig_argv: &[String]) -> Self {
+    /// Fails when `defaults.conf` does not load: skipping the hop would run
+    /// the agent as the caller.
+    pub fn from_runtime(paths: &Paths, argv0: &str, orig_argv: &[String]) -> Result<Self> {
         let current_user = current_user();
-        let service_user = crate::config::load_service_user(paths);
+        let service_user = Defaults::load(paths)?.service_user;
         let caller_cwd = env::var("VAULTED_AGENT_CALLER_CWD").unwrap_or_else(|_| {
             env::current_dir()
                 .map(|p| p.display().to_string())
@@ -88,7 +91,7 @@ impl ReexecFacts {
         });
         let bin_dir = env::var("VAULTED_AGENT_BIN_DIR").unwrap_or_else(|_| "/usr/local/bin".into());
         let config_dir = env::var("VAULTED_AGENT_CONFIG_DIR").ok();
-        Self {
+        Ok(Self {
             current_user,
             service_user,
             no_reexec: env::var_os("VAULTED_AGENT_NO_REEXEC").is_some(),
@@ -97,7 +100,7 @@ impl ReexecFacts {
             caller_cwd,
             config_dir,
             orig_argv: orig_argv.to_vec(),
-        }
+        })
     }
 }
 
@@ -185,7 +188,7 @@ pub fn apply_reexec(decision: ReexecDecision) -> Result<()> {
 
 /// Runtime entry used by main/commands: plan from live facts, then apply.
 pub fn maybe_reexec_service_user(paths: &Paths, argv0: &str, orig_argv: &[String]) -> Result<()> {
-    let facts = ReexecFacts::from_runtime(paths, argv0, orig_argv);
+    let facts = ReexecFacts::from_runtime(paths, argv0, orig_argv)?;
     apply_reexec(plan_service_user_reexec(&facts))
 }
 
