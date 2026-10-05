@@ -751,10 +751,10 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
 ///
 /// Only root changes a file's group. The Service user wins, so the service
 /// account can read the file after the sudo re-exec (stories #11, #40); an
-/// unknown Service user means no change, never a fallback to the invoker.
-/// With no Service user the launch account is the invoker, so `SUDO_USER`'s
-/// group is used when it names a real, non-root account (issue #150), the
-/// same choice the installer has always made.
+/// unknown Service user means no change, never a fallback to the invoking
+/// account. With no Service user the launch account is the invoking account,
+/// so `SUDO_USER`'s group is used when it names a real, non-root account
+/// (issue #150), the same choice the installer has always made.
 pub(crate) fn token_file_gid(
     service_user: Option<&str>,
     sudo_user: Option<&str>,
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     /// Accounts the group tests know: everyone else is unknown.
-    fn gid_of(user: &str) -> Option<u32> {
+    fn known_gid(user: &str) -> Option<u32> {
         match user {
             "root" => Some(0),
             "svc" => Some(900),
@@ -1138,12 +1138,12 @@ mod tests {
     #[test]
     fn token_file_group_is_the_service_users_over_sudo_user() {
         assert_eq!(
-            token_file_gid(Some("svc"), Some("jacob"), true, gid_of),
+            token_file_gid(Some("svc"), Some("jacob"), true, known_gid),
             Some(900)
         );
         // An unknown Service user still wins: no fallback to the invoker.
         assert_eq!(
-            token_file_gid(Some("ghost"), Some("jacob"), true, gid_of),
+            token_file_gid(Some("ghost"), Some("jacob"), true, known_gid),
             None
         );
     }
@@ -1151,11 +1151,11 @@ mod tests {
     #[test]
     fn token_file_group_is_sudo_users_under_root_with_no_service_user() {
         assert_eq!(
-            token_file_gid(None, Some("jacob"), true, gid_of),
+            token_file_gid(None, Some("jacob"), true, known_gid),
             Some(1000)
         );
         assert_eq!(
-            token_file_gid(Some("  "), Some("jacob"), true, gid_of),
+            token_file_gid(Some("  "), Some("jacob"), true, known_gid),
             Some(1000),
             "a blank Service user is no Service user"
         );
@@ -1163,17 +1163,17 @@ mod tests {
 
     #[test]
     fn token_file_group_unchanged_for_sudo_user_root_or_unknown() {
-        assert_eq!(token_file_gid(None, Some("root"), true, gid_of), None);
-        assert_eq!(token_file_gid(None, Some("ghost"), true, gid_of), None);
-        assert_eq!(token_file_gid(None, Some(""), true, gid_of), None);
-        assert_eq!(token_file_gid(None, None, true, gid_of), None);
+        assert_eq!(token_file_gid(None, Some("root"), true, known_gid), None);
+        assert_eq!(token_file_gid(None, Some("ghost"), true, known_gid), None);
+        assert_eq!(token_file_gid(None, Some(""), true, known_gid), None);
+        assert_eq!(token_file_gid(None, None, true, known_gid), None);
     }
 
     #[test]
     fn token_file_group_unchanged_when_not_root() {
-        assert_eq!(token_file_gid(None, Some("jacob"), false, gid_of), None);
+        assert_eq!(token_file_gid(None, Some("jacob"), false, known_gid), None);
         assert_eq!(
-            token_file_gid(Some("svc"), Some("jacob"), false, gid_of),
+            token_file_gid(Some("svc"), Some("jacob"), false, known_gid),
             None
         );
     }
