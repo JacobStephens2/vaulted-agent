@@ -50,6 +50,14 @@ pub fn current_user() -> String {
         .unwrap_or_default()
 }
 
+/// Where the launcher is installed: `VAULTED_AGENT_BIN_DIR`, else
+/// `/usr/local/bin`. Read by the Service-user hop and by `uninstall`.
+pub fn bin_dir() -> PathBuf {
+    env::var_os("VAULTED_AGENT_BIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
+}
+
 /// The home directory the account database records for `user`, if it is
 /// absolute. `getent passwd` on Linux, `dscl` on macOS. The account name is
 /// passed as an argument, never interpolated into a shell command.
@@ -89,7 +97,7 @@ impl ReexecFacts {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| ".".into())
         });
-        let bin_dir = env::var("VAULTED_AGENT_BIN_DIR").unwrap_or_else(|_| "/usr/local/bin".into());
+        let bin_dir = bin_dir().display().to_string();
         let config_dir = env::var("VAULTED_AGENT_CONFIG_DIR").ok();
         Ok(Self {
             current_user,

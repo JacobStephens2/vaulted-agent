@@ -223,6 +223,58 @@ fn uninstall_dry_run_exits_zero() {
     );
 }
 
+/// Issue #162: one Uninstall plan. Owned links and the launcher go; a foreign
+/// `*-conductor` link and the Manager-token file stay, even under --purge.
+#[test]
+fn uninstall_purge_keeps_foreign_links_and_credentials() {
+    use std::os::unix::fs::symlink;
+
+    // The sudoers rule is not under the temp dirs: never remove a real one.
+    if std::path::Path::new("/etc/sudoers.d/vaulted-agent").exists() {
+        eprintln!("skipped: /etc/sudoers.d/vaulted-agent exists on this machine");
+        return;
+    }
+
+    let seam = CliSeam::new();
+    let bin = seam.root.join("prefix");
+    fs::create_dir(&bin).unwrap();
+    let launcher = bin.join("vaulted-agent");
+    fs::write(&launcher, "#!/bin/sh\n").unwrap();
+    symlink(&launcher, bin.join("va")).unwrap();
+    symlink(&launcher, bin.join("claude-conductor")).unwrap();
+    symlink("/bin/true", bin.join("other-conductor")).unwrap();
+    let op_env = seam.config_dir.join("op.env");
+    fs::write(&op_env, "OP_SERVICE_ACCOUNT_TOKEN=ops_fake\n").unwrap();
+    fs::write(seam.config_dir.join("defaults.conf"), "auth_mode = file\n").unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_BIN_DIR", &bin)
+        .env_remove("SUDO_USER")
+        .args(["uninstall", "--purge", "--yes"])
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for gone in ["vaulted-agent", "va", "claude-conductor"] {
+        assert!(
+            bin.join(gone).symlink_metadata().is_err(),
+            "{gone}: {stdout}"
+        );
+    }
+    assert!(bin.join("other-conductor").is_symlink(), "{stdout}");
+    assert!(stdout.contains("(not ours)"), "{stdout}");
+    assert!(op_env.is_file(), "{stdout}");
+    assert!(!seam.config_dir.join("defaults.conf").exists(), "{stdout}");
+    assert!(!seam.config_dir.join("harnesses.d").exists(), "{stdout}");
+    assert!(stdout.contains("still holds op.env"), "{stdout}");
+}
+
 #[test]
 fn secrets_list_uses_fake_bws() {
     let seam = CliSeam::new();

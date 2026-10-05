@@ -25,6 +25,7 @@ pub mod route;
 pub mod secret;
 mod setup_interview;
 mod token_file;
+mod uninstall;
 pub mod update;
 pub mod validate;
 mod vault_wiring;

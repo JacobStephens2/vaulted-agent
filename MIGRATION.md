@@ -1,3 +1,29 @@
+# Migration: one Uninstall plan for `uninstall` and `install.sh --uninstall` (unreleased)
+
+**Behaviour change.** `vaulted-agent uninstall` and `./install.sh --uninstall`
+are now one implementation, in the launcher. The installer runs
+`$PREFIX/vaulted-agent uninstall` when a launcher is installed there, and
+otherwise the binary its install would use (`VAULTED_AGENT_BIN`, the tree's
+release build, then `cargo build`).
+
+- **`uninstall` leaves foreign symlinks alone.** A `*-conductor`, `va` or
+  `~/.local/bin` symlink is removed only when it resolves to this launcher.
+  Anything else at those paths, a dangling link included, is reported as
+  "not ours" and kept. Before, every `*-conductor` symlink and every
+  user-local `va` was removed.
+- **`uninstall` asks through the installer's menu.** At a terminal, without
+  `--yes` or `--dry-run`, it shows what it found, offers keep config / also
+  purge config / dry run / quit, lists the exact paths, and asks `[y/N]`.
+  Its output takes the installer's shape ("Found:", "removed …", "left alone
+  … (not ours)").
+- **`install.sh --uninstall --purge` keeps credential files.** It used to run
+  `rm -rf` on the config directory, deleting `op.env` while printing that no
+  credential was touched. `--purge` now removes everything in the config
+  directory except `op.env`, `bws.env` and `age.key`, and removes the
+  directory itself only when none of those is in it.
+- **A failed removal fails the command.** The other removals still run, the
+  failure is reported, and the exit is non-zero. Before, it only warned.
+
 # Migration: `setup <backend>` verifies an exported or existing token (unreleased)
 
 **Behaviour change.** `vaulted-agent setup bitwarden|onepassword` now verifies
