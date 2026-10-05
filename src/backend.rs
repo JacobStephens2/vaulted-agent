@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use crate::auth::{TokenKind, TokenSource};
+use crate::auth::{TokenCache, TokenKind, TokenSource};
 use crate::bitwarden::{BwListing, BwRef, Lookup};
 use crate::config::{parse_dotenv_keys, Backend, Paths};
 use crate::error::{Error, Result};
@@ -332,22 +332,34 @@ pub fn resolve_sops(manifest: &Path, age_key: &Path) -> Result<HashMap<String, S
 /// Resolve a Manifest into its variables. Loads the Manager token through
 /// `token_source` only for the Backends that need one, and drops it before
 /// returning: a resolved Manifest never carries it (invariant 1).
+///
+/// [`resolve_with`] on a fresh cache, so a launch loads its token afresh.
 pub fn resolve(
     backend: Backend,
     manifest: &Path,
     paths: &Paths,
     token_source: TokenSource,
 ) -> Result<HashMap<String, SecretValue>> {
+    resolve_with(
+        backend,
+        manifest,
+        paths,
+        &mut TokenCache::new(paths, token_source),
+    )
+}
+
+/// Resolve a Manifest, taking any Manager token from `tokens`, the cache one
+/// invocation shares across resolves (`secrets validate`'s Pre-flight report).
+pub(crate) fn resolve_with(
+    backend: Backend,
+    manifest: &Path,
+    paths: &Paths,
+    tokens: &mut TokenCache<'_>,
+) -> Result<HashMap<String, SecretValue>> {
     match backend {
         Backend::Plainfile => resolve_plainfile(manifest),
-        Backend::Bitwarden => {
-            let token = token_source.load(paths, TokenKind::Bws)?;
-            resolve_bitwarden(manifest, &token)
-        }
-        Backend::OnePassword => {
-            let token = token_source.load(paths, TokenKind::Op)?;
-            resolve_onepassword(manifest, &token)
-        }
+        Backend::Bitwarden => resolve_bitwarden(manifest, tokens.get(TokenKind::Bws)?),
+        Backend::OnePassword => resolve_onepassword(manifest, tokens.get(TokenKind::Op)?),
         Backend::Pass => resolve_pass(manifest),
         Backend::Sops => resolve_sops(manifest, &paths.age_key_file),
     }

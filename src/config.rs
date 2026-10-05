@@ -32,7 +32,7 @@ impl AuthMode {
 }
 
 /// Vault backend. Exhaustive matching is the story #46 compile-time guarantee.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backend {
     Bitwarden,
     OnePassword,
