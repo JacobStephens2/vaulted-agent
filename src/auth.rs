@@ -7,39 +7,8 @@ use std::path::Path;
 use crate::config::{AuthMode, Backend, Paths};
 use crate::defaults::Defaults;
 use crate::error::{Error, Result};
-use crate::file_replace::{self, Perms};
-use crate::privilege;
 use crate::secret::ManagerToken;
-
-/// Whether a vault token file can be read by this process.
-///
-/// `Path::is_file()` collapses `ENOENT` and `EACCES` into `false`, so a
-/// permission-denied token file used to look identical to a missing one
-/// (issue #51). These three states keep that distinction.
-#[derive(Debug)]
-pub(crate) enum TokenFileStatus {
-    Present,
-    Missing,
-    Unreadable { source: io::Error },
-}
-
-/// Classify a token path without treating permission errors as absence.
-pub(crate) fn token_file_status(path: &Path) -> TokenFileStatus {
-    match fs::metadata(path) {
-        Ok(m) if !m.is_file() => TokenFileStatus::Missing,
-        Ok(_) => {
-            // Stat can succeed while open fails (directory is traversable but
-            // the file mode forbids this user). Confirm open, not just type.
-            match fs::File::open(path) {
-                Ok(_) => TokenFileStatus::Present,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => TokenFileStatus::Missing,
-                Err(e) => TokenFileStatus::Unreadable { source: e },
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => TokenFileStatus::Missing,
-        Err(e) => TokenFileStatus::Unreadable { source: e },
-    }
-}
+use crate::token_file::{self, Probe, Reader, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -144,56 +113,6 @@ impl TokenKind {
     }
 }
 
-fn read_token_file(path: &Path, key: &str) -> Result<Option<ManagerToken>> {
-    match fs::metadata(path) {
-        Ok(m) if !m.is_file() => return Ok(None),
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        // EACCES / other failures: do not collapse into "missing".
-        Err(e) => {
-            return Err(Error::Io {
-                path: path.to_path_buf(),
-                source: e,
-            })
-        }
-    }
-    let text = fs::read_to_string(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    // Shared dotenv policy with validate/resolve (quotes stripped).
-    Ok(crate::config::parse_dotenv_var(&text, key)?.map(ManagerToken::new))
-}
-
-/// Turn a token-file IO failure into a message that names the effective user
-/// and, when relevant, points at a missing `service_user` hop.
-fn token_file_unreadable(paths: &Paths, path: &Path, source: io::Error) -> Error {
-    let who = privilege::current_user();
-    let who = if who.is_empty() {
-        "this process".to_string()
-    } else {
-        format!("`{who}`")
-    };
-    let mut msg = format!(
-        "cannot read {} as {who} ({source})\n  \
-         Token files are often root:<service_user> mode 0640 so only that account can read them.",
-        path.display()
-    );
-    match Defaults::load(paths).map(|d| d.service_user) {
-        Err(e) => msg.push_str(&format!("\n  defaults.conf did not load: {e}")),
-        Ok(None) => msg.push_str(
-            "\n  No service_user in defaults.conf — the launcher never re-execs as the account \
-             that can read this file.\n  \
-             Fix: set `service_user = <account>` in defaults.conf, or grant this user group read.",
-        ),
-        Ok(Some(svc)) => msg.push_str(&format!(
-            "\n  service_user={svc} is configured; if this process is not that account, the \
-             privilege hop did not run (check sudoers / VAULTED_AGENT_NO_REEXEC)."
-        )),
-    }
-    Error::Message(msg)
-}
-
 /// True when this process can actually run an interactive paste: stdin is a
 /// terminal (that is where the no-echo read happens) *and* /dev/tty opens (that
 /// is where the prompt is written). install.sh's `can_prompt_user`, in Rust.
@@ -260,17 +179,6 @@ fn prompt_token(kind: TokenKind) -> Result<ManagerToken> {
 // auditable and must never gain a credential-writing mode.
 // ---------------------------------------------------------------------------
 
-/// Token-file state as the capture decision sees it: comparable, no io::Error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TokenFile {
-    /// Readable and carries a value for this key.
-    Present,
-    /// Absent, or readable but carrying no value for this key.
-    Missing,
-    /// Exists but cannot be read (invariant 6).
-    Unreadable,
-}
-
 /// Where Token capture takes the Manager token from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Door {
@@ -297,7 +205,10 @@ pub(crate) enum CaptureDecision {
 #[derive(Debug, Clone)]
 pub(crate) struct CaptureFacts {
     pub kind: TokenKind,
-    pub file: TokenFile,
+    pub file: State,
+    /// What is wrong with an unreadable or malformed token file: the IO error
+    /// or the faulty line. Message text only.
+    pub file_fault: String,
     /// The token's env var is exported and non-empty.
     pub env_token: bool,
     pub mode: AuthMode,
@@ -309,31 +220,38 @@ pub(crate) struct CaptureFacts {
     pub set_token: bool,
     /// Token-file path, for message text only.
     pub token_path: String,
-    /// Effective user, for the unreadable-file message.
-    pub current_user: String,
+    /// Who reads the token file, for the unreadable-file message.
+    pub reader: Reader,
 }
 
 impl CaptureFacts {
-    /// Gather the facts from the running process. The only IO in capture
-    /// planning; `plan_token_capture` itself stays pure.
+    /// Gather the facts from the running process and the token file's
+    /// `probe`. The only IO in capture planning; `plan_token_capture` itself
+    /// stays pure.
     pub(crate) fn from_runtime(
         paths: &Paths,
         kind: TokenKind,
         source: TokenSource,
         set_token: bool,
+        probe: &Probe,
     ) -> Self {
-        let path = kind.file(paths);
-        let doors = DoorFacts::from_runtime(paths, kind);
+        let doors = DoorFacts::from_probe(kind, probe);
+        let file_fault = match probe {
+            Probe::Malformed(fault) => fault.to_string(),
+            Probe::Unreadable(source) => source.to_string(),
+            _ => String::new(),
+        };
         Self {
             kind,
             file: doors.file,
+            file_fault,
             env_token: doors.env_token,
             mode: source.auth_mode(),
             force_prompt: source.forces_prompt(),
             tty: interactive_tty(),
             set_token,
-            token_path: path.display().to_string(),
-            current_user: privilege::current_user(),
+            token_path: kind.file(paths).display().to_string(),
+            reader: Reader::from_runtime(paths),
         }
     }
 }
@@ -344,36 +262,30 @@ impl CaptureFacts {
 pub(crate) struct DoorFacts {
     /// The token's env var is exported and non-empty.
     pub env_token: bool,
-    pub file: TokenFile,
+    pub file: State,
 }
 
 impl DoorFacts {
     pub(crate) fn from_runtime(paths: &Paths, kind: TokenKind) -> Self {
-        let path = kind.file(paths);
-        let file = match token_file_status(path) {
-            TokenFileStatus::Missing => TokenFile::Missing,
-            TokenFileStatus::Unreadable { .. } => TokenFile::Unreadable,
-            // A file that opens but holds no value for this key is not a
-            // door: treat it as missing so setup asks for a token instead.
-            TokenFileStatus::Present => match read_token_file(path, kind.env_var()) {
-                Ok(Some(t)) if !t.expose().is_empty() => TokenFile::Present,
-                Ok(_) => TokenFile::Missing,
-                Err(_) => TokenFile::Unreadable,
-            },
-        };
+        Self::from_probe(kind, &token_file::probe(kind.file(paths), kind.env_var()))
+    }
+
+    /// The doors given the token file's probe. A file that holds no value for
+    /// this key is not a door: it projects to missing, so setup asks for one.
+    fn from_probe(kind: TokenKind, probe: &Probe) -> Self {
         Self {
             env_token: std::env::var(kind.env_var())
                 .map(|v| !v.is_empty())
                 .unwrap_or(false),
-            file,
+            file: probe.state(),
         }
     }
 
-    /// True when this kind has a token door. An unreadable token file counts:
-    /// setup then picks its Backend and Token capture fails with the
-    /// invariant-6 message, instead of setup quietly choosing another vault.
+    /// True when this kind has a token door. An unreadable or malformed token
+    /// file counts: setup then picks its Backend and Token capture fails with
+    /// that file's message, instead of setup quietly choosing another vault.
     pub(crate) fn has_door(self) -> bool {
-        self.env_token || self.file != TokenFile::Missing
+        self.env_token || self.file != State::Missing
     }
 }
 
@@ -395,6 +307,7 @@ pub(crate) fn auto_pick(bws: DoorFacts, op: DoorFacts) -> Option<TokenKind> {
 /// | row | `auth_mode = file`                         | `auth_mode = prompt` (never stores) |
 /// |-----|--------------------------------------------|-------------------------------------|
 /// | 1   | token file unreadable: fail                | `--set-token`: fail                 |
+/// | 1b  | malformed, no `--set-token`: fail          |                                     |
 /// | 2   | `--set-token`: Stdin (fail at a terminal)  | env token: Env                      |
 /// | 3   | env token: Env                             | terminal: Prompt                    |
 /// | 4   | `-p` at a terminal: Prompt                 | otherwise fail                      |
@@ -433,18 +346,21 @@ pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
     // Invariant 6 / issue #51: an existing token file this process cannot read
     // is a permissions fault. Capturing over it would clobber a working
     // credential and hide the fault, so it is never an invitation to paste.
-    if facts.file == TokenFile::Unreadable {
-        let who = if facts.current_user.is_empty() {
-            "this process".to_string()
-        } else {
-            format!("`{}`", facts.current_user)
-        };
+    if facts.file == State::Unreadable {
         return CaptureDecision::Fail(format!(
-            "{} exists but cannot be read as {who}\n  \
+            "{}\n  \
              setup will not overwrite a token file it cannot read — that would clobber a working \
-             credential and hide the permissions fault.\n  \
-             Token files are often root:<service_user> mode 0640; fix ownership/mode, then re-run.",
-            facts.token_path
+             credential and hide the permissions fault.",
+            token_file::explain_unreadable(&facts.token_path, &facts.file_fault, &facts.reader)
+        ));
+    }
+    // A malformed file is a fault too, but no working credential: only the
+    // explicit rotation door below may replace it, once its token verifies.
+    if facts.file == State::Malformed && !facts.set_token {
+        return CaptureDecision::Fail(token_file::explain_malformed(
+            &facts.token_path,
+            &facts.file_fault,
+            facts.kind,
         ));
     }
 
@@ -469,7 +385,7 @@ pub(crate) fn plan_token_capture(facts: &CaptureFacts) -> CaptureDecision {
     if facts.force_prompt && facts.tty {
         return obtain(Door::Prompt);
     }
-    if facts.file == TokenFile::Present {
+    if facts.file == State::Present {
         return obtain(Door::File);
     }
     if facts.tty {
@@ -528,11 +444,11 @@ fn tty_write(line: &str) {
     }
 }
 
-/// The only Manager-token write outside `write_token_file` itself.
+/// The only Manager-token write outside `token_file::write` itself.
 fn store_captured(paths: &Paths, kind: TokenKind, token: &ManagerToken) -> Result<()> {
     let path = kind.file(paths).to_path_buf();
     let svc = Defaults::load(paths)?.service_user;
-    write_token_file(&path, kind.env_var(), token, svc.as_deref())?;
+    token_file::write(&path, kind.env_var(), token, svc.as_deref())?;
     println!("wrote {} (0640)", path.display());
     Ok(())
 }
@@ -550,7 +466,8 @@ pub(crate) fn capture_token<V>(
     set_token: bool,
     verify: &dyn Fn(&ManagerToken) -> Result<V>,
 ) -> Result<Capture<V>> {
-    let facts = CaptureFacts::from_runtime(paths, kind, source, set_token);
+    let probe = token_file::probe(kind.file(paths), kind.env_var());
+    let facts = CaptureFacts::from_runtime(paths, kind, source, set_token, &probe);
     let (door, store) = match plan_token_capture(&facts) {
         CaptureDecision::Fail(msg) => return Err(Error::Message(msg)),
         CaptureDecision::Obtain { door, store } => (door, store),
@@ -559,7 +476,12 @@ pub(crate) fn capture_token<V>(
         Door::Stdin => capture_from_stdin(kind, verify)?,
         Door::Prompt => capture_from_prompt(paths, kind, store, verify)?,
         Door::Env => capture_from_env(kind, verify)?,
-        Door::File => capture_from_file(paths, kind, verify)?,
+        Door::File => {
+            let Probe::Token(token) = probe else {
+                unreachable!("the plan opens the file door only when the probe holds a token")
+            };
+            capture_from_file(paths, kind, token, verify)?
+        }
     };
     if let Capture::Token(token, _) = &captured {
         if store {
@@ -627,31 +549,20 @@ fn capture_from_env<V>(
     })
 }
 
-/// The token already on disk. A rejected one is never overwritten here:
-/// rotating it is the operator's explicit `--set-token`.
+/// The token already on disk, as the probe read it. A rejected one is never
+/// overwritten here: rotating it is the operator's explicit `--set-token`.
 fn capture_from_file<V>(
     paths: &Paths,
     kind: TokenKind,
+    token: ManagerToken,
     verify: &dyn Fn(&ManagerToken) -> Result<V>,
 ) -> Result<Capture<V>> {
-    let key = kind.env_var();
-    let path = kind.file(paths);
-    let token = match read_token_file(path, key) {
-        Ok(Some(token)) => token,
-        Ok(None) => {
-            return Err(Error::Message(format!(
-                "{} no longer holds {key}",
-                path.display()
-            )))
-        }
-        Err(Error::Io { path, source }) => return Err(token_file_unreadable(paths, &path, source)),
-        Err(e) => return Err(e),
-    };
     verify_once(token, verify, |e| {
         format!(
-            "{key} in {} rejected by the vault (nothing written; the file is unchanged)\n  \
+            "{} in {} rejected by the vault (nothing written; the file is unchanged)\n  \
              rotate it:  printf %s \"$TOKEN\" | vaulted-agent setup {} --set-token\n  {e}",
-            path.display(),
+            kind.env_var(),
+            kind.file(paths).display(),
             kind.backend_name()
         )
     })
@@ -877,15 +788,27 @@ impl<'a> TokenCache<'a> {
 fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     let key = kind.env_var();
     let path = kind.file(paths);
-    match read_token_file(path, key) {
-        Ok(Some(t)) => return Ok(t),
-        Ok(None) => {}
-        // Unreadable is not missing: fail closed instead of prompting for a
-        // paste of the vault service-account token (issue #51).
-        Err(Error::Io { path, source }) => {
-            return Err(token_file_unreadable(paths, &path, source));
+    match token_file::probe(path, key) {
+        Probe::Token(t) => return Ok(t),
+        // An empty value never authenticates: it is no token, as missing is.
+        Probe::NoValue | Probe::Missing => {}
+        // Unreadable or malformed is not missing: fail closed instead of
+        // prompting for a paste of the vault service-account token
+        // (invariant 6, issues #51 and #160).
+        Probe::Unreadable(source) => {
+            return Err(Error::Message(token_file::explain_unreadable(
+                path.display(),
+                source,
+                &Reader::from_runtime(paths),
+            )));
         }
-        Err(e) => return Err(e),
+        Probe::Malformed(fault) => {
+            return Err(Error::Message(token_file::explain_malformed(
+                path.display(),
+                fault,
+                kind,
+            )));
+        }
     }
 
     // One-shot prompt if TTY available (match bash behavior when file missing)
@@ -905,108 +828,27 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     )))
 }
 
-/// The group a Manager-token file written now should carry, as a gid. Pure:
-/// `gid_of` resolves an account's primary group (`None` for unknown).
-///
-/// Only root changes a file's group. The Service user wins, so the service
-/// account can read the file after the sudo re-exec (stories #11, #40); an
-/// unknown Service user means no change, never a fallback to the invoking
-/// account. With no Service user the launch account is the invoking account,
-/// so `SUDO_USER`'s group is used when it names a real, non-root account
-/// (issue #150), the same choice the installer has always made.
-pub(crate) fn token_file_gid(
-    service_user: Option<&str>,
-    sudo_user: Option<&str>,
-    euid_root: bool,
-    gid_of: impl Fn(&str) -> Option<u32>,
-) -> Option<u32> {
-    if !euid_root {
-        return None;
-    }
-    match service_user.map(str::trim).filter(|u| !u.is_empty()) {
-        Some(svc) => gid_of(svc),
-        None => sudo_user
-            .map(str::trim)
-            .filter(|u| !u.is_empty() && *u != "root")
-            .and_then(gid_of),
-    }
-}
-
-/// Write `KEY=token` with mode 0640 through File replace, group chosen by
-/// [`token_file_gid`] from `service_user`, `SUDO_USER` and the effective uid.
-///
-/// The token is staged in a 0600 temp file and renamed over the old one, so it
-/// is never briefly world-readable nor truncated in place. An unchanged token
-/// is not rewritten, but its mode and group are still repaired.
-/// A group that cannot be set fails the write before the rename, leaving the
-/// old token file in place.
-pub fn write_token_file(
-    path: &Path,
-    key: &str,
-    token: &ManagerToken,
-    service_user: Option<&str>,
-) -> Result<()> {
-    let body = format!("{}={}\n", key, token.expose());
-    let sudo_user = std::env::var("SUDO_USER").ok();
-    let gid = token_file_gid(
-        service_user,
-        sudo_user.as_deref(),
-        is_euid_root(),
-        gid_for_user,
-    );
-    file_replace::replace(path, body.as_bytes(), Perms::Exact { mode: 0o640, gid })
-        .map_err(|e| Error::config_write(path, e))
-}
-
-pub(crate) fn is_euid_root() -> bool {
-    std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1)
-        == 0
-}
-
-fn gid_for_user(user: &str) -> Option<u32> {
-    // Primary group of the account (`id -g user`); None when it is unknown.
-    let out = std::process::Command::new("id")
-        .args(["-g", user])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// A host with nothing configured yet: file mode, no token anywhere, at a
     /// terminal. Each test overrides only the fact it is about.
     fn facts() -> CaptureFacts {
         CaptureFacts {
             kind: TokenKind::Bws,
-            file: TokenFile::Missing,
+            file: State::Missing,
             env_token: false,
             mode: AuthMode::File,
             force_prompt: false,
             tty: true,
             set_token: false,
+            file_fault: String::new(),
             token_path: "/etc/vaulted-agent/bws.env".into(),
-            current_user: "root".into(),
+            reader: Reader {
+                user: "root".into(),
+                service_user: Ok(None),
+            },
         }
     }
 
@@ -1039,7 +881,8 @@ mod tests {
             (false, true, false, true),
         ] {
             let msg = fail_message(plan_token_capture(&CaptureFacts {
-                file: TokenFile::Unreadable,
+                file: State::Unreadable,
+                file_fault: "Permission denied (os error 13)".into(),
                 env_token,
                 tty,
                 set_token,
@@ -1048,6 +891,54 @@ mod tests {
             }));
             assert!(msg.contains("cannot be read"), "{msg}");
             assert!(msg.contains("bws.env"), "{msg}");
+            assert!(msg.contains("Permission denied"), "{msg}");
+            assert!(msg.contains("will not overwrite"), "{msg}");
+        }
+    }
+
+    fn malformed() -> CaptureFacts {
+        CaptureFacts {
+            file: State::Malformed,
+            file_fault: "line 1: expected KEY=value".into(),
+            ..facts()
+        }
+    }
+
+    #[test]
+    fn file_mode_row_1b_malformed_token_file_fails_unless_set_token() {
+        // A fault, not an absence: pasting over it would hide it, and it is
+        // not unreadable, so the fix is a rewrite, not a chmod.
+        for (env_token, tty, force_prompt) in [
+            (false, true, false),
+            (true, true, false),
+            (false, false, false),
+            (false, true, true),
+        ] {
+            let msg = fail_message(plan_token_capture(&CaptureFacts {
+                env_token,
+                tty,
+                force_prompt,
+                ..malformed()
+            }));
+            assert!(msg.contains("bws.env is malformed"), "{msg}");
+            assert!(msg.contains("line 1: expected KEY=value"), "{msg}");
+            assert!(msg.contains("--set-token"), "{msg}");
+            assert!(!msg.contains("cannot be read"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn file_mode_row_2_set_token_may_replace_a_malformed_token_file() {
+        for env_token in [false, true] {
+            assert_eq!(
+                plan_token_capture(&CaptureFacts {
+                    env_token,
+                    tty: false,
+                    set_token: true,
+                    ..malformed()
+                }),
+                stored(Door::Stdin)
+            );
         }
     }
 
@@ -1056,10 +947,10 @@ mod tests {
         // Rotation door: an explicit argument beats ambient env, so a rotation
         // never silently stores the stale exported value.
         for (file, env_token, force_prompt) in [
-            (TokenFile::Missing, false, false),
-            (TokenFile::Present, true, false),
-            (TokenFile::Missing, true, false),
-            (TokenFile::Present, false, true),
+            (State::Missing, false, false),
+            (State::Present, true, false),
+            (State::Missing, true, false),
+            (State::Present, false, true),
         ] {
             assert_eq!(
                 plan_token_capture(&CaptureFacts {
@@ -1089,9 +980,9 @@ mod tests {
     #[test]
     fn file_mode_row_3_exported_token_beats_force_prompt_and_the_file() {
         for (file, force_prompt, tty) in [
-            (TokenFile::Missing, false, true),
-            (TokenFile::Present, false, false),
-            (TokenFile::Present, true, true),
+            (State::Missing, false, true),
+            (State::Present, false, false),
+            (State::Present, true, true),
         ] {
             assert_eq!(
                 plan_token_capture(&CaptureFacts {
@@ -1111,7 +1002,7 @@ mod tests {
         assert_eq!(
             plan_token_capture(&CaptureFacts {
                 force_prompt: true,
-                file: TokenFile::Present,
+                file: State::Present,
                 ..facts()
             }),
             stored(Door::Prompt)
@@ -1125,7 +1016,7 @@ mod tests {
         for tty in [true, false] {
             assert_eq!(
                 plan_token_capture(&CaptureFacts {
-                    file: TokenFile::Present,
+                    file: State::Present,
                     tty,
                     ..facts()
                 }),
@@ -1135,7 +1026,7 @@ mod tests {
         // -p with no terminal cannot paste, so the file still answers.
         assert_eq!(
             plan_token_capture(&CaptureFacts {
-                file: TokenFile::Present,
+                file: State::Present,
                 force_prompt: true,
                 tty: false,
                 ..facts()
@@ -1167,10 +1058,10 @@ mod tests {
 
     const NO_DOOR: DoorFacts = DoorFacts {
         env_token: false,
-        file: TokenFile::Missing,
+        file: State::Missing,
     };
 
-    fn doors(env_token: bool, file: TokenFile) -> DoorFacts {
+    fn doors(env_token: bool, file: State) -> DoorFacts {
         DoorFacts { env_token, file }
     }
 
@@ -1184,9 +1075,10 @@ mod tests {
     #[test]
     fn auto_pick_row_2_each_door_alone_picks_its_kind() {
         for door in [
-            doors(true, TokenFile::Missing),
-            doors(false, TokenFile::Present),
-            doors(false, TokenFile::Unreadable),
+            doors(true, State::Missing),
+            doors(false, State::Present),
+            doors(false, State::Unreadable),
+            doors(false, State::Malformed),
         ] {
             assert_eq!(auto_pick(door, NO_DOOR), Some(TokenKind::Bws), "{door:?}");
             assert_eq!(auto_pick(NO_DOOR, door), Some(TokenKind::Op), "{door:?}");
@@ -1195,11 +1087,12 @@ mod tests {
 
     #[test]
     fn auto_pick_row_3_bitwarden_wins_over_onepassword() {
-        let op = doors(true, TokenFile::Present);
+        let op = doors(true, State::Present);
         for bws in [
-            doors(true, TokenFile::Missing),
-            doors(false, TokenFile::Present),
-            doors(false, TokenFile::Unreadable),
+            doors(true, State::Missing),
+            doors(false, State::Present),
+            doors(false, State::Unreadable),
+            doors(false, State::Malformed),
         ] {
             assert_eq!(auto_pick(bws, op), Some(TokenKind::Bws), "{bws:?}");
         }
@@ -1211,7 +1104,7 @@ mod tests {
         let paths = Paths::from_config_dir(tmp.path());
         fs::write(&paths.bws_env_file, "OTHER=x\n").unwrap();
         let facts = DoorFacts::from_runtime(&paths, TokenKind::Bws);
-        assert_eq!(facts.file, TokenFile::Missing);
+        assert_eq!(facts.file, State::Missing);
     }
 
     // --- auth_mode = prompt ----------------------------------------------
@@ -1226,9 +1119,10 @@ mod tests {
     #[test]
     fn prompt_mode_row_1_set_token_is_a_contradiction() {
         for (env_token, file) in [
-            (false, TokenFile::Missing),
-            (true, TokenFile::Present),
-            (false, TokenFile::Unreadable),
+            (false, State::Missing),
+            (true, State::Present),
+            (false, State::Unreadable),
+            (false, State::Malformed),
         ] {
             let msg = fail_message(plan_token_capture(&CaptureFacts {
                 tty: false,
@@ -1258,9 +1152,10 @@ mod tests {
     #[test]
     fn prompt_mode_row_3_terminal_pastes_and_never_reads_the_token_file() {
         for file in [
-            TokenFile::Missing,
-            TokenFile::Present,
-            TokenFile::Unreadable,
+            State::Missing,
+            State::Present,
+            State::Unreadable,
+            State::Malformed,
         ] {
             for force_prompt in [false, true] {
                 assert_eq!(
@@ -1278,9 +1173,10 @@ mod tests {
     #[test]
     fn prompt_mode_row_4_no_token_and_no_terminal_says_export_or_auth_mode_file() {
         for file in [
-            TokenFile::Missing,
-            TokenFile::Present,
-            TokenFile::Unreadable,
+            State::Missing,
+            State::Present,
+            State::Unreadable,
+            State::Malformed,
         ] {
             let msg = fail_message(plan_token_capture(&CaptureFacts {
                 file,
@@ -1424,131 +1320,6 @@ mod tests {
             TokenSource::decide(None, None, true, AuthMode::Prompt).with_auth_mode(AuthMode::File);
         assert_eq!(ts.auth_mode(), AuthMode::File);
         assert_eq!(ts.route(false), TokenRoute::Prompt);
-    }
-
-    #[test]
-    fn token_file_status_missing_is_not_unreadable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("op.env");
-        assert!(matches!(token_file_status(&path), TokenFileStatus::Missing));
-    }
-
-    /// Accounts the group tests know: everyone else is unknown.
-    fn known_gid(user: &str) -> Option<u32> {
-        match user {
-            "root" => Some(0),
-            "svc" => Some(900),
-            "jacob" => Some(1000),
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn token_file_group_is_the_service_users_over_sudo_user() {
-        assert_eq!(
-            token_file_gid(Some("svc"), Some("jacob"), true, known_gid),
-            Some(900)
-        );
-        // An unknown Service user still wins: no fallback to the invoker.
-        assert_eq!(
-            token_file_gid(Some("ghost"), Some("jacob"), true, known_gid),
-            None
-        );
-    }
-
-    #[test]
-    fn token_file_group_is_sudo_users_under_root_with_no_service_user() {
-        assert_eq!(
-            token_file_gid(None, Some("jacob"), true, known_gid),
-            Some(1000)
-        );
-        assert_eq!(
-            token_file_gid(Some("  "), Some("jacob"), true, known_gid),
-            Some(1000),
-            "a blank Service user is no Service user"
-        );
-    }
-
-    #[test]
-    fn token_file_group_unchanged_for_sudo_user_root_or_unknown() {
-        assert_eq!(token_file_gid(None, Some("root"), true, known_gid), None);
-        assert_eq!(token_file_gid(None, Some("ghost"), true, known_gid), None);
-        assert_eq!(token_file_gid(None, Some(""), true, known_gid), None);
-        assert_eq!(token_file_gid(None, None, true, known_gid), None);
-    }
-
-    #[test]
-    fn token_file_group_unchanged_when_not_root() {
-        assert_eq!(token_file_gid(None, Some("jacob"), false, known_gid), None);
-        assert_eq!(
-            token_file_gid(Some("svc"), Some("jacob"), false, known_gid),
-            None
-        );
-    }
-
-    #[test]
-    fn token_file_status_present_when_readable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("op.env");
-        fs::write(&path, "OP_SERVICE_ACCOUNT_TOKEN=x\n").unwrap();
-        assert!(matches!(token_file_status(&path), TokenFileStatus::Present));
-    }
-
-    #[test]
-    fn token_file_status_unreadable_when_mode_forbids() {
-        // Skip when the suite runs as root: chmod 000 does not stop root.
-        if is_euid_root() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("op.env");
-        fs::write(&path, "OP_SERVICE_ACCOUNT_TOKEN=x\n").unwrap();
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o000);
-        fs::set_permissions(&path, perms).unwrap();
-        match token_file_status(&path) {
-            TokenFileStatus::Unreadable { source } => {
-                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
-            }
-            other => panic!("expected Unreadable, got {other:?}"),
-        }
-        // Restore so tempfile cleanup can remove the file.
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&path, perms).unwrap();
-    }
-
-    #[test]
-    fn read_token_file_errors_on_permission_denied() {
-        if is_euid_root() {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("op.env");
-        fs::write(&path, "OP_SERVICE_ACCOUNT_TOKEN=x\n").unwrap();
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o000);
-        fs::set_permissions(&path, perms).unwrap();
-        let err = read_token_file(&path, "OP_SERVICE_ACCOUNT_TOKEN").unwrap_err();
-        match err {
-            Error::Io { source, .. } => {
-                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
-            }
-            other => panic!("expected Io, got {other}"),
-        }
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&path, perms).unwrap();
-    }
-
-    #[test]
-    fn read_token_file_none_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nope.env");
-        assert!(matches!(
-            read_token_file(&path, "OP_SERVICE_ACCOUNT_TOKEN"),
-            Ok(None)
-        ));
     }
 
     #[test]

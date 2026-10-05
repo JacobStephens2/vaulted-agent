@@ -266,7 +266,8 @@ Interpret carefully:
 | Symptom | Meaning |
 |---------|---------|
 | `op.env: missing` | File really absent (or not a file) |
-| `op.env: unreadable (… as user)` | Present but EACCES - often need `service_user` or group/ACL, **not** a paste of the vault SA token |
+| `op.env: unreadable` (`… exists but cannot be read as …`) | Present but EACCES - often need `service_user` or group/ACL, **not** a paste of the vault SA token |
+| `op.env: malformed` / `… is malformed (line N: …)` | The token file is there but a line does not parse, so it holds no usable token. Launches fail closed (no paste prompt), `setup` refuses it and `doctor` counts it as an error. Not a permissions fault: rewrite it with `printf %s "$TOKEN" \| sudo va setup <backend> --set-token` |
 | `cannot enter /home/…` | `workdir=caller` + service account cannot traverse (often `setfacl -m u:<svc>:x /home/<op>`) |
 | `Failed to read project config … Permission denied` | `workdir=caller` in an operator home where agent config (e.g. `~/.codex/config.toml`) is mode 0600 — grant service account read: `setfacl -m u:<svc>:r ~/.codex/config.toml` && `setfacl -d -m u:<svc>:r ~/.codex` |
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |

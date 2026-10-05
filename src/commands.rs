@@ -26,6 +26,7 @@ pub use crate::refresh::cmd_refresh;
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::setup_interview::{self, read_tty_line, write_auth_mode, BackendChoice, Interview};
+use crate::token_file;
 use crate::validate::validate_manifest_file;
 use crate::vault_wiring;
 use crate::workdir::{self, CallerContext};
@@ -221,36 +222,39 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
     }
 }
 
-/// Report whether a vault token file is present, missing, or unreadable.
-/// Returns 1 when the file is unreadable (counts as a doctor error), else 0.
-fn report_token_file(
-    label: &str,
-    path: &std::path::Path,
-    running_as: &str,
-    service_user: Option<&str>,
-) -> usize {
-    use crate::auth::{token_file_status, TokenFileStatus};
-    match token_file_status(path) {
-        TokenFileStatus::Present => {
+/// Report what a vault token file holds, by the one Manager-token file probe.
+/// Returns 1 when the file is unreadable or malformed (a doctor error), else 0.
+fn report_token_file(paths: &Paths, kind: TokenKind, reader: &token_file::Reader) -> usize {
+    use crate::token_file::Probe;
+    let path = kind.file(paths);
+    let label = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let indent = |text: String| text.replace('\n', "\n  ");
+    match token_file::probe(path, kind.env_var()) {
+        Probe::Token(_) => {
             println!("{label}: present");
             0
         }
-        TokenFileStatus::Missing => {
+        Probe::NoValue => {
+            println!("{label}: holds no value for {}", kind.env_var());
+            0
+        }
+        Probe::Missing => {
             println!("{label}: missing");
             0
         }
-        TokenFileStatus::Unreadable { source } => {
-            let who = if running_as.is_empty() {
-                "this process".to_string()
-            } else {
-                running_as.to_string()
-            };
-            println!("{label}: unreadable ({source} as {who})");
-            if service_user.is_none() {
-                println!(
-                    "  HINT: no service_user set — launches never hop to the account that can read this file"
-                );
-            }
+        Probe::Unreadable(source) => {
+            println!("{label}: unreadable");
+            let why = token_file::explain_unreadable(path.display(), source, reader);
+            println!("  {}", indent(why));
+            1
+        }
+        Probe::Malformed(fault) => {
+            println!("{label}: malformed");
+            let why = token_file::explain_malformed(path.display(), fault, kind);
+            println!("  {}", indent(why));
             1
         }
     }
@@ -365,18 +369,12 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     // Three states, not two: is_file() used to report EACCES as "missing"
     // (issue #51), which sent operators hunting for a file that was present
     // and steered them toward pasting a vault token by hand.
-    issues += report_token_file(
-        "bws.env",
-        &paths.bws_env_file,
-        &running_as,
-        service_user.as_deref(),
-    );
-    issues += report_token_file(
-        "op.env",
-        &paths.op_env_file,
-        &running_as,
-        service_user.as_deref(),
-    );
+    let reader = token_file::Reader {
+        user: running_as.clone(),
+        service_user: Ok(service_user.clone()),
+    };
+    issues += report_token_file(paths, TokenKind::Bws, &reader);
+    issues += report_token_file(paths, TokenKind::Op, &reader);
 
     let names = list_harness_names(paths)?;
     if names.is_empty() {
