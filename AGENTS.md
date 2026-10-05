@@ -280,7 +280,7 @@ Interpret carefully:
 | `Failed to read project config … Permission denied` | `workdir=caller` in an operator home where agent config (e.g. `~/.codex/config.toml`) is mode 0600 — grant service account read: `setfacl -m u:<svc>:r ~/.codex/config.toml` && `setfacl -d -m u:<svc>:r ~/.codex` |
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |
 | `could not resolve` / item named on validate or launch | Well-formed ref, vault item missing or renamed - fix the refs file or vault. Launch lists the variables implicated and suggests `secrets validate` |
-| `Dangling refs in <file>` on refresh | Mappings matching nothing the token can see - on 1Password, a missing item or field. Reported every run; exit stays 0. `--prune` removes them |
+| `Dangling refs in <file>` on refresh or `setup bitwarden` | Mappings matching nothing the token can see - on 1Password, a missing item or field. Reported every run; exit stays 0. `refresh --prune` removes them; `setup` reports the same Refresh report but never edits a line |
 | `Ambiguous refs in <file>` on refresh | Bitwarden `name:` / `project:` mappings matching more than one secret; the launch fails closed on them. Never pruned or repaired; exit stays 0. Qualify with `project:PROJECT/KEY` or pin `uuid:UUID` via `va edit-manifest` |
 | `Refs this run did not check` on refresh | 1Password mappings into items this run never expanded (not selected, or a read that failed). Never pruned; `refresh --all --prune` checks every item |
 | `Mapped but excluded in <file>` | 1Password mappings that resolve but match a recorded `# exclude:`. Kept on purpose (ADR-0005) - exclusion governs what refresh *adds*. Delete the line with `va edit-manifest` if you meant it to go |
