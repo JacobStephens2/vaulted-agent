@@ -350,7 +350,7 @@ pub fn resolve(
 
 /// Resolve a Manifest, taking any Manager token from `tokens`, the cache one
 /// invocation shares across resolves (`secrets validate`'s Pre-flight report).
-pub fn resolve_with(
+pub(crate) fn resolve_with(
     backend: Backend,
     manifest: &Path,
     paths: &Paths,

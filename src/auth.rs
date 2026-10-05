@@ -664,7 +664,7 @@ impl TokenSource {
 /// unreadable token file is reported again on every later use, never
 /// re-prompted, so one run asks the operator once (invariant 6 still holds).
 /// The tokens drop with the cache.
-pub struct TokenCache<'a> {
+pub(crate) struct TokenCache<'a> {
     load: Box<dyn FnMut(TokenKind) -> Result<ManagerToken> + 'a>,
     bws: Option<std::result::Result<ManagerToken, String>>,
     op: Option<std::result::Result<ManagerToken, String>>,
@@ -672,7 +672,7 @@ pub struct TokenCache<'a> {
 
 impl<'a> TokenCache<'a> {
     /// Loads along `source`'s route on first use of each kind.
-    pub fn new(paths: &'a Paths, source: TokenSource) -> Self {
+    pub(crate) fn new(paths: &'a Paths, source: TokenSource) -> Self {
         Self::with_loader(move |kind| source.load(paths, kind))
     }
 
@@ -687,7 +687,7 @@ impl<'a> TokenCache<'a> {
 
     /// The token of `kind`, loading it on first use. The first failure is
     /// returned as it was raised; later uses repeat its message.
-    pub fn get(&mut self, kind: TokenKind) -> Result<&ManagerToken> {
+    pub(crate) fn get(&mut self, kind: TokenKind) -> Result<&ManagerToken> {
         let slot = match kind {
             TokenKind::Bws => &mut self.bws,
             TokenKind::Op => &mut self.op,

@@ -110,6 +110,11 @@ impl Inventory {
         &self.harnesses
     }
 
+    /// The Harness named `name`, loaded or not; `None` when no conf declares it.
+    pub fn harness(&self, name: &str) -> Option<&HarnessEntry> {
+        self.harnesses.iter().find(|e| e.name == name)
+    }
+
     /// The Harnesses that loaded. For callers whose policy is to skip the rest.
     pub fn loaded(&self) -> impl Iterator<Item = &HarnessView> {
         self.harnesses.iter().filter_map(|e| e.loaded.as_ref().ok())
@@ -122,7 +127,7 @@ impl Inventory {
         let harnesses = self.harnesses.iter().map(|e| match &e.loaded {
             // The manifest is named on every line because several harnesses
             // commonly share one file: six green harnesses can be one file
-            // checked six times, and the operator cannot see which files were
+            // reported six times, and the operator cannot see which files were
             // covered otherwise.
             Ok(v) => ValidateTarget {
                 label: format!("{} ({})", e.name, v.binding.manifest.display()),

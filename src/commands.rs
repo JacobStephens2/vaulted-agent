@@ -344,7 +344,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
             let (targets, form) = match positional.first().copied() {
                 None => (inventory.validate_targets(), Form::All),
                 Some(name) => {
-                    single = match inventory.harnesses().iter().find(|e| e.name == name) {
+                    single = match inventory.harness(name) {
                         // A named Harness whose conf will not load fails the
                         // command with that error.
                         Some(entry) => match &entry.loaded {

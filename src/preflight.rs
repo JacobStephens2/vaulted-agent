@@ -54,6 +54,11 @@ impl Failure {
             blame,
         }
     }
+
+    /// The blame lines, each indented on a line of its own.
+    fn blame_block(&self) -> String {
+        self.blame.iter().map(|b| format!("    {b}\n")).collect()
+    }
 }
 
 /// One target's verdict.
@@ -141,7 +146,7 @@ impl PreflightReport {
     /// The text each form has always printed.
     pub fn render(&self, form: Form) -> Rendered {
         let mut out = Rendered::default();
-        for row in &self.rows {
+        for row in self.rows() {
             let label = &row.label;
             match (&row.verdict, form) {
                 (Verdict::SyntaxOk, _) => {
@@ -152,16 +157,12 @@ impl PreflightReport {
                 }
                 (Verdict::Fail(f), Form::All) => {
                     out.stdout += &format!("{label}: FAIL ({})\n", f.error);
-                    for b in &f.blame {
-                        out.stdout += &format!("    {b}\n");
-                    }
+                    out.stdout += &f.blame_block();
                 }
                 (Verdict::Fail(f), Form::Single) => {
                     if !f.blame.is_empty() {
                         out.stderr += &format!("{label}: could not resolve:\n");
-                        for b in &f.blame {
-                            out.stderr += &format!("    {b}\n");
-                        }
+                        out.stderr += &f.blame_block();
                     }
                 }
             }
@@ -208,6 +209,11 @@ impl<'a> VaultProbe<'a> {
             paths,
             tokens: TokenCache::new(paths, token_source),
         }
+    }
+
+    #[cfg(test)]
+    fn with_tokens(paths: &'a Paths, tokens: TokenCache<'a>) -> Self {
+        Self { paths, tokens }
     }
 }
 
@@ -473,5 +479,32 @@ mod tests {
             failed.outcome(Form::Single).unwrap_err().to_string(),
             format!("op inject -i {good} failed: could not find item gone")
         );
+    }
+
+    #[test]
+    fn a_failed_token_load_is_reported_on_every_row_that_needs_it() {
+        let f = fixture();
+        let paths = Paths::from_config_dir(f._dir.path());
+        let loads = std::cell::Cell::new(0);
+        let tokens = TokenCache::with_loader(|_| {
+            loads.set(loads.get() + 1);
+            Err(Error::Message("empty token".into()))
+        });
+        let mut probe = VaultProbe::with_tokens(&paths, tokens);
+        let report = run(
+            &[target("a", &f.good), target("b", &f.other)],
+            Mode::Live(&mut probe),
+        );
+        for row in report.rows() {
+            assert_eq!(
+                row.verdict,
+                Verdict::Fail(Failure {
+                    error: "empty token".into(),
+                    blame: vec![],
+                })
+            );
+        }
+        drop(probe);
+        assert_eq!(loads.get(), 1, "one prompt per run, not one per row");
     }
 }
