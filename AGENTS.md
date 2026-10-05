@@ -104,6 +104,17 @@ resolves secrets or runs `install.sh`. `--check` and `--dry-run` leave installed
 files and configuration unchanged. Root-owned machine configuration triggers a
 sudo retry; a custom config directory must be writable without that hop.
 
+`install.sh` keeps its questions and flags but makes no vault-config write of
+its own: it runs `vaulted-agent auth-mode`, `setup <backend> --wire-only`, and,
+with `auth_mode = file`, pipes the token to `setup <backend> --set-token`.
+Install-time tokens are therefore **verified before they are stored**; a
+rejected one does not stop the install, which says the token was not stored.
+`--op-env PATH` is a token source: its `OP_SERVICE_ACCOUNT_TOKEN` is stored in
+`<config>/op.env`, the only file the launcher reads (it used to write PATH,
+which nothing read). A fresh Bitwarden install's starter Refs file is
+`openai.env.refs`, not `bitwarden.refs`. Skipping the backend leaves
+`default_backend` as it is.
+
 `va update --sync-harnesses` performs only Harness discovery/setup. Updaters
 through v0.4.23 replace only the binary: after upgrading from one of those,
 run `va update --sync-harnesses` (or `va update` again) with the new binary.

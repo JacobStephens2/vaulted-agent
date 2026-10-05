@@ -192,6 +192,8 @@ fn rejected_token_finishes_the_install_and_stores_nothing() {
 
     assert!(!install.config.join("bws.env").exists(), "{all}");
     assert!(all.contains("token was not stored"), "{all}");
+    // The Launcher's own reason stays visible.
+    assert!(all.contains("invalid access token"), "{all}");
     assert_wired(&install, "bitwarden", "openai.env.refs");
     assert!(!all.contains(BWS_TOKEN), "token leaked into output:\n{all}");
 }
@@ -298,4 +300,26 @@ fn dry_run_prints_the_launcher_commands_and_runs_nothing() {
     assert!(all.contains("setup bitwarden --set-token"), "{all}");
     assert!(!all.contains(BWS_TOKEN), "token leaked into output:\n{all}");
     assert!(!install.config.exists(), "dry run wrote config:\n{all}");
+}
+
+#[test]
+fn dry_run_over_prompt_mode_stores_no_token() {
+    let install = Install::new();
+    fs::create_dir_all(&install.config).unwrap();
+    fs::write(install.config.join("defaults.conf"), "auth_mode = prompt\n").unwrap();
+    let token_file = install.tmp.path().join("bws-token");
+    fs::write(&token_file, format!("{BWS_TOKEN}\n")).unwrap();
+
+    let all = install.install(&[
+        "--dry-run",
+        "--backend",
+        "bitwarden",
+        "--bws-token-file",
+        token_file.to_str().unwrap(),
+        "--no-setup",
+    ]);
+
+    assert!(all.contains("setup bitwarden --wire-only"), "{all}");
+    assert!(!all.contains("--set-token"), "{all}");
+    assert!(all.contains("auth_mode=prompt"), "{all}");
 }

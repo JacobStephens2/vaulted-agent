@@ -560,7 +560,7 @@ fi
 LAUNCHER="$PREFIX/vaulted-agent"
 
 # Run the installed launcher against --config. Dry run: print, run nothing.
-launcher() {
+run_launcher() {
   if (( DRY )); then
     printf '  would: VAULTED_AGENT_CONFIG_DIR=%s %s %s\n' "$CONFIG" "$LAUNCHER" "$*"
     return 0
@@ -622,14 +622,14 @@ prompt_auth_mode_setup() {
 apply_auth_mode() {
   local shown
   if [[ -n "$AUTH_MODE_CHOICE" ]]; then
-    launcher auth-mode "$AUTH_MODE_CHOICE"
+    run_launcher auth-mode "$AUTH_MODE_CHOICE"
   elif [[ ! -e "$CONFIG/defaults.conf" ]]; then
     AUTH_MODE_CHOICE=file
-    launcher auth-mode file
-  elif (( DRY )); then
-    AUTH_MODE_CHOICE=file
+    run_launcher auth-mode file
   else
-    shown="$(launcher auth-mode show)" || die "cannot read auth_mode (message above)"
+    # Read-only, so a dry run asks too: the binary it would install.
+    shown="$(VAULTED_AGENT_CONFIG_DIR="$CONFIG" "$RUST_BIN" auth-mode show)" \
+      || die "cannot read auth_mode (message above)"
     AUTH_MODE_CHOICE="${shown#auth_mode=}"
   fi
 }
@@ -649,7 +649,7 @@ prompt_backend_setup() {
     printf 'choice [1-5, default 5]: '
     read -r choice < /dev/tty || choice=5
     case "$choice" in
-      1|onepassword|op) BACKEND_CHOICE=onepassword ;;
+      1|onepassword|op|1password) BACKEND_CHOICE=onepassword ;;
       2|bitwarden|bws)  BACKEND_CHOICE=bitwarden ;;
       3|pass)           BACKEND_CHOICE=pass ;;
       4|sops)           BACKEND_CHOICE=sops ;;
@@ -666,6 +666,11 @@ prompt_backend_setup() {
     printf '  Or re-run with flags, e.g.:\n'
     printf '    curl -fsSL …/install.sh | bash -s -- --backend bitwarden --auth-mode prompt\n'
   fi
+}
+
+# How to store a Manager token after the install (verified before written).
+print_set_token_hint() {
+  printf '    printf %%s "$TOKEN" | sudo vaulted-agent setup %s --set-token\n' "$1"
 }
 
 # Value of KEY in an env-style file (KEY=value, optional `export`, quotes).
@@ -712,12 +717,17 @@ store_manager_token() {
       printf '  cannot read %s; no token from it\n' "$token_file"
     fi
   fi
-  if [[ -z "$token" && "$be" == onepassword && -n "$OP_ENV" ]]; then
-    token="$(token_from_env_file "$OP_ENV" "$var")"
+  if [[ "$be" == onepassword && -n "$OP_ENV" ]]; then
+    printf '  --op-env %s: the launcher reads only %s/op.env\n' "$OP_ENV" "$CONFIG"
     if [[ -n "$token" ]]; then
-      printf '  read %s from %s; the launcher reads only %s/op.env\n' "$var" "$OP_ENV" "$CONFIG"
+      printf '  not read: --op-token-file already gave the token\n'
     else
-      printf '  no %s in %s (missing or unreadable)\n' "$var" "$OP_ENV"
+      token="$(token_from_env_file "$OP_ENV" "$var")"
+      if [[ -n "$token" ]]; then
+        printf '  read %s from it, to be stored there\n' "$var"
+      else
+        printf '  no %s in it (missing or unreadable)\n' "$var"
+      fi
     fi
   fi
   if [[ -z "$token" ]]; then
@@ -730,7 +740,7 @@ store_manager_token() {
   fi
   if [[ -z "$token" ]]; then
     printf '  no token provided; store it later (verified before it is written):\n'
-    printf '    printf %%s "$TOKEN" | sudo vaulted-agent setup %s --set-token\n' "$be"
+    print_set_token_hint "$be"
     printf '  or paste it each launch:  vaulted-agent auth-mode prompt\n'
     return 0
   fi
@@ -743,7 +753,8 @@ store_manager_token() {
     printf '  backend ready: %s\n' "$be"
   else
     printf '  %s: token was not stored (the launcher says why, above).\n' "$var"
-    printf '  Retry:  printf %%s "$TOKEN" | sudo vaulted-agent setup %s --set-token\n' "$be"
+    printf '  Retry:\n'
+    print_set_token_hint "$be"
   fi
   token=""
 }
@@ -767,7 +778,7 @@ case "$BACKEND_CHOICE" in
     ;;
   *)
     SETUP_BACKEND="$BACKEND_CHOICE"
-    launcher setup "$BACKEND_CHOICE" --wire-only \
+    run_launcher setup "$BACKEND_CHOICE" --wire-only \
       || die "vault wiring failed (message above). Retry: sudo vaulted-agent setup $BACKEND_CHOICE --wire-only"
     case "$BACKEND_CHOICE" in
       bitwarden|onepassword) store_manager_token "$BACKEND_CHOICE" ;;
@@ -777,7 +788,8 @@ case "$BACKEND_CHOICE" in
           "$AUTH_MODE_CHOICE"
         ;;
       sops)
-        printf '  sops: place an age identity at %s/age.key (0600) and set backend=sops.\n' "$CONFIG"
+        printf '  sops: place an age identity at %s/age.key (0600); give each Harness that\n' "$CONFIG"
+        printf '  should use it backend = sops and a sops-encrypted manifest of its own.\n'
         printf '  auth_mode=%s is recorded; sops uses age.key, not a pasteable vault token.\n' \
           "$AUTH_MODE_CHOICE"
         ;;
@@ -921,10 +933,10 @@ if [[ "${AUTH_MODE_CHOICE:-file}" == prompt ]]; then
 else
   case "${SETUP_BACKEND}" in
     bitwarden|onepassword)
-      printf '  Manager token file (file auth): %s/%s  (0640)\n' "$CONFIG" \
+      printf '  Manager-token file (file auth): %s/%s  (0640)\n' "$CONFIG" \
         "$( [[ "$SETUP_BACKEND" == bitwarden ]] && printf bws.env || printf op.env )"
-      printf '  Store or rotate it:  printf %%s "$TOKEN" | sudo vaulted-agent setup %s --set-token\n' \
-        "$SETUP_BACKEND"
+      printf '  Store or rotate it:\n'
+      print_set_token_hint "$SETUP_BACKEND"
       ;;
     '')
       printf '  Set up a vault:  sudo vaulted-agent setup bitwarden|onepassword|pass|sops\n'
