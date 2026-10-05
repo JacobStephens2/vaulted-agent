@@ -121,10 +121,7 @@ fn refresh_backend(paths: &Paths) -> Backend {
         .unwrap_or(Backend::Bitwarden)
 }
 
-/// Resolve the Refs file for a bare `refresh` / setup from harness config
-/// (story #13), through Vault wiring's choice: the one Manifest the Harnesses
-/// on `be` use, the Backend's fallback under the manifest directory when none
-/// does, and a refusal naming the candidates when several do.
+/// The Refs file for a bare `refresh` (story #13): Vault wiring's choice.
 pub(crate) fn default_refs_file(paths: &Paths, be: Backend) -> Result<PathBuf> {
     // Only Bitwarden and 1Password have Refs files `refresh` writes;
     // `RefreshStep::new` refuses the rest before anything asks.

@@ -252,3 +252,15 @@ fn setup_onepassword_no_longer_prints_an_example_harness() {
     assert!(!text.contains("Example harness"), "{text}");
     assert_wired(&seam, "onepassword", "onepassword.refs");
 }
+
+#[test]
+fn wire_only_may_come_before_the_backend() {
+    let seam = day_one_seam();
+    let out = seam
+        .vaulted_agent()
+        .args(["setup", "--wire-only", "bitwarden"])
+        .output()
+        .expect("run");
+    assert!(out.status.success(), "{}", combined(&out));
+    assert_wired(&seam, "bitwarden", "openai.env.refs");
+}

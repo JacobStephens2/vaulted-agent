@@ -889,9 +889,9 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
 
     // Explicit backend: setup [bitwarden|onepassword|bws|op|pass|sops]
     let want = args
-        .first()
+        .iter()
         .map(|s| s.as_str())
-        .filter(|s| !s.starts_with('-'));
+        .find(|s| !s.starts_with('-'));
 
     if wire_only && set_token {
         return Err(Error::Message(
@@ -946,7 +946,7 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
                 println!("No token file. Ensure `pass` is on PATH for the service account.");
                 Ok(())
             }
-            _ => {
+            Backend::Sops | Backend::Plainfile => {
                 println!(
                     "\nsops backend uses age identity at {}",
                     paths.age_key_file.display()

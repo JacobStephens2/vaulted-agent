@@ -17,8 +17,9 @@ A report lists each Harness, wired or left, and why. It replaces the old
 `Point a harness at it with: manifest = …` and `Example harness: backend =
 onepassword` lines. Running setup again changes nothing. A missing or rejected
 token still leaves the machine wired, and setup still exits non-zero with the
-same hint. `setup <backend> --wire-only` wires and stops before the token; it
-needs a named Backend and is refused with `--set-token`.
+same hint. `setup <backend> --wire-only` wires and stops before the token,
+without asking the auth-mode, Service-user or workdir questions; it needs a
+named Backend and is refused with `--set-token`.
 
 # Migration: a bad `defaults.conf` stops the run (unreleased)
 

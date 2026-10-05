@@ -20,7 +20,7 @@ use crate::inventory::{HarnessView, Inventory};
 
 /// The Manifest the installer and `update --sync-harnesses` give a Harness
 /// that has no vault yet.
-const EMPTY_MANIFEST: &str = "empty.env";
+pub(crate) const EMPTY_MANIFEST: &str = "empty.env";
 
 /// The Refs file wiring and `refresh` use on `be` when no Harness on `be`
 /// names one; `None` for a Backend that wires no Harness.
@@ -170,6 +170,7 @@ fn manifest_text(paths: &Paths, path: &Path) -> String {
 
 /// The starter Refs file. No reference shape in it (`op://`, `name:`, a
 /// uuid): `op inject` resolves comments too, and the Manifest check flags one.
+/// Only a Backend with a fallback Refs file gets one, so sops never does.
 fn starter(backend: Backend) -> String {
     let (what, fill) = match backend {
         Backend::Bitwarden => (
@@ -180,7 +181,7 @@ fn starter(backend: Backend) -> String {
             "1Password",
             "Map items into it with: vaulted-agent refresh --backend onepassword",
         ),
-        _ => (
+        Backend::Pass | Backend::Sops | Backend::Plainfile => (
             "pass (passwordstore.org)",
             "Add one line per secret, the variable and its store path: vaulted-agent edit-manifest",
         ),
@@ -193,7 +194,7 @@ fn starter(backend: Backend) -> String {
 
 impl Plan {
     /// True when applying would change nothing.
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.default_was == self.backend
             && !self.refs.as_ref().is_some_and(|r| r.create)
             && !self
