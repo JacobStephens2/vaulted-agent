@@ -25,6 +25,14 @@ use crate::inventory::Inventory;
 use crate::privilege;
 use crate::workdir::{self, CallerContext};
 
+/// The `workdir` value that starts agents in the caller's directory.
+const CALLER: &str = "caller";
+
+/// Record `auth_mode` in Machine defaults. Shared by `setup` and `auth-mode`.
+pub(crate) fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
+    set_default(paths, "auth_mode", Some(mode.as_str()))
+}
+
 /// The seam the questions are answered through: one reply line per call.
 pub(crate) type LineReader<'a> = dyn FnMut() -> Result<String> + 'a;
 
@@ -248,26 +256,64 @@ pub(crate) fn interview(
 // The questions. `ask_*` asks; `*_reply` parses, purely.
 // ---------------------------------------------------------------------------
 
-/// Where a reply leads: an answer (with a note for a fallback), or the
-/// menu's follow-up question.
+/// A parsed reply: the answer, and the note a fallback prints.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Step<T> {
-    Answer(T, Option<String>),
+pub(crate) struct Reply<T> {
+    pub value: T,
+    pub note: Option<String>,
+}
+
+impl<T> Reply<T> {
+    fn plain(value: T) -> Self {
+        Self { value, note: None }
+    }
+
+    fn fallback(value: T, note: String) -> Self {
+        Self {
+            value,
+            note: Some(note),
+        }
+    }
+}
+
+/// Where a menu reply leads: a reply, or the menu's follow-up question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Next<T> {
+    Reply(Reply<T>),
     FollowUp,
 }
 
+/// A menu's follow-up question, and the parse of its reply.
+type FollowUp<'q, T> = (&'q str, fn(&str) -> Reply<T>);
+
+/// Ask `question`, then the menu's follow-up question when the reply calls
+/// for it; print the fallback note, if any, and return the answer.
+fn ask_menu<T>(
+    read: &mut LineReader,
+    question: &str,
+    parse: impl FnOnce(&str) -> Next<T>,
+    follow_up: Option<FollowUp<'_, T>>,
+) -> Result<T> {
+    let reply = match (parse(&ask(read, question)?), follow_up) {
+        (Next::Reply(r), _) => r,
+        (Next::FollowUp, Some((text, parse))) => parse(&ask(read, text)?),
+        (Next::FollowUp, None) => unreachable!("a menu with no follow-up question"),
+    };
+    if let Some(n) = &reply.note {
+        note(n);
+    }
+    Ok(reply.value)
+}
+
 /// Auth-mode menu reply. Empty keeps `current`; unknown keeps it with a note.
-pub(crate) fn auth_mode_reply(reply: &str, current: AuthMode) -> (AuthMode, Option<String>) {
+pub(crate) fn auth_mode_reply(reply: &str, current: AuthMode) -> Reply<AuthMode> {
     match reply.trim() {
-        "1" | "file" | "disk" => (AuthMode::File, None),
-        "2" | "prompt" | "p" => (AuthMode::Prompt, None),
-        "" => (current, None),
-        other => (
+        "1" | "file" | "disk" => Reply::plain(AuthMode::File),
+        "2" | "prompt" | "p" => Reply::plain(AuthMode::Prompt),
+        "" => Reply::plain(current),
+        other => Reply::fallback(
             current,
-            Some(format!(
-                "unknown choice '{other}'; keeping {}",
-                current.as_str()
-            )),
+            format!("unknown choice '{other}'; keeping {}", current.as_str()),
         ),
     }
 }
@@ -280,36 +326,34 @@ pub(crate) fn ask_auth_mode(current: AuthMode, read: &mut LineReader) -> Result<
     eprintln!("  1) file    — store once in op.env / bws.env (no prompt each run)");
     eprintln!("  2) prompt  — paste token each launch; nothing stored on disk");
     eprintln!("     (same as always running with -p / --prompt-auth)");
-    let reply = ask(read, &format!("choice [1-2, default {default}]: "))?;
-    let (mode, fallback) = auth_mode_reply(&reply, current);
-    if let Some(n) = fallback {
-        note(&n);
-    }
-    Ok(mode)
+    ask_menu(
+        read,
+        &format!("choice [1-2, default {default}]: "),
+        |r| Next::Reply(auth_mode_reply(r, current)),
+        None,
+    )
 }
 
 /// Run-as menu reply. Empty is "you"; unknown leaves `service_user` alone.
-pub(crate) fn run_as_reply(reply: &str) -> Step<ServiceUser> {
+pub(crate) fn run_as_reply(reply: &str) -> Next<ServiceUser> {
     match reply.trim() {
-        "" | "1" | "you" | "me" => Step::Answer(ServiceUser::Unset, None),
-        "2" | "service" | "svc" => Step::FollowUp,
-        other => Step::Answer(
+        "" | "1" | "you" | "me" => Next::Reply(Reply::plain(ServiceUser::Unset)),
+        "2" | "service" | "svc" => Next::FollowUp,
+        other => Next::Reply(Reply::fallback(
             ServiceUser::Unchanged,
-            Some(format!(
-                "unknown choice '{other}'; leaving service_user unchanged"
-            )),
-        ),
+            format!("unknown choice '{other}'; leaving service_user unchanged"),
+        )),
     }
 }
 
 /// Service account name reply. Empty leaves `service_user` alone.
-pub(crate) fn service_name_reply(reply: &str) -> (ServiceUser, Option<String>) {
+pub(crate) fn service_name_reply(reply: &str) -> Reply<ServiceUser> {
     match reply.trim() {
-        "" => (
+        "" => Reply::fallback(
             ServiceUser::Unchanged,
-            Some("empty name; leaving service_user unchanged".into()),
+            "empty name; leaving service_user unchanged".into(),
         ),
-        name => (ServiceUser::Set(name.to_string()), None),
+        name => Reply::plain(ServiceUser::Set(name.to_string())),
     }
 }
 
@@ -321,36 +365,31 @@ fn ask_service_user(ctx: &Context, read: &mut LineReader) -> Result<ServiceUser>
     if let Some(svc) = &ctx.service_user {
         eprintln!("     (currently service_user = {svc})");
     }
-    let (answer, fallback) = match run_as_reply(&ask(read, "choice [1-2, default 1]: ")?) {
-        Step::Answer(a, n) => (a, n),
-        Step::FollowUp => service_name_reply(&ask(read, "service account name: ")?),
-    };
-    if let Some(n) = fallback {
-        note(&n);
-    }
-    Ok(answer)
+    ask_menu(
+        read,
+        "choice [1-2, default 1]: ",
+        run_as_reply,
+        Some(("service account name: ", service_name_reply)),
+    )
 }
 
 /// Workdir menu reply. Empty is `caller`; unknown falls back to `caller`.
-pub(crate) fn workdir_reply(reply: &str) -> Step<String> {
+pub(crate) fn workdir_reply(reply: &str) -> Next<String> {
     match reply.trim() {
-        "" | "1" | "caller" => Step::Answer("caller".into(), None),
-        "2" | "fixed" | "absolute" => Step::FollowUp,
-        other => Step::Answer(
-            "caller".into(),
-            Some(format!("unknown choice '{other}'; using workdir = caller")),
-        ),
+        "" | "1" | "caller" => Next::Reply(Reply::plain(CALLER.into())),
+        "2" | "fixed" | "absolute" => Next::FollowUp,
+        other => Next::Reply(Reply::fallback(
+            CALLER.into(),
+            format!("unknown choice '{other}'; using workdir = caller"),
+        )),
     }
 }
 
 /// Fixed-directory reply. Empty falls back to `caller`.
-pub(crate) fn workdir_path_reply(reply: &str) -> (String, Option<String>) {
+pub(crate) fn workdir_path_reply(reply: &str) -> Reply<String> {
     match reply.trim() {
-        "" => (
-            "caller".into(),
-            Some("empty path; using workdir = caller".into()),
-        ),
-        path => (path.to_string(), None),
+        "" => Reply::fallback(CALLER.into(), "empty path; using workdir = caller".into()),
+        path => Reply::plain(path.to_string()),
     }
 }
 
@@ -358,14 +397,12 @@ fn ask_workdir(read: &mut LineReader) -> Result<String> {
     eprintln!("\nStart agents in:");
     eprintln!("  1) the directory you run the command from   [default]");
     eprintln!("  2) a fixed directory");
-    let (workdir, fallback) = match workdir_reply(&ask(read, "choice [1-2, default 1]: ")?) {
-        Step::Answer(w, n) => (w, n),
-        Step::FollowUp => workdir_path_reply(&ask(read, "absolute path (or $HOME/…): ")?),
-    };
-    if let Some(n) = fallback {
-        note(&n);
-    }
-    Ok(workdir)
+    ask_menu(
+        read,
+        "choice [1-2, default 1]: ",
+        workdir_reply,
+        Some(("absolute path (or $HOME/…): ", workdir_path_reply)),
+    )
 }
 
 /// Backend menu reply. Empty skips the vault; unknown is refused.
@@ -399,7 +436,7 @@ impl Answers {
     /// every Harness the Inventory loads. Vault wiring and Token capture are
     /// the caller's, after this.
     pub(crate) fn apply(&self, paths: &Paths) -> Result<()> {
-        set_default(paths, "auth_mode", Some(self.auth_mode.as_str()))?;
+        write_auth_mode(paths, self.auth_mode)?;
         println!("auth_mode: {}", self.auth_mode.as_str());
 
         let service_user = match &self.service_user {
@@ -424,8 +461,8 @@ impl Answers {
             ServiceUser::Unchanged => Defaults::load(paths)?.service_user,
         };
 
-        apply_workdir(paths, &self.workdir)?;
-        if self.workdir == "caller" {
+        print!("{}", apply_workdir(paths, &self.workdir)?.report());
+        if self.workdir == CALLER {
             if let Some(svc) = service_user.filter(|s| !s.is_empty()) {
                 note(&workdir::setup_note(&svc, &CallerContext::from_env()));
             }
@@ -434,36 +471,55 @@ impl Answers {
     }
 }
 
+/// What [`apply_workdir`] did: how many Harnesses now carry the Workdir, and
+/// each conf it left alone with the reason it would not load.
+#[derive(Debug)]
+struct WorkdirApplied {
+    workdir: String,
+    set: usize,
+    left: Vec<(String, String)>,
+}
+
+impl WorkdirApplied {
+    fn report(&self) -> String {
+        let workdir = &self.workdir;
+        let mut out = if self.set == 0 && self.left.is_empty() {
+            format!(
+                "workdir = {workdir} (no harness confs yet — new harnesses should set this; \
+                 install auto-harness uses caller)\n"
+            )
+        } else {
+            format!("workdir = {workdir} on {} harness conf(s)\n", self.set)
+        };
+        for (name, err) in &self.left {
+            out.push_str(&format!("  left {name}.conf (unreadable: {err})\n"));
+        }
+        out
+    }
+}
+
 /// Set `workdir` on every Harness the Inventory loads, through the Conf file
-/// module. A conf that will not load is listed and left alone: reading a
-/// missing conf yields an empty one, so editing it would replace a dangling
-/// symlink with a one-line file.
-fn apply_workdir(paths: &Paths, workdir: &str) -> Result<()> {
+/// module. A conf that will not load is left alone: reading a missing conf
+/// yields an empty one, so editing it would replace a dangling symlink with a
+/// one-line file.
+fn apply_workdir(paths: &Paths, workdir: &str) -> Result<WorkdirApplied> {
     let inventory = Inventory::load(paths)?;
-    let mut set = 0;
-    let mut left = Vec::new();
+    let mut applied = WorkdirApplied {
+        workdir: workdir.to_string(),
+        set: 0,
+        left: Vec::new(),
+    };
     for entry in inventory.harnesses() {
         if let Err(e) = &entry.loaded {
-            left.push(format!("left {}.conf (unreadable: {e})", entry.name));
+            applied.left.push((entry.name.clone(), e.to_string()));
             continue;
         }
         let mut conf = ConfFile::read(&entry.conf)?;
         conf.set("workdir", workdir)?;
         conf.write(&entry.conf)?;
-        set += 1;
+        applied.set += 1;
     }
-    if set == 0 && left.is_empty() {
-        println!(
-            "workdir = {workdir} (no harness confs yet — new harnesses should set this; \
-             install auto-harness uses caller)"
-        );
-    } else {
-        println!("workdir = {workdir} on {set} harness conf(s)");
-    }
-    for line in &left {
-        println!("  {line}");
-    }
-    Ok(())
+    Ok(applied)
 }
 
 #[cfg(test)]
@@ -533,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn command_line_messages_are_todays() {
+    fn command_line_refusals_keep_their_messages() {
         let msg = |a: &[&str]| Command::parse(&args(a)).unwrap_err().to_string();
         assert!(msg(&["frobnicate"]).contains("unknown backend 'frobnicate'"));
         assert!(msg(&["pass", "--set-token"]).contains("pass has no manager token file"));
@@ -671,30 +727,39 @@ mod tests {
 
     // --- one menu at a time -------------------------------------------------
 
+    fn plain<T>(value: T) -> Reply<T> {
+        Reply { value, note: None }
+    }
+
+    fn noted<T>(value: T, note: &str) -> Reply<T> {
+        Reply {
+            value,
+            note: Some(note.into()),
+        }
+    }
+
     #[test]
     fn auth_mode_menu() {
         for (reply, want) in [
             ("1", AuthMode::File),
             ("file", AuthMode::File),
             ("disk", AuthMode::File),
+            ("  file  ", AuthMode::File),
             ("2", AuthMode::Prompt),
             ("prompt", AuthMode::Prompt),
             ("p", AuthMode::Prompt),
-            ("  file  ", AuthMode::File),
         ] {
-            assert_eq!(auth_mode_reply(reply, AuthMode::File).0, want, "{reply}");
-            assert_eq!(auth_mode_reply(reply, AuthMode::Prompt).0, want, "{reply}");
+            for current in [AuthMode::File, AuthMode::Prompt] {
+                assert_eq!(auth_mode_reply(reply, current), plain(want), "{reply}");
+            }
         }
         assert_eq!(
             auth_mode_reply("  ", AuthMode::Prompt),
-            (AuthMode::Prompt, None)
+            plain(AuthMode::Prompt)
         );
         assert_eq!(
             auth_mode_reply("x", AuthMode::File),
-            (
-                AuthMode::File,
-                Some("unknown choice 'x'; keeping file".into())
-            )
+            noted(AuthMode::File, "unknown choice 'x'; keeping file")
         );
     }
 
@@ -703,29 +768,29 @@ mod tests {
         for reply in ["", "1", "you", "me"] {
             assert_eq!(
                 run_as_reply(reply),
-                Step::Answer(ServiceUser::Unset, None),
+                Next::Reply(plain(ServiceUser::Unset)),
                 "{reply}"
             );
         }
         for reply in ["2", "service", "svc"] {
-            assert_eq!(run_as_reply(reply), Step::FollowUp, "{reply}");
+            assert_eq!(run_as_reply(reply), Next::FollowUp, "{reply}");
         }
         assert_eq!(
             run_as_reply("root"),
-            Step::Answer(
+            Next::Reply(noted(
                 ServiceUser::Unchanged,
-                Some("unknown choice 'root'; leaving service_user unchanged".into())
-            )
+                "unknown choice 'root'; leaving service_user unchanged"
+            ))
         );
         assert_eq!(
             service_name_reply(" agent \n"),
-            (ServiceUser::Set("agent".into()), None)
+            plain(ServiceUser::Set("agent".into()))
         );
         assert_eq!(
             service_name_reply(""),
-            (
+            noted(
                 ServiceUser::Unchanged,
-                Some("empty name; leaving service_user unchanged".into())
+                "empty name; leaving service_user unchanged"
             )
         );
     }
@@ -735,43 +800,37 @@ mod tests {
         for reply in ["", "1", "caller"] {
             assert_eq!(
                 workdir_reply(reply),
-                Step::Answer("caller".into(), None),
+                Next::Reply(plain("caller".into())),
                 "{reply}"
             );
         }
         for reply in ["2", "fixed", "absolute"] {
-            assert_eq!(workdir_reply(reply), Step::FollowUp, "{reply}");
+            assert_eq!(workdir_reply(reply), Next::FollowUp, "{reply}");
         }
         assert_eq!(
             workdir_reply("3"),
-            Step::Answer(
+            Next::Reply(noted(
                 "caller".into(),
-                Some("unknown choice '3'; using workdir = caller".into())
-            )
+                "unknown choice '3'; using workdir = caller"
+            ))
         );
-        assert_eq!(
-            workdir_path_reply("$HOME/src\n"),
-            ("$HOME/src".into(), None)
-        );
+        assert_eq!(workdir_path_reply("$HOME/src\n"), plain("$HOME/src".into()));
         assert_eq!(
             workdir_path_reply(""),
-            (
-                "caller".into(),
-                Some("empty path; using workdir = caller".into())
-            )
+            noted("caller".into(), "empty path; using workdir = caller")
         );
     }
 
     #[test]
     fn backend_menu() {
         for (replies, want) in [
-            (["1", "bitwarden", "bws", "bws"], Backend::Bitwarden),
+            (&["1", "bitwarden", "bws"][..], Backend::Bitwarden),
             (
-                ["2", "onepassword", "op", "1password"],
+                &["2", "onepassword", "op", "1password"],
                 Backend::OnePassword,
             ),
-            (["3", "pass", "pass", "pass"], Backend::Pass),
-            (["4", "sops", "sops", "sops"], Backend::Sops),
+            (&["3", "pass"], Backend::Pass),
+            (&["4", "sops"], Backend::Sops),
         ] {
             for reply in replies {
                 assert_eq!(
@@ -807,8 +866,21 @@ mod tests {
         fs::create_dir(paths.harness_conf("dir")).unwrap();
         fs::write(paths.harness_dir.join("notes.txt"), "workdir = untouched\n").unwrap();
 
-        apply_workdir(&paths, "caller").unwrap();
+        let applied = apply_workdir(&paths, "caller").unwrap();
 
+        assert_eq!(applied.set, 2);
+        let left: Vec<&str> = applied.left.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(left, ["dangling", "dir"]);
+        let report = applied.report();
+        assert!(
+            report.starts_with("workdir = caller on 2 harness conf(s)\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("  left dangling.conf (unreadable: "),
+            "{report}"
+        );
+        assert!(report.contains("  left dir.conf (unreadable: "), "{report}");
         assert_eq!(
             fs::read_to_string(paths.harness_conf("claude")).unwrap(),
             "# shipped\nmanifest = empty.env\nworkdir  = caller\ncommand  = claude\n"
@@ -831,7 +903,8 @@ mod tests {
     fn workdir_without_a_harness_directory_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::from_config_dir(tmp.path());
-        apply_workdir(&paths, "caller").unwrap();
+        let report = apply_workdir(&paths, "caller").unwrap().report();
+        assert!(report.contains("no harness confs yet"), "{report}");
         assert!(!paths.harness_dir.exists());
     }
 

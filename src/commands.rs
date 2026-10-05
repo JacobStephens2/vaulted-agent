@@ -12,8 +12,8 @@ use crate::auth::{self, TokenKind, TokenSource};
 use crate::backend;
 use crate::bitwarden::BwListing;
 use crate::config::{
-    env_blind_agent_reason, list_harness_names, parse_dotenv_keys, set_default, AuthMode, Backend,
-    Harness, Paths,
+    env_blind_agent_reason, list_harness_names, parse_dotenv_keys, AuthMode, Backend, Harness,
+    Paths,
 };
 use crate::defaults::Defaults;
 use crate::error::{Error, Result};
@@ -25,7 +25,7 @@ use crate::refresh;
 pub use crate::refresh::cmd_refresh;
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
-use crate::setup_interview::{self, read_tty_line, BackendChoice, Interview};
+use crate::setup_interview::{self, read_tty_line, write_auth_mode, BackendChoice, Interview};
 use crate::validate::validate_manifest_file;
 use crate::vault_wiring;
 use crate::workdir::{self, CallerContext};
@@ -85,10 +85,6 @@ pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
             "unknown auth-mode '{other}' (want file, prompt, or show)"
         ))),
     }
-}
-
-fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
-    set_default(paths, "auth_mode", Some(mode.as_str()))
 }
 
 pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {

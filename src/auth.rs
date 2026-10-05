@@ -81,10 +81,7 @@ impl TokenKind {
 
     /// The `setup` subcommand that configures this token's backend.
     pub fn backend_name(self) -> &'static str {
-        match self {
-            Self::Bws => "bitwarden",
-            Self::Op => "onepassword",
-        }
+        self.backend().as_str()
     }
 
     /// Vault console the operator gets the token from. Printed, never opened:
