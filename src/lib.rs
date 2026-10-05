@@ -14,6 +14,7 @@ pub mod launch;
 mod launch_plan;
 pub mod manifest_entry;
 pub mod onepassword;
+pub mod preflight;
 pub mod privilege;
 mod refresh;
 pub mod refs;

@@ -47,7 +47,7 @@ pub struct ExtraEntry {
     pub loaded: Result<Binding>,
 }
 
-/// One line of `secrets validate` with no target.
+/// One line of `secrets validate`: a row of the Pre-flight report.
 #[derive(Debug)]
 pub struct ValidateTarget<'a> {
     pub label: String,

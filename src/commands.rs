@@ -18,9 +18,10 @@ use crate::config::{
     AuthMode, Backend, Harness, Paths,
 };
 use crate::error::{Error, Result};
-use crate::inventory::Inventory;
+use crate::inventory::{Binding, Inventory, ValidateTarget};
 use crate::launch::{self, LaunchOpts};
 use crate::onepassword;
+use crate::preflight::{self, Form, Mode, VaultProbe};
 use crate::refresh;
 pub use crate::refresh::cmd_refresh;
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
@@ -250,78 +251,6 @@ fn ensure_workdir_for_setup(paths: &Paths, service_user: Option<&str>) -> Result
     Ok(())
 }
 
-/// Resolve every reference in a manifest, exactly as a launch would.
-///
-/// `validate` used to check reference *shape* and stop. A reference can be
-/// perfectly well-formed and name an item that no longer exists — after a
-/// rename in the vault, say — and the check passed while every launch died.
-/// CONTEXT.md calls this command the pre-flight gate that must not fail open,
-/// so it has to ask the vault.
-///
-/// The resolution goes through `backend::resolve`, the same call a launch
-/// makes, so this agrees with a launch by construction rather than by a second
-/// implementation that can drift from it.
-///
-/// The resolved values are counted and dropped. They are never printed, logged,
-/// or returned: the point is whether they resolve, and a validate command that
-/// wrote secrets to a terminal would be a worse bug than the one it fixes.
-fn resolve_for_validation(
-    paths: &Paths,
-    token_source: TokenSource,
-    backend: Backend,
-    manifest: &Path,
-) -> Result<usize> {
-    let resolved = backend::resolve(backend, manifest, paths, token_source)?;
-    let n = resolved.len();
-    drop(resolved);
-    Ok(n)
-}
-
-/// Shape-check a manifest, then either stop (offline) or resolve as a launch would.
-///
-/// Returns `None` for offline (syntax only) and `Some(n)` for the number of
-/// variables `backend::resolve` returned. Values themselves are never kept.
-fn validate_manifest_against_vault(
-    paths: &Paths,
-    token_source: TokenSource,
-    backend: Backend,
-    manifest: &Path,
-    offline: bool,
-) -> Result<Option<usize>> {
-    validate_manifest_file(manifest, backend)?;
-    if offline {
-        return Ok(None);
-    }
-    resolve_for_validation(paths, token_source, backend, manifest).map(Some)
-}
-
-fn format_validate_ok(resolved: Option<usize>) -> String {
-    match resolved {
-        None => "ok (syntax only; vault not probed)".to_string(),
-        Some(n) => format!("ok ({n} variable(s) resolved)"),
-    }
-}
-
-fn print_validate_blame(error: &Error, to_stdout: bool) {
-    let Error::Resolve(failure) = error else {
-        return;
-    };
-    let blamed = failure.blame_lines();
-    if blamed.is_empty() {
-        return;
-    }
-    if to_stdout {
-        for b in blamed {
-            println!("    {b}");
-        }
-    } else {
-        eprintln!("{}: could not resolve:", failure.manifest.display());
-        for b in &blamed {
-            eprintln!("    {b}");
-        }
-    }
-}
-
 pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
@@ -406,85 +335,49 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
                     other => positional.push(other),
                 }
             }
-            let target = positional.first().copied();
-            match target {
-                None => {
-                    // Everything this machine reads, not everything it
-                    // launches. The manifest an operator forgets is exactly
-                    // the one nothing launches from, and a gate that walks
-                    // launch profiles alone reports it green while the units
-                    // that read it are down.
-                    let inventory = Inventory::load(paths)?;
-                    let mut err = false;
-                    for target in inventory.validate_targets() {
-                        print!("{}: ", target.label);
-                        // A Harness or extra_manifest line that will not load
-                        // fails closed on its own line: a file the operator
-                        // believes is checked is not being checked. The rest
-                        // are still checked, so one typo does not hide whether
-                        // every other manifest is good.
-                        let (be, man_path) = match target.check {
-                            Ok(b) => (b.backend, b.manifest.as_path()),
-                            Err(e) => {
-                                println!("FAIL ({e})");
-                                err = true;
-                                continue;
-                            }
-                        };
-                        match validate_manifest_against_vault(
-                            paths,
-                            token_source,
-                            be,
-                            man_path,
-                            offline,
-                        ) {
-                            Ok(n) => println!("{}", format_validate_ok(n)),
-                            Err(e) => {
-                                println!("FAIL ({e})");
-                                print_validate_blame(&e, true);
-                                err = true;
-                            }
-                        }
-                    }
-                    if err {
-                        Err(Error::Message("validation failed".into()))
-                    } else {
-                        Ok(())
-                    }
-                }
-                Some(man) => {
-                    let conf = paths.harness_conf(man);
-                    let (man_path, be) = if conf.is_file() {
-                        let h = Harness::load(paths, man)?;
-                        let be = h.backend.unwrap_or_else(|| default_backend(paths));
-                        (h.resolve_manifest_path(paths), be)
-                    } else {
-                        let man_path = paths.resolve_manifest(man);
-                        // positional, not args[2]: --offline may sit anywhere.
-                        let be = match positional.get(1) {
-                            Some(s) => s.parse()?,
-                            None => default_backend(paths),
-                        };
-                        (man_path, be)
+            // Everything this machine reads, not everything it launches. The
+            // manifest an operator forgets is exactly the one nothing launches
+            // from, and a gate that walks launch profiles alone reports it
+            // green while the units that read it are down.
+            let inventory = Inventory::load(paths)?;
+            let single: Binding;
+            let (targets, form) = match positional.first().copied() {
+                None => (inventory.validate_targets(), Form::All),
+                Some(name) => {
+                    single = match inventory.harnesses().iter().find(|e| e.name == name) {
+                        // A named Harness whose conf will not load fails the
+                        // command with that error.
+                        Some(entry) => match &entry.loaded {
+                            Ok(v) => v.binding.clone(),
+                            Err(e) => return Err(Error::Message(e.to_string())),
+                        },
+                        None => Binding {
+                            manifest: paths.resolve_manifest(name),
+                            // positional, not args[2]: --offline may sit anywhere.
+                            backend: match positional.get(1) {
+                                Some(s) => s.parse()?,
+                                None => default_backend(paths),
+                            },
+                        },
                     };
-                    match validate_manifest_against_vault(
-                        paths,
-                        token_source,
-                        be,
-                        &man_path,
-                        offline,
-                    ) {
-                        Ok(n) => {
-                            println!("{}: {}", man_path.display(), format_validate_ok(n));
-                            Ok(())
-                        }
-                        Err(e) => {
-                            print_validate_blame(&e, false);
-                            Err(e)
-                        }
-                    }
+                    let target = ValidateTarget {
+                        label: single.manifest.display().to_string(),
+                        check: Ok(&single),
+                    };
+                    (vec![target], Form::Single)
                 }
-            }
+            };
+            let mut probe = VaultProbe::new(paths, token_source);
+            let mode = if offline {
+                Mode::Offline
+            } else {
+                Mode::Live(&mut probe)
+            };
+            let report = preflight::run(&targets, mode);
+            let rendered = report.render(form);
+            print!("{}", rendered.stdout);
+            eprint!("{}", rendered.stderr);
+            report.outcome(form)
         }
         other => Err(Error::Message(format!(
             "unknown secrets subcommand '{other}' (try: list, get, which, validate, refresh)"

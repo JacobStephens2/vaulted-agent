@@ -658,6 +658,57 @@ impl TokenSource {
     }
 }
 
+/// The Manager tokens one invocation has loaded, each kind at most once.
+///
+/// A failed load is kept too, as its message: an empty prompt or an
+/// unreadable token file is reported again on every later use, never
+/// re-prompted, so one run asks the operator once (invariant 6 still holds).
+/// The tokens drop with the cache.
+pub struct TokenCache<'a> {
+    load: Box<dyn FnMut(TokenKind) -> Result<ManagerToken> + 'a>,
+    bws: Option<std::result::Result<ManagerToken, String>>,
+    op: Option<std::result::Result<ManagerToken, String>>,
+}
+
+impl<'a> TokenCache<'a> {
+    /// Loads along `source`'s route on first use of each kind.
+    pub fn new(paths: &'a Paths, source: TokenSource) -> Self {
+        Self::with_loader(move |kind| source.load(paths, kind))
+    }
+
+    /// The loader seam, so tests can count loads.
+    pub(crate) fn with_loader(load: impl FnMut(TokenKind) -> Result<ManagerToken> + 'a) -> Self {
+        Self {
+            load: Box::new(load),
+            bws: None,
+            op: None,
+        }
+    }
+
+    /// The token of `kind`, loading it on first use. The first failure is
+    /// returned as it was raised; later uses repeat its message.
+    pub fn get(&mut self, kind: TokenKind) -> Result<&ManagerToken> {
+        let slot = match kind {
+            TokenKind::Bws => &mut self.bws,
+            TokenKind::Op => &mut self.op,
+        };
+        if slot.is_none() {
+            match (self.load)(kind) {
+                Ok(token) => *slot = Some(Ok(token)),
+                Err(e) => {
+                    *slot = Some(Err(e.to_string()));
+                    return Err(e);
+                }
+            }
+        }
+        match slot {
+            Some(Ok(token)) => Ok(token),
+            Some(Err(message)) => Err(Error::Message(message.clone())),
+            None => unreachable!("filled above"),
+        }
+    }
+}
+
 /// The token file, else a one-shot TTY prompt when the file is missing.
 fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     let key = kind.env_var();
@@ -1153,5 +1204,43 @@ mod tests {
             read_token_file(&path, "OP_SERVICE_ACCOUNT_TOKEN"),
             Ok(None)
         ));
+    }
+
+    #[test]
+    fn a_token_cache_loads_each_kind_once() {
+        let loads = std::cell::RefCell::new(Vec::new());
+        let mut cache = TokenCache::with_loader(|kind| {
+            loads.borrow_mut().push(kind.env_var());
+            Ok(ManagerToken::new(format!("t-{}", kind.env_var())))
+        });
+        for _ in 0..3 {
+            assert_eq!(
+                cache.get(TokenKind::Bws).unwrap().expose(),
+                "t-BWS_ACCESS_TOKEN"
+            );
+        }
+        cache.get(TokenKind::Op).unwrap();
+        cache.get(TokenKind::Op).unwrap();
+        drop(cache);
+        assert_eq!(
+            *loads.borrow(),
+            vec!["BWS_ACCESS_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"]
+        );
+    }
+
+    #[test]
+    fn a_failed_load_is_cached_and_repeated_never_retried() {
+        let loads = std::cell::Cell::new(0);
+        let mut cache = TokenCache::with_loader(|_| {
+            loads.set(loads.get() + 1);
+            Err(Error::Message("empty token".into()))
+        });
+        for _ in 0..3 {
+            assert_eq!(
+                cache.get(TokenKind::Bws).unwrap_err().to_string(),
+                "empty token"
+            );
+        }
+        assert_eq!(loads.get(), 1, "a failed load must not re-prompt");
     }
 }
