@@ -11,6 +11,7 @@ use crate::config::{self, Backend, Paths};
 use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
+use crate::vault_wiring::EMPTY_MANIFEST;
 
 const AUTO_HARNESSES: &str = include_str!("../etc/auto-harnesses");
 
@@ -82,7 +83,7 @@ fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
         } else {
             shared
         };
-        let (backend, manifest) = binding.unwrap_or((Backend::Plainfile, "empty.env"));
+        let (backend, manifest) = binding.unwrap_or((Backend::Plainfile, EMPTY_MANIFEST));
         let bin = binary.parent().unwrap().to_string_lossy();
         if bin.contains(['\n', '\r']) {
             return Err(Error::Message(
@@ -172,7 +173,7 @@ fn find_binary(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 }
 
 fn ensure_empty_manifest(paths: &Paths) -> Result<()> {
-    let path = paths.manifest_dir.join("empty.env");
+    let path = paths.manifest_dir.join(EMPTY_MANIFEST);
     create_profile(
         &path,
         "# Empty starter manifest; configure the Harness to inject secrets.\n",

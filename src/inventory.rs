@@ -1,7 +1,7 @@
 //! Every Harness and Extra manifest this machine's config declares.
 //!
-//! The one walk that `secrets validate`, `secrets which`, `refresh`,
-//! `edit-manifest`, `pick` and `update` share. Each entry carries its effective
+//! The one walk that `secrets validate`, `secrets which`, `refresh`, Vault
+//! wiring, `edit-manifest`, `pick` and `update` share. Each entry carries its effective
 //! Backend and resolved Manifest path, or the error that stopped it loading.
 //! Load errors are data: each query below states its own policy for them,
 //! rather than each caller hiding one in a `?` or a `let Ok(..) else`.

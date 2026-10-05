@@ -27,6 +27,7 @@ pub use crate::refresh::cmd_refresh;
 use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
+use crate::vault_wiring;
 use crate::workdir::{self, CallerContext};
 
 pub fn cmd_version() {
@@ -744,6 +745,26 @@ fn yn(b: bool) -> &'static str {
     }
 }
 
+/// The Backend `setup <name>` sets up. `plainfile` is not a vault.
+fn setup_backend(name: &str) -> Result<Backend> {
+    match Backend::parse_loose(name) {
+        Some(be) if be != Backend::Plainfile => Ok(be),
+        _ => Err(Error::Message(format!(
+            "setup: unknown backend '{name}' (want bitwarden, onepassword, pass, sops)"
+        ))),
+    }
+}
+
+/// Vault wiring for `be`, then its report.
+fn wire(paths: &Paths, be: Backend) -> Result<()> {
+    let inventory = Inventory::load(paths)?;
+    let plan = vault_wiring::plan(paths, &inventory, be)
+        .map_err(|e| Error::Message(format!("setup: cannot wire {be}: {e}")))?;
+    plan.apply(paths)?;
+    print!("{}", plan.report());
+    Ok(())
+}
+
 /// Legacy fallback for `Capture::UseExisting`: load the token the usual way
 /// (env var, existing file, or prompt) and, under `auth_mode=file`, persist it
 /// so rotating through an exported token still lands on disk.
@@ -830,9 +851,6 @@ fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) ->
     } else {
         println!("Wrote {}", man_path.display());
     }
-    if let Some(name) = man_path.file_name().and_then(|s| s.to_str()) {
-        println!("Point a harness at it with: manifest = {name}");
-    }
     Ok(())
 }
 
@@ -858,13 +876,45 @@ fn setup_onepassword(paths: &Paths, token_source: TokenSource, set_token: bool) 
         auth::Capture::Skipped => {}
     }
     println!("Manifests use op:// references; op inject runs at launch.");
-    println!("Example harness: backend = onepassword");
     Ok(())
 }
 
 pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
+    // `--set-token` is the piped-capture / rotation door. Not `auth-mode`:
+    // that verb is about *how* tokens are supplied, not *what* the token is.
+    let set_token = args.iter().any(|a| a == "--set-token");
+    // `--wire-only` is the installer's door: Vault wiring, then stop before
+    // Token capture, so a machine with no token yet still gets wired.
+    let wire_only = args.iter().any(|a| a == "--wire-only");
+
+    // Explicit backend: setup [bitwarden|onepassword|bws|op|pass|sops]
+    let want = args
+        .iter()
+        .map(|s| s.as_str())
+        .find(|s| !s.starts_with('-'));
+
+    if wire_only && set_token {
+        return Err(Error::Message(
+            "setup: --wire-only stops before Token capture; it cannot be used with --set-token"
+                .into(),
+        ));
+    }
+    if wire_only && want.is_none() {
+        return Err(Error::Message(
+            "setup --wire-only: name the backend, e.g.\n  \
+             vaulted-agent setup bitwarden --wire-only"
+                .into(),
+        ));
+    }
+
     println!("vaulted-agent setup");
     println!("config: {}", paths.config_dir.display());
+
+    if wire_only {
+        // The installer asks its own questions and then calls this: asking
+        // them again here would ask twice.
+        return wire(paths, setup_backend(want.unwrap_or_default())?);
+    }
 
     // Ask how manager tokens are obtained (file on disk vs paste each launch)
     // before any backend work that may write op.env / bws.env.
@@ -877,30 +927,26 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
     let service_user = ensure_service_user_for_setup(paths)?;
     ensure_workdir_for_setup(paths, service_user.as_deref())?;
 
-    // `--set-token` is the piped-capture / rotation door. Not `auth-mode`:
-    // that verb is about *how* tokens are supplied, not *what* the token is.
-    let set_token = args.iter().any(|a| a == "--set-token");
-
-    // Explicit backend: setup [bitwarden|onepassword|bws|op]
-    let want = args
-        .first()
-        .map(|s| s.as_str())
-        .filter(|s| !s.starts_with('-'));
-
+    // Vault wiring first: it needs no token, so a missing or rejected token
+    // still leaves the machine wired (installer order).
     let choose = |name: &str| -> Result<()> {
-        match name {
-            "bitwarden" | "bws" => setup_bitwarden(paths, token_source, set_token),
-            "onepassword" | "op" | "1password" => setup_onepassword(paths, token_source, set_token),
-            "pass" | "sops" if set_token => Err(Error::Message(format!(
-                "setup --set-token: {name} has no manager token file \
+        let be = setup_backend(name)?;
+        if set_token && !be.needs_manager_token() {
+            return Err(Error::Message(format!(
+                "setup --set-token: {be} has no manager token file \
                  (pass uses GPG, sops uses an age key)"
-            ))),
-            "pass" => {
+            )));
+        }
+        wire(paths, be)?;
+        match be {
+            Backend::Bitwarden => setup_bitwarden(paths, token_source, set_token),
+            Backend::OnePassword => setup_onepassword(paths, token_source, set_token),
+            Backend::Pass => {
                 println!("\npass backend uses the passwordstore.org store (GPG).");
                 println!("No token file. Ensure `pass` is on PATH for the service account.");
                 Ok(())
             }
-            "sops" => {
+            Backend::Sops | Backend::Plainfile => {
                 println!(
                     "\nsops backend uses age identity at {}",
                     paths.age_key_file.display()
@@ -908,9 +954,6 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
                 println!("Place the age key there (0640) and encrypt manifests with sops.");
                 Ok(())
             }
-            other => Err(Error::Message(format!(
-                "setup: unknown backend '{other}' (want bitwarden, onepassword, pass, sops)"
-            ))),
         }
     };
 
@@ -920,10 +963,10 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
 
     // Auto: prefer whichever token is already available (env or file).
     if env::var_os("BWS_ACCESS_TOKEN").is_some() || paths.bws_env_file.is_file() {
-        return setup_bitwarden(paths, token_source, set_token);
+        return choose("bitwarden");
     }
     if env::var_os("OP_SERVICE_ACCOUNT_TOKEN").is_some() || paths.op_env_file.is_file() {
-        return setup_onepassword(paths, token_source, set_token);
+        return choose("onepassword");
     }
 
     // Nothing on disk or in env to infer from: a piped token has no backend to
@@ -1334,7 +1377,7 @@ pub fn usage(paths: &Paths) {
          \x20      vaulted-agent pick [args...]\n\
          \x20      vaulted-agent doctor\n\
          \x20      vaulted-agent secrets …\n\
-         \x20      vaulted-agent setup [bitwarden|onepassword] [--set-token]\n\
+         \x20      vaulted-agent setup [bitwarden|onepassword|pass|sops] [--set-token|--wire-only]\n\
          \x20      vaulted-agent refresh [file]\n\
          \x20      vaulted-agent edit-manifest [name]\n\
          \x20      vaulted-agent auth-mode [mode]\n\

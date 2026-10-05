@@ -79,6 +79,7 @@ elevated launches always read the machine config dir).
 | Edit a refs file (with checks) | `va edit-manifest` / `va edit-manifest name.env.tpl` |
 | Auth mode | `va auth-mode` / `va auth-mode prompt` / `va auth-mode file` |
 | Interactive install-time config | `va setup` |
+| Wire day-one Harnesses to a Backend, no token | `sudo va setup bitwarden --wire-only` (also `onepassword`, `pass`; `sops` records `default_backend` only). Asks no questions and never touches the token |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
 | Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.25` |
 | Uninstall | `sudo va uninstall` |
@@ -145,7 +146,7 @@ precedence over Muse's account login (`muse login --help`).
 ### Kimi
 
 Shipped / auto harness defaults to `kimi --auto` (unattended). Day-one is
-`plainfile` + `empty.env`; vault setup rewires kimi like claude/codex/grok.
+`plainfile` + `empty.env`; `va setup <backend>` rewires kimi like claude/codex/grok.
 
 **Credentials (issue #70).** Kimi **does** read OpenAI-compatible provider keys
 from the process environment. Selection is by provider **type** (`openai` →
