@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn an_unreadable_file_is_an_error_not_the_built_ins() {
         use std::os::unix::fs::PermissionsExt;
-        if crate::auth::is_euid_root() {
+        if crate::token_file::is_euid_root() {
             // chmod 000 does not deny root; nothing useful to assert.
             return;
         }
