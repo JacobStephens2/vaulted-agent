@@ -10,7 +10,7 @@
 //! what to change.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::auth::{TokenKind, TokenSource};
@@ -21,6 +21,7 @@ use crate::error::{Error, Result};
 use crate::inventory::{AliasUse, Inventory};
 use crate::onepassword::{self, OpField, OpItem, OpListing};
 use crate::refs::{self, Mapping, RefEdit, RefFate, RefsStyle, ScannedRef, WriteMode};
+use crate::setup_interview::{ask, LineReader};
 use crate::vault_wiring;
 
 pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
@@ -123,8 +124,20 @@ pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) ->
             take_all,
             mode,
             prune,
+            interactive: std::io::IsTerminal::is_terminal(&io::stdin()),
         },
+        &mut read_stdin_line,
     )
+}
+
+/// The production [`LineReader`] for `refresh`: one line from stdin, not the
+/// controlling terminal, so a piped or redirected run reads what it was given.
+fn read_stdin_line() -> Result<String> {
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| Error::Message(format!("stdin read: {e}")))?;
+    Ok(line)
 }
 
 /// `setup bitwarden`'s write: every secret in `listing`, merged into the
@@ -133,6 +146,9 @@ pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) ->
 /// The listing is the one Token capture fetched to prove the token live, so
 /// the vault is asked once, and the manager token is already gone. An empty
 /// listing is setup's to explain before calling here.
+///
+/// Non-interactive: it takes every secret and never opens the fix gate
+/// (ADR-0003), so there is no question it could reach.
 pub(crate) fn setup_refs(paths: &Paths, listing: BwListing) -> Result<()> {
     refresh_refs(
         paths,
@@ -144,7 +160,9 @@ pub(crate) fn setup_refs(paths: &Paths, listing: BwListing) -> Result<()> {
             take_all: true,
             mode: None,
             prune: false,
+            interactive: false,
         },
+        &mut || unreachable!("setup bitwarden asks nothing"),
     )
 }
 
@@ -185,6 +203,9 @@ struct RunOptions {
     /// `--merge` / `--replace`; `None` settles on whether the file exists.
     mode: Option<WriteMode>,
     prune: bool,
+    /// Whether a human can answer, settled once by the entry point. The
+    /// selection and the fix confirmation are asked only then.
+    interactive: bool,
 }
 
 /// Where the flow's listing comes from.
@@ -303,18 +324,19 @@ impl RefreshStep {
 
     /// List, let the operator choose, and turn the choice into mappings. The
     /// manager token, when one is needed, is loaded and dropped in here, so it
-    /// is gone before the flow writes anything.
+    /// is gone before the flow writes anything. `ask` is `None` when the run
+    /// takes everything without asking.
     fn gather(
         &self,
         paths: &Paths,
         listing: ListingSource,
         path: &Path,
-        take_all: bool,
+        ask: Option<&mut LineReader>,
     ) -> Result<Gathered> {
         match (self, listing) {
-            (RefreshStep::Bitwarden, listing) => gather_bitwarden(paths, listing, take_all),
+            (RefreshStep::Bitwarden, listing) => gather_bitwarden(paths, listing, ask),
             (RefreshStep::OnePassword { exclusions }, ListingSource::Fetch(token_source)) => {
-                gather_onepassword(paths, token_source, path, take_all, exclusions)
+                gather_onepassword(paths, token_source, path, ask, exclusions)
             }
             // Only `setup bitwarden` hands a listing in, and it is a `bws` one.
             (RefreshStep::OnePassword { .. }, ListingSource::Given(_)) => Err(Error::Message(
@@ -399,19 +421,23 @@ impl Fetched {
 }
 
 /// One write of a Refs file, whichever Backend `step` lists from and whichever
-/// verb (`origin`) asked for it.
+/// verb (`origin`) asked for it. Its questions, the selection and the fix
+/// confirmation, are answered through `read`, and only when the run is
+/// interactive.
 fn refresh_refs(
     paths: &Paths,
     origin: Origin,
     listing: ListingSource,
     mut step: RefreshStep,
     opts: RunOptions,
+    read: &mut LineReader,
 ) -> Result<()> {
     let RunOptions {
         man_path,
         take_all,
         mode,
         prune,
+        interactive,
     } = opts;
     let path = match man_path {
         Some(man) => paths.resolve_manifest(&man),
@@ -434,7 +460,9 @@ fn refresh_refs(
 
     // The manager token is loaded and dropped inside this step: nothing after
     // it can reach the vault, and nothing after it holds the token at the write.
-    let gathered = step.gather(paths, listing, &path, take_all)?;
+    // Non-interactive without --all: all for replace, or merge all new.
+    let select = (interactive && !take_all).then_some(&mut *read);
+    let gathered = step.gather(paths, listing, &path, select)?;
 
     // After the listing, because it is what makes a verdict possible; before
     // the write, so a pruned line is gone by the time merge decides what to
@@ -460,7 +488,13 @@ fn refresh_refs(
         // is not a gate, `secrets validate` is (invariant 5), and it already
         // fails on a dangling ref.
         report.render(&path);
-        apply_ref_edits(&path, &report.edits, origin, mode, prune)?;
+        let gate = Gate {
+            origin,
+            mode,
+            prune,
+            interactive,
+        };
+        apply_ref_edits(&path, &report.edits, gate, read)?;
     }
     if let Some(refusal) = gathered.refusal {
         return Err(refusal);
@@ -478,7 +512,11 @@ fn refresh_refs(
 }
 
 /// Bitwarden: pick from the secrets the token can see.
-fn gather_bitwarden(paths: &Paths, listing: ListingSource, take_all: bool) -> Result<Gathered> {
+fn gather_bitwarden(
+    paths: &Paths,
+    listing: ListingSource,
+    ask: Option<&mut LineReader>,
+) -> Result<Gathered> {
     let listing = match listing {
         ListingSource::Fetch(token_source) => {
             let token = token_source.load(paths, TokenKind::Bws)?;
@@ -494,24 +532,14 @@ fn gather_bitwarden(paths: &Paths, listing: ListingSource, take_all: bool) -> Re
         ));
     }
 
-    let indices = if take_all {
-        None // all
-    } else if !std::io::IsTerminal::is_terminal(&io::stdin()) {
-        // non-interactive without --all: all for replace, or merge all new
-        None
-    } else {
-        // print list and ask
-        println!("Secrets:");
-        for (i, s) in listing.secrets().iter().enumerate() {
-            println!("  {:2}) {}  {}  {}", i + 1, s.id, s.key, s.project);
-        }
-        eprint!("Secrets to include [all]: ");
-        let _ = io::stderr().flush();
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
-            None
-        } else {
-            Some(refs::parse_index_list(line.trim(), listing.len())?)
+    let indices = match ask {
+        None => None, // all
+        Some(read) => {
+            println!("Secrets:");
+            for (i, s) in listing.secrets().iter().enumerate() {
+                println!("  {:2}) {}  {}  {}", i + 1, s.id, s.key, s.project);
+            }
+            ask_selection(read, "Secrets to include [all]: ", listing.len())?
         }
     };
 
@@ -864,6 +892,31 @@ fn ref_fix_choice(
     }
 }
 
+/// The selection question both Backends ask once their listing is printed.
+/// A blank reply or a failed read means all (`None`); anything else is an
+/// index list, and one that does not parse fails the run.
+fn ask_selection(read: &mut LineReader, text: &str, n: usize) -> Result<Option<Vec<usize>>> {
+    match ask(read, text) {
+        Ok(line) if !line.trim().is_empty() => Ok(Some(refs::parse_index_list(line.trim(), n)?)),
+        _ => Ok(None),
+    }
+}
+
+/// The fix confirmation: only `y` / `yes`, in any case, applies. A blank,
+/// failed or other reply is no.
+fn ask_fix(read: &mut LineReader, what: &str) -> bool {
+    ask(read, &format!("{what}? [y/N]: "))
+        .is_ok_and(|line| matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+/// What the fix gate is decided from, besides the edits themselves.
+struct Gate {
+    origin: Origin,
+    mode: WriteMode,
+    prune: bool,
+    interactive: bool,
+}
+
 /// Decide what to do about a report's planned edits, then do it.
 ///
 /// Shared by both backends: the gate (`--prune`, an interactive yes, or report
@@ -872,9 +925,8 @@ fn ref_fix_choice(
 fn apply_ref_edits(
     path: &Path,
     edits: &[(String, RefEdit)],
-    origin: Origin,
-    mode: WriteMode,
-    prune: bool,
+    gate: Gate,
+    read: &mut LineReader,
 ) -> Result<()> {
     if edits.is_empty() {
         return Ok(());
@@ -882,11 +934,11 @@ fn apply_ref_edits(
     let what = describe_ref_edits(edits);
 
     let apply = match ref_fix_choice(
-        origin,
+        gate.origin,
         edits.len(),
-        prune,
-        mode == WriteMode::Replace,
-        std::io::IsTerminal::is_terminal(&io::stdin()),
+        gate.prune,
+        gate.mode == WriteMode::Replace,
+        gate.interactive,
     ) {
         RefFixChoice::NothingPending => return Ok(()),
         RefFixChoice::ReplaceRegenerates => {
@@ -902,13 +954,7 @@ fn apply_ref_edits(
             return Ok(());
         }
         RefFixChoice::Apply => true,
-        RefFixChoice::Ask => {
-            eprint!("{what}? [y/N]: ");
-            let _ = io::stderr().flush();
-            let mut line = String::new();
-            io::stdin().read_line(&mut line).is_ok()
-                && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-        }
+        RefFixChoice::Ask => ask_fix(read, &what),
     };
     if !apply {
         println!("  Left in place.\n");
@@ -986,7 +1032,7 @@ fn gather_onepassword(
     paths: &Paths,
     token_source: TokenSource,
     path: &Path,
-    take_all: bool,
+    ask: Option<&mut LineReader>,
     exclusions: &[String],
 ) -> Result<Gathered> {
     let token = token_source.load(paths, TokenKind::Op)?;
@@ -1000,23 +1046,22 @@ fn gather_onepassword(
         ));
     }
 
-    let indices: Vec<usize> = if take_all || !std::io::IsTerminal::is_terminal(&io::stdin()) {
-        (0..listing.len()).collect()
-    } else {
-        println!("Items visible to this token:");
-        for (i, it) in listing.items().iter().enumerate() {
-            println!("  {:2}) {}  ({})", i + 1, it.title, it.vault);
-        }
-        println!();
-        eprint!("Items to include (e.g. 1,4,7 or 1-5,9 - blank for all): ");
-        let _ = io::stderr().flush();
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
-            (0..listing.len()).collect()
-        } else {
-            refs::parse_index_list(line.trim(), listing.len())?
+    let chosen = match ask {
+        None => None,
+        Some(read) => {
+            println!("Items visible to this token:");
+            for (i, it) in listing.items().iter().enumerate() {
+                println!("  {:2}) {}  ({})", i + 1, it.title, it.vault);
+            }
+            println!();
+            ask_selection(
+                read,
+                "Items to include (e.g. 1,4,7 or 1-5,9 - blank for all): ",
+                listing.len(),
+            )?
         }
     };
+    let indices = chosen.unwrap_or_else(|| (0..listing.len()).collect());
 
     // Fields are fetched only for the items actually chosen, one round trip
     // apiece, and each item's notes print as it lands: a minute-long run must
@@ -1464,6 +1509,151 @@ mod tests {
             default_refs_file(&paths, Backend::OnePassword).unwrap(),
             paths.manifest_dir.join("onepassword.refs")
         );
+    }
+
+    // ---- the questions, through the line-reading seam ----
+
+    /// A [`LineReader`] answering with `lines`, in order. Running out is a
+    /// test failure: the run asked a question the script did not expect.
+    fn scripted(lines: &[&str]) -> impl FnMut() -> Result<String> {
+        let mut lines: std::collections::VecDeque<String> =
+            lines.iter().map(|l| format!("{l}\n")).collect();
+        move || {
+            Ok(lines
+                .pop_front()
+                .expect("refresh asked one question too many"))
+        }
+    }
+
+    fn never() -> impl FnMut() -> Result<String> {
+        || panic!("the reader was called")
+    }
+
+    fn failing() -> impl FnMut() -> Result<String> {
+        || Err(Error::Message("stdin read: gone".into()))
+    }
+
+    /// `ALPHA`, `BETA`, `GAMMA`: one secret each.
+    fn abc_listing() -> BwListing {
+        BwListing::new(vec![
+            BwSecret::new("00000000-0000-0000-0000-00000000000a", "ALPHA", "tools"),
+            BwSecret::new("00000000-0000-0000-0000-00000000000b", "BETA", "tools"),
+            BwSecret::new("00000000-0000-0000-0000-00000000000c", "GAMMA", "tools"),
+        ])
+    }
+
+    /// Everything [`abc_listing`] holds, plus one mapping to nothing.
+    const ABC_AND_GONE: &str = "ALPHA=name:ALPHA\n\
+                                BETA=name:BETA\n\
+                                GAMMA=name:GAMMA\n\
+                                GONE=name:GONE\n";
+
+    /// One `refresh` of a Bitwarden Refs file holding `existing` (absent when
+    /// `None`), listing [`abc_listing`]. Returns the file afterwards.
+    fn refresh_with(
+        existing: Option<&str>,
+        take_all: bool,
+        interactive: bool,
+        read: &mut LineReader,
+    ) -> Result<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_config_dir(tmp.path());
+        let file = paths.manifest_dir.join("t.refs");
+        if let Some(text) = existing {
+            fs::create_dir_all(&paths.manifest_dir).unwrap();
+            fs::write(&file, text).unwrap();
+        }
+        refresh_refs(
+            &paths,
+            Origin::Refresh,
+            ListingSource::Given(abc_listing()),
+            RefreshStep::Bitwarden,
+            RunOptions {
+                man_path: Some(file.display().to_string()),
+                take_all,
+                mode: None,
+                prune: false,
+                interactive,
+            },
+            read,
+        )?;
+        Ok(fs::read_to_string(&file).unwrap())
+    }
+
+    /// The variables the file maps, in order.
+    fn mapped(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|l| !l.starts_with('#') && l.contains('='))
+            .filter_map(|l| l.split_once('=').map(|(var, _)| var))
+            .collect()
+    }
+
+    #[test]
+    fn an_interactive_selection_writes_exactly_what_was_picked() {
+        let text = refresh_with(None, false, true, &mut scripted(&["1,3"])).unwrap();
+        assert_eq!(mapped(&text), ["ALPHA", "GAMMA"]);
+    }
+
+    #[test]
+    fn an_interactive_blank_selection_writes_everything() {
+        let text = refresh_with(None, false, true, &mut scripted(&[""])).unwrap();
+        assert_eq!(mapped(&text), ["ALPHA", "BETA", "GAMMA"]);
+    }
+
+    #[test]
+    fn a_bad_selection_fails_the_run() {
+        assert!(refresh_with(None, false, true, &mut scripted(&["9"])).is_err());
+    }
+
+    #[test]
+    fn an_interactive_yes_removes_the_dangling_line() {
+        for yes in ["y", "YES", " Yes "] {
+            let text = refresh_with(Some(ABC_AND_GONE), true, true, &mut scripted(&[yes])).unwrap();
+            assert_eq!(mapped(&text), ["ALPHA", "BETA", "GAMMA"], "reply {yes:?}");
+        }
+    }
+
+    #[test]
+    fn anything_but_yes_leaves_the_dangling_line() {
+        for reply in ["", "n", "no", "yep"] {
+            let text =
+                refresh_with(Some(ABC_AND_GONE), true, true, &mut scripted(&[reply])).unwrap();
+            assert_eq!(text, ABC_AND_GONE, "reply {reply:?}");
+        }
+        let text = refresh_with(Some(ABC_AND_GONE), true, true, &mut failing()).unwrap();
+        assert_eq!(text, ABC_AND_GONE, "failed read");
+    }
+
+    #[test]
+    fn the_selection_then_the_confirmation_share_one_reader() {
+        let text =
+            refresh_with(Some(ABC_AND_GONE), false, true, &mut scripted(&["2", "y"])).unwrap();
+        assert_eq!(mapped(&text), ["ALPHA", "BETA", "GAMMA"]);
+    }
+
+    #[test]
+    fn a_non_interactive_run_never_asks_and_changes_nothing() {
+        let text = refresh_with(Some(ABC_AND_GONE), false, false, &mut never()).unwrap();
+        assert_eq!(text, ABC_AND_GONE);
+    }
+
+    #[test]
+    fn the_selection_question_reads_blank_or_failure_as_all() {
+        let ask = |read: &mut LineReader| ask_selection(read, "? ", 5);
+        assert_eq!(ask(&mut scripted(&[""])).unwrap(), None);
+        assert_eq!(ask(&mut scripted(&["   "])).unwrap(), None);
+        assert_eq!(ask(&mut failing()).unwrap(), None);
+        assert_eq!(
+            ask(&mut scripted(&["all"])).unwrap(),
+            Some(vec![0, 1, 2, 3, 4])
+        );
+        assert_eq!(
+            ask(&mut scripted(&["1-3,5"])).unwrap(),
+            Some(vec![0, 1, 2, 4])
+        );
+        assert_eq!(ask(&mut scripted(&["4-2"])).unwrap(), Some(vec![1, 2, 3]));
+        assert!(ask(&mut scripted(&["6"])).is_err());
+        assert!(ask(&mut scripted(&["x"])).is_err());
     }
 
     // ---- the 1Password item fold ----
