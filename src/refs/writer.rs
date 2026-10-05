@@ -11,11 +11,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use super::{
-    key_to_var, name_line, read_exclusions, recorded_uuid, replace_refs_file, split_annotation,
-    split_glued_bitwarden_line, EXCLUDE_KEYWORD,
+use super::{read_exclusions, replace_refs_file, EXCLUDE_KEYWORD};
+use crate::bitwarden::{
+    key_to_var, name_line, recorded_uuid, reference_of, split_glued_bitwarden_line, BwListing,
+    BwRef, BwSecret,
 };
-use crate::bitwarden::{BwListing, BwRef, BwSecret};
 use crate::error::{Error, Result};
 use crate::onepassword::OpRef;
 
@@ -299,7 +299,7 @@ fn text_has_secret(text: &str, secret: &BwSecret) -> bool {
         // come back as "1 dangling, 1 new" — the outcome ADR-0004 exists to
         // replace.
         (!secret.id.is_empty() && recorded_uuid(v) == Some(secret.id.as_str()))
-            || BwRef::parse(split_annotation(v).0).is_some_and(|r| r.selects(secret))
+            || BwRef::parse(reference_of(v)).is_ok_and(|r| r.selects(secret))
     })
 }
 
