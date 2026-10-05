@@ -182,13 +182,26 @@ exit 1
 "#,
     )
     .unwrap();
-    // getent passwd <user> served from $users/<user>.home; unknown users fail
-    // so account_home falls through exactly as it would for a stranger.
+    // getent passwd <user> (Linux) and dscl . -read /Users/<user>
+    // NFSHomeDirectory (macOS) served from $users/<user>.home; unknown users
+    // fail so account_home falls through exactly as it would for a stranger.
     fs::write(
         shim.join("getent"),
         r#"#!/bin/bash
 if [[ "${1:-}" == "passwd" && -n "${2:-}" && -f "$FAKE_USER_PATHS/$2.home" ]]; then
   printf '%s:x:1001:1001::%s:/bin/bash\n' "$2" "$(cat "$FAKE_USER_PATHS/$2.home")"
+  exit 0
+fi
+exit 1
+"#,
+    )
+    .unwrap();
+    fs::write(
+        shim.join("dscl"),
+        r#"#!/bin/bash
+user="${3#/Users/}"
+if [[ "${1:-}" == "." && "${2:-}" == "-read" && "${4:-}" == "NFSHomeDirectory" && -n "$user" && -f "$FAKE_USER_PATHS/$user.home" ]]; then
+  printf 'NFSHomeDirectory: %s\n' "$(cat "$FAKE_USER_PATHS/$user.home")"
   exit 0
 fi
 exit 1
@@ -210,7 +223,7 @@ exec {real_id} "$@"
         ),
     )
     .unwrap();
-    for name in ["sudo", "getent", "id"] {
+    for name in ["sudo", "getent", "dscl", "id"] {
         fs::set_permissions(shim.join(name), fs::Permissions::from_mode(0o755)).unwrap();
     }
 
