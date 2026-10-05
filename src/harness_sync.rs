@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{self, Backend, Paths};
+use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 use crate::inventory::Inventory;
 
@@ -60,7 +61,8 @@ fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
             None
         }
     };
-    let dirs = search_dirs(paths, &inventory);
+    let service_user = Defaults::load(paths)?.service_user;
+    let dirs = search_dirs(service_user, &inventory);
     for command in AUTO_HARNESSES.lines().map(str::trim) {
         if command.is_empty() || command.starts_with('#') {
             continue;
@@ -113,9 +115,11 @@ fn sync_local(paths: &Paths, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn search_dirs(paths: &Paths, inventory: &Inventory) -> Vec<PathBuf> {
+/// Where to look for agent CLIs: as `service_user` (the account a launch
+/// runs as, env override included), else the invoking account.
+fn search_dirs(service_user: Option<String>, inventory: &Inventory) -> Vec<PathBuf> {
     let current = crate::privilege::current_user();
-    let account = config::load_default(paths, "service_user").or_else(|| {
+    let account = service_user.or_else(|| {
         (current == "root")
             .then(|| env::var("SUDO_USER").ok())
             .flatten()

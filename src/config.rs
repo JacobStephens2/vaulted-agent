@@ -1,4 +1,6 @@
-//! Machine defaults, harness definitions, and manifest path resolution.
+//! Backends, auth modes, the `defaults.conf` writer, harness definitions, and
+//! manifest path resolution. Reading `defaults.conf` is Machine defaults
+//! (`defaults.rs`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -390,25 +392,6 @@ pub fn env_blind_agent_reason(command_basename: &str) -> Option<&'static str> {
     )
 }
 
-/// Read a single `key = value` from defaults.conf (first match wins).
-pub fn load_default(paths: &Paths, key: &str) -> Option<String> {
-    ConfFile::read(&paths.defaults_file)
-        .ok()?
-        .first(key)
-        .map(str::to_string)
-}
-
-/// Every value recorded for `key` in defaults.conf, in file order.
-///
-/// `load_default` takes the first and stops, which is right for a setting that
-/// has one value. A machine can read more than one manifest, so that key is
-/// repeatable and the whole list matters.
-pub fn load_defaults_all(paths: &Paths, key: &str) -> Vec<String> {
-    ConfFile::read(&paths.defaults_file)
-        .map(|c| c.all(key).into_iter().map(str::to_string).collect())
-        .unwrap_or_default()
-}
-
 /// Set (`Some`) or remove (`None`) a single-valued key in defaults.conf,
 /// changing only that key's line. A new or empty file gets the header.
 pub fn set_default(paths: &Paths, key: &str, value: Option<&str>) -> Result<()> {
@@ -468,12 +451,6 @@ impl ExtraManifest {
     }
 }
 
-pub fn load_auth_mode(paths: &Paths) -> AuthMode {
-    load_default(paths, "auth_mode")
-        .and_then(|s| AuthMode::parse(&s))
-        .unwrap_or(AuthMode::File)
-}
-
 /// Expand a leading `$HOME` or `${HOME}` in a harness value with `home`.
 /// Anything else, including `$HOME` later in the value, is left as written.
 pub(crate) fn expand_home(value: &str, home: &str) -> String {
@@ -484,42 +461,6 @@ pub(crate) fn expand_home(value: &str, home: &str) -> String {
         Some(rest) => format!("{home}{rest}"),
         None => value.to_string(),
     }
-}
-
-/// Service account for sudo re-exec (optional). Env VAULTED_AGENT_SERVICE_USER wins.
-pub fn load_service_user(paths: &Paths) -> Option<String> {
-    if let Ok(v) = std::env::var("VAULTED_AGENT_SERVICE_USER") {
-        if !v.is_empty() {
-            return Some(v);
-        }
-    }
-    load_default(paths, "service_user")
-}
-
-/// Whether `run` may execute an arbitrary command on a machine that has a
-/// service account configured. Defaults to false.
-///
-/// Deliberately config-file only, with no environment override: the whole point
-/// is to bound what a caller can ask for, and a caller controls their own
-/// environment.
-pub fn load_allow_run(paths: &Paths) -> bool {
-    load_default(paths, "allow_run")
-        .map(|v| matches!(v.trim(), "yes" | "true" | "1"))
-        .unwrap_or(false)
-}
-
-/// Default vault backend when harness omits backend=.
-pub fn load_default_backend(paths: &Paths) -> Backend {
-    if let Ok(v) = std::env::var("VAULTED_AGENT_DEFAULT_BACKEND") {
-        if !v.is_empty() {
-            if let Ok(b) = v.parse() {
-                return b;
-            }
-        }
-    }
-    load_default(paths, "default_backend")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Backend::OnePassword)
 }
 
 pub fn list_harness_names(paths: &Paths) -> Result<Vec<String>> {
@@ -689,15 +630,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_mode_from_defaults_text() {
-        let tmp = tempfile::tempdir().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        fs::create_dir_all(&paths.config_dir).unwrap();
-        fs::write(&paths.defaults_file, "auth_mode = prompt\n").unwrap();
-        assert_eq!(load_auth_mode(&paths), AuthMode::Prompt);
-    }
-
-    #[test]
     fn set_default_writes_the_header_into_a_new_file() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::from_config_dir(tmp.path().join("etc"));
@@ -706,7 +638,10 @@ mod tests {
             fs::read_to_string(&paths.defaults_file).unwrap(),
             "# Machine-wide launcher defaults.\nauth_mode = prompt\n"
         );
-        assert_eq!(load_auth_mode(&paths), AuthMode::Prompt);
+        assert_eq!(
+            crate::defaults::Defaults::load(&paths).unwrap().auth_mode,
+            AuthMode::Prompt
+        );
     }
 
     #[test]
@@ -724,7 +659,9 @@ mod tests {
             "# mine\nextra_manifest = /a\nextra_manifest = /b\n"
         );
         assert_eq!(
-            load_defaults_all(&paths, "extra_manifest"),
+            crate::defaults::Defaults::load(&paths)
+                .unwrap()
+                .extra_manifests,
             vec!["/a", "/b"]
         );
     }
@@ -742,7 +679,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::from_config_dir(tmp.path());
         assert!(set_default(&paths, "service_user", Some("svc\nallow_run = yes")).is_err());
-        assert!(!load_allow_run(&paths));
+        assert!(!crate::defaults::Defaults::load(&paths).unwrap().allow_run);
     }
 
     #[test]

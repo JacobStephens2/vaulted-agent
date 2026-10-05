@@ -4,7 +4,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::config::{self, AuthMode, Paths};
+use crate::config::{AuthMode, Paths};
+use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 use crate::file_replace::{self, Perms};
 use crate::privilege;
@@ -173,13 +174,14 @@ fn token_file_unreadable(paths: &Paths, path: &Path, source: io::Error) -> Error
          Token files are often root:<service_user> mode 0640 so only that account can read them.",
         path.display()
     );
-    match config::load_service_user(paths) {
-        None => msg.push_str(
+    match Defaults::load(paths).map(|d| d.service_user) {
+        Err(e) => msg.push_str(&format!("\n  defaults.conf did not load: {e}")),
+        Ok(None) => msg.push_str(
             "\n  No service_user in defaults.conf — the launcher never re-execs as the account \
              that can read this file.\n  \
              Fix: set `service_user = <account>` in defaults.conf, or grant this user group read.",
         ),
-        Some(svc) => msg.push_str(&format!(
+        Ok(Some(svc)) => msg.push_str(&format!(
             "\n  service_user={svc} is configured; if this process is not that account, the \
              privilege hop did not run (check sudoers / VAULTED_AGENT_NO_REEXEC)."
         )),
@@ -449,7 +451,7 @@ fn tty_write(line: &str) {
 
 fn store_captured(paths: &Paths, kind: TokenKind, token: &ManagerToken) -> Result<()> {
     let path = kind.file(paths).to_path_buf();
-    let svc = config::load_service_user(paths);
+    let svc = Defaults::load(paths)?.service_user;
     write_token_file(&path, kind.env_var(), token, svc.as_deref())?;
     println!("wrote {} (0640)", path.display());
     Ok(())
@@ -613,16 +615,18 @@ impl TokenSource {
         }
     }
 
-    /// Thin adapter: read the real environment and `defaults.conf`.
-    pub fn from_env(paths: &Paths, prompt_flag: bool) -> Self {
+    /// Thin adapter: read the real environment and Machine defaults. Fails
+    /// when `defaults.conf` does not load.
+    pub fn from_env(paths: &Paths, prompt_flag: bool) -> Result<Self> {
+        let configured = Defaults::load(paths)?.auth_mode;
         let env_mode = std::env::var("VAULTED_AGENT_AUTH_MODE").ok();
         let env_prompt = std::env::var("VAULTED_AGENT_PROMPT_AUTH").ok();
-        Self::decide(
+        Ok(Self::decide(
             env_mode.as_deref(),
             env_prompt.as_deref(),
             prompt_flag,
-            config::load_auth_mode(paths),
-        )
+            configured,
+        ))
     }
 
     /// The same prompt forcing under an auth mode `setup` just had the
@@ -766,7 +770,7 @@ pub fn write_token_file(
         .map_err(|e| Error::config_write(path, e))
 }
 
-fn is_euid_root() -> bool {
+pub(crate) fn is_euid_root() -> bool {
     std::process::Command::new("id")
         .arg("-u")
         .output()

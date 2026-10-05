@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Backend, ExtraManifest, Harness, Paths};
+use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 
 /// The Backend and resolved Manifest path a Harness launches with, or an
@@ -65,16 +66,19 @@ pub struct AliasUse<'a> {
 
 #[derive(Debug)]
 pub struct Inventory {
+    default_backend: Backend,
     harnesses: Vec<HarnessEntry>,
     extras: Vec<ExtraEntry>,
 }
 
 impl Inventory {
-    /// Fails only when the harness directory cannot be read. An unloadable
-    /// `.conf` or `extra_manifest` line is held as an entry.
+    /// Fails when `defaults.conf` does not load or the harness directory
+    /// cannot be read. An unloadable `.conf` or `extra_manifest` line is held
+    /// as an entry.
     pub fn load(paths: &Paths) -> Result<Self> {
         // Read once, so every query gives the same answer.
-        let default_backend = config::load_default_backend(paths);
+        let defaults = Defaults::load(paths)?;
+        let default_backend = defaults.default_backend;
         let harnesses = config::list_harness_names(paths)?
             .into_iter()
             .map(|name| {
@@ -92,7 +96,8 @@ impl Inventory {
                 }
             })
             .collect();
-        let extras = config::load_defaults_all(paths, "extra_manifest")
+        let extras = defaults
+            .extra_manifests
             .into_iter()
             .map(|value| {
                 let loaded = ExtraManifest::parse(&value, paths).map(|extra| Binding {
@@ -102,7 +107,16 @@ impl Inventory {
                 ExtraEntry { value, loaded }
             })
             .collect();
-        Ok(Self { harnesses, extras })
+        Ok(Self {
+            default_backend,
+            harnesses,
+            extras,
+        })
+    }
+
+    /// The machine's default Backend, as this walk read it.
+    pub fn default_backend(&self) -> Backend {
+        self.default_backend
     }
 
     /// Every Harness, in name order, loaded or not.

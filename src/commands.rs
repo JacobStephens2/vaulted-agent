@@ -13,10 +13,10 @@ use crate::auth::{self, TokenKind, TokenSource};
 use crate::backend;
 use crate::bitwarden::BwListing;
 use crate::config::{
-    env_blind_agent_reason, list_harness_names, load_allow_run, load_auth_mode,
-    load_default_backend, load_service_user, parse_dotenv_keys, set_default, set_harnesses_workdir,
-    AuthMode, Backend, Harness, Paths,
+    env_blind_agent_reason, list_harness_names, parse_dotenv_keys, set_default,
+    set_harnesses_workdir, AuthMode, Backend, Harness, Paths,
 };
+use crate::defaults::Defaults;
 use crate::error::{Error, Result};
 use crate::inventory::{Binding, Inventory, ValidateTarget};
 use crate::launch::{self, LaunchOpts};
@@ -28,14 +28,6 @@ use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::validate::validate_manifest_file;
 use crate::workdir::{self, CallerContext};
-
-pub fn default_backend(paths: &Paths) -> Backend {
-    load_default_backend(paths)
-}
-
-fn service_user_for_token(paths: &Paths) -> Option<String> {
-    load_service_user(paths)
-}
 
 pub fn cmd_version() {
     // The git description is appended when a repository was present at build
@@ -57,19 +49,31 @@ pub fn cmd_auth_mode(paths: &Paths, args: &[String]) -> Result<()> {
     match sub {
         None => {
             if can_prompt_user() {
-                let mode = prompt_auth_mode_choice(load_auth_mode(paths))?;
+                // The menu's default is the configured mode, so it needs the
+                // file to load. The explicit form below does not.
+                let current = Defaults::load(paths)
+                    .map_err(|e| {
+                        Error::Message(format!(
+                            "{e}\n  `vaulted-agent auth-mode file|prompt` sets auth_mode \
+                             without reading the rest of defaults.conf"
+                        ))
+                    })?
+                    .auth_mode;
+                let mode = prompt_auth_mode_choice(current)?;
                 write_auth_mode(paths, mode)?;
                 println!("auth_mode={}", mode.as_str());
             } else {
-                println!("auth_mode={}", load_auth_mode(paths).as_str());
+                println!("auth_mode={}", Defaults::load(paths)?.auth_mode.as_str());
             }
             Ok(())
         }
         Some("show") | Some("") => {
-            let mode = load_auth_mode(paths);
+            let mode = Defaults::load(paths)?.auth_mode;
             println!("auth_mode={}", mode.as_str());
             Ok(())
         }
+        // The repair path for a typo'd auth_mode: the Conf file edit touches
+        // only that key and never parses defaults.conf.
         Some("file") | Some("prompt") => {
             let mode = AuthMode::parse(sub.unwrap()).unwrap();
             write_auth_mode(paths, mode)?;
@@ -136,7 +140,7 @@ fn ensure_auth_mode_for_setup(paths: &Paths, token_source: TokenSource) -> Resul
     if !can_prompt_user() {
         return Ok(token_source);
     }
-    let current = load_auth_mode(paths);
+    let current = Defaults::load(paths)?.auth_mode;
     let mode = prompt_auth_mode_choice(current)?;
     write_auth_mode(paths, mode)?;
     Ok(token_source.with_auth_mode(mode))
@@ -149,8 +153,9 @@ fn write_auth_mode(paths: &Paths, mode: AuthMode) -> Result<()> {
 /// Interactive: who agents run as (defaults to "you" = no service_user).
 /// Non-interactive: leave defaults alone.
 fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
+    let configured = || Defaults::load(paths).map(|d| d.service_user);
     if !can_prompt_user() {
-        return Ok(load_service_user(paths));
+        return configured();
     }
     let me = crate::privilege::current_user();
     let me_label = if me.is_empty() {
@@ -158,7 +163,7 @@ fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
     } else {
         me.clone()
     };
-    let current = load_service_user(paths);
+    let current = configured()?;
     eprintln!("\nRun agents as:");
     eprintln!("  1) you ({me_label})            [default]");
     eprintln!("  2) a dedicated service account");
@@ -181,7 +186,7 @@ fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
             let name = read_tty_line()?.trim().to_string();
             if name.is_empty() {
                 eprintln!("  empty name; leaving service_user unchanged");
-                return Ok(load_service_user(paths));
+                return configured();
             }
             set_default(paths, "service_user", Some(&name))?;
             println!("service_user = {name}");
@@ -197,7 +202,7 @@ fn ensure_service_user_for_setup(paths: &Paths) -> Result<Option<String>> {
         }
         other => {
             eprintln!("  unknown choice '{other}'; leaving service_user unchanged");
-            Ok(load_service_user(paths))
+            configured()
         }
     }
 }
@@ -356,7 +361,7 @@ pub fn cmd_secrets(paths: &Paths, args: &[String], token_source: TokenSource) ->
                             // positional, not args[2]: --offline may sit anywhere.
                             backend: match positional.get(1) {
                                 Some(s) => s.parse()?,
-                                None => default_backend(paths),
+                                None => inventory.default_backend(),
                             },
                         },
                     };
@@ -469,8 +474,18 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     let mut legacy_warned: HashSet<PathBuf> = HashSet::new();
     println!("vaulted-agent doctor");
     println!("config: {}", paths.config_dir.display());
-    println!("auth_mode: {}", load_auth_mode(paths).as_str());
-    println!("default_backend: {}", default_backend(paths));
+    // A defaults.conf that will not load is one finding; the checks below
+    // still run, against the built-in values, labelled as such.
+    let (defaults, label) = match Defaults::load(paths) {
+        Ok(d) => (d, ""),
+        Err(e) => {
+            println!("ERROR: {e}");
+            issues += 1;
+            (Defaults::default(), " (built-in)")
+        }
+    };
+    println!("auth_mode: {}{label}", defaults.auth_mode.as_str());
+    println!("default_backend: {}{label}", defaults.default_backend);
 
     // Nearly every check below is a filesystem question -- is op.env readable,
     // is the manifest readable, is the harness bin executable -- and the answer
@@ -481,7 +496,7 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
     // same hop a launch uses; name the account that answered so the report is
     // never read against the wrong one.
     let running_as = crate::privilege::current_user();
-    let service_user = load_service_user(paths);
+    let service_user = defaults.service_user;
     let caller = CallerContext::from_env();
     match service_user.as_deref() {
         Some(svc) if svc != running_as => {
@@ -537,7 +552,7 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
         println!("harnesses: (none)");
         warn += 1;
     }
-    let be_default = default_backend(paths);
+    let be_default = defaults.default_backend;
     for name in &names {
         println!("\nharness: {name}");
         let h = match Harness::load(paths, name) {
@@ -740,7 +755,7 @@ fn store_existing_token(
     let token = token_source.load(paths, kind)?;
     let path = kind.file(paths).to_path_buf();
     if token_source.auth_mode() == AuthMode::File {
-        let svc = service_user_for_token(paths);
+        let svc = Defaults::load(paths)?.service_user;
         auth::write_token_file(&path, kind.env_var(), &token, svc.as_deref())?;
         println!("wrote {} (0640)", path.display());
     } else {
@@ -1123,11 +1138,12 @@ fn run_refusal(service_user: Option<&str>, allow_run: bool) -> Option<String> {
 }
 
 pub fn cmd_run(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
-    if let Some(msg) = run_refusal(load_service_user(paths).as_deref(), load_allow_run(paths)) {
+    let defaults = Defaults::load(paths)?;
+    if let Some(msg) = run_refusal(defaults.service_user.as_deref(), defaults.allow_run) {
         return Err(Error::Message(msg));
     }
     let mut manifest: Option<String> = None;
-    let mut backend = default_backend(paths);
+    let mut backend = defaults.default_backend;
     let mut workdir: Option<String> = Some("caller".into());
     let mut i = 0;
     while i < args.len() {
@@ -1302,8 +1318,15 @@ pub fn cmd_launch_harness(
 }
 
 pub fn usage(paths: &Paths) {
-    let mode = load_auth_mode(paths);
-    let be = default_backend(paths);
+    let defaults = match Defaults::load(paths) {
+        Ok(d) => format!(
+            "default auth_mode: {}  (file = token on disk; prompt = paste each launch)\n\
+             default backend:   {}",
+            d.auth_mode.as_str(),
+            d.default_backend
+        ),
+        Err(e) => format!("defaults: {e}"),
+    };
     eprintln!(
         "usage: vaulted-agent [-m MANIFEST] <harness> [args...]\n\
          \x20      va [-m MANIFEST] <harness> [args...]\n\
@@ -1323,12 +1346,9 @@ pub fn usage(paths: &Paths) {
          \x20                                  instead of its configured one (before the\n\
          \x20                                  harness name; not allowed under a\n\
          \x20                                  *-conductor symlink)\n\
-         default auth_mode: {}  (file = token on disk; prompt = paste each launch)\n\
-         default backend:   {}\n\
+         {defaults}\n\
          config: VAULTED_AGENT_CONFIG_DIR (default /etc/vaulted-agent)\n\
-         (tests only: VAULTED_AGENT_HANDOFF=spawn spawns instead of exec)",
-        mode.as_str(),
-        be
+         (tests only: VAULTED_AGENT_HANDOFF=spawn spawns instead of exec)"
     );
     if let Ok(inventory) = Inventory::load(paths) {
         eprintln!("\nharnesses in {}:", paths.harness_dir.display());
@@ -1509,6 +1529,11 @@ pub fn cmd_edit_manifest(paths: &Paths, args: &[String]) -> Result<()> {
             }
         }
     }
+
+    // The check on save judges the file against the Backends that read it,
+    // which takes the machine default Backend: a defaults.conf that does not
+    // load stops here, before the editor opens.
+    Defaults::load(paths)?;
 
     let path = match wanted {
         Some(name) => {

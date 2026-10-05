@@ -61,7 +61,8 @@ fn main() {
             manifest,
             via,
         } => {
-            let token_source = TokenSource::from_env(&paths, prompt_auth);
+            let token_source =
+                TokenSource::from_env(&paths, prompt_auth).unwrap_or_else(|e| fail(e));
             if let Err(e) = commands::cmd_launch_harness(
                 &paths,
                 &harness,
@@ -83,8 +84,11 @@ fn main() {
             manifest,
         } => {
             // `-p` in front of a management command reaches it the same way it
-            // reaches a harness launch: through the one Token source.
-            let token_source = TokenSource::from_env(&paths, prompt_auth);
+            // reaches a harness launch: through the one Token source. Built
+            // only for the verbs that load a token, since it reads
+            // defaults.conf: the verbs that inspect or repair a broken one
+            // (`auth-mode`, `doctor`, `update`, …) must still reach their code.
+            let token_source = || TokenSource::from_env(&paths, prompt_auth);
             let result = match verb {
                 Verb::Version => {
                     commands::cmd_version();
@@ -96,21 +100,19 @@ fn main() {
                 }
                 Verb::AuthMode => commands::cmd_auth_mode(&paths, &args),
                 Verb::Doctor => commands::cmd_doctor(&paths),
-                Verb::Secrets => commands::cmd_secrets(&paths, &args, token_source),
-                Verb::Setup => commands::cmd_setup(&paths, &args, token_source),
-                Verb::Refresh => commands::cmd_refresh(&paths, &args, token_source),
+                Verb::Secrets => {
+                    token_source().and_then(|ts| commands::cmd_secrets(&paths, &args, ts))
+                }
+                Verb::Setup => token_source().and_then(|ts| commands::cmd_setup(&paths, &args, ts)),
+                Verb::Refresh => {
+                    token_source().and_then(|ts| commands::cmd_refresh(&paths, &args, ts))
+                }
                 Verb::Uninstall => commands::cmd_uninstall(&args),
                 Verb::Update => vaulted_agent::update::cmd_update(&args),
-                Verb::Run => commands::cmd_run(&paths, &args, token_source),
+                Verb::Run => token_source().and_then(|ts| commands::cmd_run(&paths, &args, ts)),
                 Verb::EditManifest => commands::cmd_edit_manifest(&paths, &args),
-                Verb::Pick => pick(
-                    &paths,
-                    argv0,
-                    &route.hop,
-                    &args,
-                    token_source,
-                    manifest.as_deref(),
-                ),
+                Verb::Pick => token_source()
+                    .and_then(|ts| pick(&paths, argv0, &route.hop, &args, ts, manifest.as_deref())),
             };
             if let Err(e) = result {
                 fail(e);

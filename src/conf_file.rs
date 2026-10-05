@@ -4,7 +4,7 @@
 //! One line rule for reading it: blank and `#` lines are not entries; any other
 //! line is an entry whose key is the text before the first `=` (trimmed) and
 //! whose value is the rest (trimmed), or a malformed line when it has no `=`.
-//! What a key *means* stays with the reader (defaults getters, `Harness::parse`).
+//! What a key *means* stays with the reader (Machine defaults, `Harness::parse`).
 //!
 //! One edit for changing it: set or remove a key in memory, touching only the
 //! lines that carry it, then write the whole file through File replace. A truncated

@@ -34,7 +34,8 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Manager token** | Vault *manager* credential (`BWS_ACCESS_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`). Used only to resolve secrets; must never appear in the child agent env. |
 | **Secret value** | A resolved secret destined for the child environment. Redacted on Display/Debug. |
 | **Agent-owned credential** | Authentication state created, stored, and consumed by the launched agent itself. Outside launcher manifest resolution and rotation; distinct from a Manager token or an injected Secret value. |
-| **Auth mode** | How the manager token is obtained: `file` (token file on disk) or `prompt` (TTY each launch). One input to the Token source, which settles token loading for each invocation. |
+| **Machine defaults** | What `defaults.conf` says, read once: auth mode, default Backend, Service user, whether `run` is allowed, and every Extra manifest line, with each key's env override settled in one place. A file that exists but cannot be read, or a value it does not recognise, is an error with its line, never a fallback (`src/defaults.rs`). |
+| **Auth mode** | How the manager token is obtained: `file` (token file on disk) or `prompt` (TTY each launch). The configured value comes from Machine defaults; it is one input to the Token source, which settles token loading for each invocation. |
 | **Token source** | How one invocation obtains a Manager token (manager-token env var, else prompt when forced or auth mode is `prompt`, else the token file, else a one-shot TTY prompt), settled once from the environment, the `-p` flag and the configured Auth mode. Distinct from Token capture, which is `setup`-only and writes the file. |
 | **Token capture** | `setup`-only path that obtains a manager token (TTY paste, or piped stdin under `--set-token`), verifies it against the backend, then writes the token file. Distinct from load: never runs on the launch path, and never fires for an unreadable existing token file (invariant 6). |
 | **Operator identity** | The human on whose behalf a Harness is launched; determines personal agent state and source-control attribution. Distinct from the Service user that executes the process. |
@@ -64,7 +65,7 @@ Agent-facing ops contract (commands, recipes, failure modes): **`AGENTS.md`**.
 1. Manager tokens never reach the child environment.
 2. No secret material on the agent argv.
 3. Sudo re-exec replays **original** argv so sudoers matches what the operator typed. The one exception is `pick`: it hops after the menu and replays as though the operator had typed the chosen Harness (launcher flags as typed, then the Harness name, then the rest), so a sudoers grant for `pick` never authorizes more than the Harness picked.
-4. Fail closed on unknown backend, bad var names, and placeholder refs (misconfiguration).
+4. Fail closed on unknown backend, bad var names, placeholder refs, and an unreadable or invalid `defaults.conf` (misconfiguration).
 5. `secrets validate` is the pre-flight gate before privileged/paid launches — must not fail open. It covers every manifest the machine reads, harness or **extra** (ADR-0006).
 6. Unreadable manager-token files are not reported as missing and do not fall through to an interactive SA-token paste.
 7. Conductor invocation must not honor `-H` or `-m` (fixed entitlement).
