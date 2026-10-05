@@ -27,6 +27,7 @@ use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::setup_interview::{self, read_tty_line, write_auth_mode, BackendChoice, Interview};
 use crate::token_file;
+use crate::uninstall;
 use crate::validate::validate_manifest_file;
 use crate::vault_wiring;
 use crate::workdir::{self, CallerContext};
@@ -743,146 +744,19 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
     }
 }
 
-pub fn cmd_uninstall(args: &[String]) -> Result<()> {
-    let mut purge = false;
-    let mut dry = false;
-    let mut yes = false;
-    let mut link_users: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--purge" => purge = true,
-            "--dry-run" => dry = true,
-            "-y" | "--yes" => yes = true,
-            "-h" | "--help" => {
-                println!(
-                    "usage: vaulted-agent uninstall [--purge] [--dry-run] [-y|--yes] [--link-user USER]\n\
-                     Removes the launcher, conductor symlinks, sudoers rule, and optional user-local links.\n\
-                     Keeps config unless --purge. Never removes op.env / bws.env credentials."
-                );
-                return Ok(());
-            }
-            "--link-user" => {
-                i += 1;
-                let u = args
-                    .get(i)
-                    .ok_or_else(|| {
-                        Error::Message("uninstall: --link-user needs a username".into())
-                    })?
-                    .clone();
-                link_users.push(u);
-            }
-            s if s.starts_with("--link-user=") => {
-                link_users.push(s["--link-user=".len()..].to_string());
-            }
-            other => {
-                return Err(Error::Message(format!(
-                    "uninstall: unknown option '{other}'"
-                )));
-            }
-        }
-        i += 1;
-    }
-
-    // Also consider SUDO_USER when present (install.sh parity).
-    if let Ok(u) = env::var("SUDO_USER") {
-        if !u.is_empty() && !link_users.iter().any(|x| x == &u) {
-            link_users.push(u);
-        }
-    }
-
-    let prefix = env::var("VAULTED_AGENT_BIN_DIR").unwrap_or_else(|_| "/usr/local/bin".into());
-    let config =
-        env::var("VAULTED_AGENT_CONFIG_DIR").unwrap_or_else(|_| "/etc/vaulted-agent".into());
-    let launcher = PathBuf::from(&prefix).join("vaulted-agent");
-    let va = PathBuf::from(&prefix).join("va");
-
-    let mut targets: Vec<PathBuf> = Vec::new();
-    if launcher.exists() || launcher.is_symlink() {
-        targets.push(launcher.clone());
-    }
-    if va.is_symlink() || va.exists() {
-        targets.push(va);
-    }
-    // conductor symlinks
-    if let Ok(rd) = fs::read_dir(&prefix) {
-        for ent in rd.flatten() {
-            let p = ent.path();
-            let name = ent.file_name().to_string_lossy().into_owned();
-            if name.ends_with("-conductor") && p.is_symlink() {
-                targets.push(p);
-            }
-        }
-    }
-
-    // User-local symlinks (~/.local/bin/vaulted-agent and va)
-    for u in &link_users {
-        if let Some(home) = crate::privilege::account_home(u) {
-            for name in ["vaulted-agent", "va"] {
-                let p = home.join(".local/bin").join(name);
-                if p.exists() || p.is_symlink() {
-                    targets.push(p);
-                }
-            }
-        }
-    }
-
-    // Sudoers rule left by install.sh (story #26) — dangling NOPASSWD is worse than gone.
-    let sudoers = PathBuf::from("/etc/sudoers.d/vaulted-agent");
-    if sudoers.exists() {
-        targets.push(sudoers);
-    }
-
-    println!("vaulted-agent uninstall");
-    for t in &targets {
-        println!("  remove {}", t.display());
-    }
-    if purge {
-        println!("  purge config {}", config);
-    }
-    if dry {
-        println!("dry-run: no changes");
+/// `uninstall`: gather the facts, then run the Uninstall plan.
+pub fn cmd_uninstall(paths: &Paths, args: &[String]) -> Result<()> {
+    let Some(cmd) = uninstall::Command::parse(args)? else {
+        println!("{}", uninstall::USAGE);
         return Ok(());
-    }
-    if !yes && io::IsTerminal::is_terminal(&io::stdin()) {
-        eprint!("Proceed? [y/N]: ");
-        let _ = io::stderr().flush();
-        let mut line = String::new();
-        io::stdin().read_line(&mut line).ok();
-        if !matches!(line.trim(), "y" | "Y" | "yes" | "YES") {
-            println!("Aborted.");
-            return Ok(());
-        }
-    }
-
-    for t in &targets {
-        if let Err(e) = fs::remove_file(t) {
-            eprintln!("warn: could not remove {}: {e}", t.display());
-        }
-    }
-    if purge {
-        // Never remove credential files if present alone — remove whole tree except note
-        // Spec: never remove backend credentials intentionally — but --purge removes config dir.
-        // Match bash: --purge removes config dir contents carefully.
-        let protect = ["op.env", "bws.env", "age.key"];
-        if let Ok(rd) = fs::read_dir(&config) {
-            for ent in rd.flatten() {
-                let name = ent.file_name().to_string_lossy().into_owned();
-                if protect.contains(&name.as_str()) {
-                    println!("  keep credential {}", ent.path().display());
-                    continue;
-                }
-                let p = ent.path();
-                if p.is_dir() {
-                    let _ = fs::remove_dir_all(&p);
-                } else {
-                    let _ = fs::remove_file(&p);
-                }
-            }
-        }
-    }
-    println!("Done.");
-    Ok(())
+    };
+    let users = uninstall::link_users(&cmd.link_users, env::var("SUDO_USER").ok().as_deref());
+    let homes: Vec<PathBuf> = users
+        .iter()
+        .filter_map(|u| crate::privilege::account_home(u))
+        .collect();
+    let facts = uninstall::Facts::gather(&crate::privilege::bin_dir(), paths, &homes, cmd.purge);
+    uninstall::run(&cmd, facts, auth::interactive_tty(), &mut read_tty_line)
 }
 
 /// Why `run` is refused, or None when it may proceed.

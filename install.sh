@@ -77,8 +77,8 @@ run() { if (( DRY )); then printf '  would: %s\n' "$*"; else "$@"; fi; }
 
 # True when a human can answer prompts. Do NOT require -t 0: `curl … | bash`
 # makes stdin a pipe even when the user is at a real terminal. Read answers
-# from /dev/tty (same pattern as uninstall). -t 1 is enough to know we're not
-# running under a fully detached cron/CI sink.
+# from /dev/tty. -t 1 is enough to know we're not running under a fully
+# detached cron/CI sink.
 can_prompt_user() {
   (( ! ASSUME_YES )) && (( ! DRY )) && [[ -t 1 && -r /dev/tty ]]
 }
@@ -168,129 +168,66 @@ case "${BACKEND_CHOICE}" in
   *) die "--backend must be onepassword, bitwarden, pass, sops or skip (got '$BACKEND_CHOICE')" ;;
 esac
 
+# --- the launcher binary ------------------------------------------------------
+# Prefer: VAULTED_AGENT_BIN → release binary in tree → cargo build --release.
+# Debug binaries are never installed unless --allow-debug-binary (stale debug
+# builds from another branch must not land in /usr/local/bin).
+resolve_rust_binary() {
+  local cand
+  for cand in \
+    "${VAULTED_AGENT_BIN:-}" \
+    "$REPO/target/release/vaulted-agent"
+  do
+    [[ -n "$cand" && -x "$cand" ]] || continue
+    printf '%s\n' "$cand"
+    return 0
+  done
+  if (( ALLOW_DEBUG_BINARY )) && [[ -x "$REPO/target/debug/vaulted-agent" ]]; then
+    printf 'warning: installing target/debug/vaulted-agent (--allow-debug-binary)\n' >&2
+    printf '%s\n' "$REPO/target/debug/vaulted-agent"
+    return 0
+  fi
+  if command -v cargo >/dev/null 2>&1; then
+    printf 'building vaulted-agent (cargo --release --locked)…\n' >&2
+    # Drop privileges for the build when we are root (Cargo build scripts are
+    # arbitrary code; the Bash runtime never needed root for this step).
+    local build_user="${SUDO_USER:-}"
+    if [[ "$(id -u)" -eq 0 && -n "$build_user" && "$build_user" != "root" ]]; then
+      (cd "$REPO" && sudo -u "$build_user" cargo build --release --locked) >&2 \
+        || die "cargo build --release --locked failed"
+    else
+      (cd "$REPO" && cargo build --release --locked) >&2 \
+        || die "cargo build --release --locked failed"
+    fi
+    [[ -x "$REPO/target/release/vaulted-agent" ]] \
+      || die "cargo build succeeded but binary missing"
+    printf '%s\n' "$REPO/target/release/vaulted-agent"
+    return 0
+  fi
+  die "no vaulted-agent binary found and cargo not on PATH.
+  Build on a machine with Rust: cargo build --release --locked
+  Or set VAULTED_AGENT_BIN=/path/to/vaulted-agent
+  Or use install-remote.sh which downloads a release asset."
+}
+
 # --- uninstall --------------------------------------------------------------
-# Removes only what this script installs, and only where it can confirm
-# ownership: a symlink goes if it resolves to our launcher, and is left alone
-# otherwise. Config is kept unless --purge, because harness files are usually
-# hand-written. The backend credential is never touched: with --op-env it
-# often predates the install, so removing it could break something unrelated.
+# One implementation: the launcher's `uninstall` (the Uninstall plan). It
+# removes a symlink only when it resolves to the launcher, keeps config unless
+# --purge, and never removes a backend credential. The installed launcher runs
+# it when there is one; otherwise the binary an install would use.
 if (( UNINSTALL )); then
-  launcher="$PREFIX/vaulted-agent"
-
-  # Prompt when a human is plainly present, and never otherwise. --dry-run
-  # changes nothing so it needs no consent, and -y is the escape hatch for
-  # scripts and cron, which have no terminal to answer with anyway.
-  #
-  # Note this deliberately does NOT key off "were any flags passed". Tying it
-  # to that would mean anyone who installed somewhere other than the default
-  # prefix could never reach the menu, since they must pass --prefix to say so.
-  interactive=0
-  if can_prompt_user; then interactive=1; fi
-
-  # Work out what would go before touching anything. The prompt, --dry-run and
-  # the real removal all render from these same two lists.
-  # bash 3.2 has no associative arrays; track seen users as a space list.
-  targets=(); foreign=(); seen_users=" "
-
-  consider() {
-    local p="$1"
-    if [[ -L "$p" && "$(resolve_path "$p")" == "$launcher" ]]; then
-      targets+=("$p")
-    elif [[ -e "$p" || -L "$p" ]]; then
-      foreign+=("$p")
-    fi
-  }
-
-  shopt -s nullglob
-  for link in "$PREFIX"/*-conductor; do
-    consider "$link"
-  done
-  shopt -u nullglob
-
-  consider "$PREFIX/$SHORT_NAME"
-
-  for u in ${LINK_USER:+"$LINK_USER"} ${SUDO_USER:+"$SUDO_USER"}; do
-    if [[ "$seen_users" == *" $u "* ]]; then continue; fi
-    seen_users="$seen_users$u "
-    uh="$(user_home "$u" 2>/dev/null || true)"
-    if [[ -z "$uh" ]]; then continue; fi
-    consider "$uh/.local/bin/vaulted-agent"
-    consider "$uh/.local/bin/$SHORT_NAME"
-  done
-
-  if [[ -e "$launcher" ]]; then targets+=("$launcher"); fi
-  if [[ -e /etc/sudoers.d/vaulted-agent ]]; then targets+=(/etc/sudoers.d/vaulted-agent); fi
-
-  n_conf=0; n_man=0
-  if [[ -d "$CONFIG" ]]; then
-    shopt -s nullglob
-    _c=( "$CONFIG"/harnesses.d/*.conf ); n_conf=${#_c[@]}
-    _m=( "$CONFIG"/manifests/*        ); n_man=${#_m[@]}
-    shopt -u nullglob
+  if [[ -x "$PREFIX/vaulted-agent" ]]; then
+    uninstaller="$PREFIX/vaulted-agent"
+  else
+    uninstaller="$(resolve_rust_binary)"
   fi
-
-  printf 'vaulted-agent uninstall\n\n'
-  if (( ${#targets[@]} == 0 )) && [[ ! -d "$CONFIG" ]]; then
-    printf 'Nothing to remove: no launcher at %s and no config at %s.\n' "$PREFIX" "$CONFIG"
-    exit 0
-  fi
-
-  printf 'Found:\n'
-  for t in ${targets[@]+"${targets[@]}"}; do printf '  %s\n' "$t"; done
-  if [[ -d "$CONFIG" ]]; then
-    printf '  %s  (%d live harnesses, %d manifests)\n' "$CONFIG" "$n_conf" "$n_man"
-  fi
-  for f in ${foreign[@]+"${foreign[@]}"}; do printf '  %s  (not ours, will be left alone)\n' "$f"; done
-
-  if (( interactive )) && (( PURGE )); then
-    printf '\n--purge given: %s will be removed too.\n' "$CONFIG"
-  elif (( interactive )); then
-    printf '\n  1) Remove the launcher, its symlinks and the sudoers rule; keep config\n'
-    if [[ -d "$CONFIG" ]]; then
-      printf '  2) Remove all of that, and %s as well\n' "$CONFIG"
-    fi
-    printf '  3) Show what would happen, change nothing\n'
-    printf '  q) Quit\n\n'
-    while :; do
-      printf 'choice [1-3, q]: '
-      read -r ans < /dev/tty || { printf '\n'; exit 130; }
-      case "$ans" in
-        1)     break ;;
-        2)     if [[ -d "$CONFIG" ]]; then PURGE=1; break; fi; printf '  no config directory to remove\n' ;;
-        3)     DRY=1; break ;;
-        q|Q)   printf 'Nothing removed.\n'; exit 0 ;;
-        *)     printf '  enter 1, 2, 3 or q\n' ;;
-      esac
-    done
-  fi
-
-  if (( PURGE )) && [[ -d "$CONFIG" ]]; then targets+=("$CONFIG"); fi
-
-  # Last look before anything is deleted, showing the exact paths.
-  if (( interactive )) && (( ! DRY )); then
-    printf '\nAbout to remove:\n'
-    for t in ${targets[@]+"${targets[@]}"}; do printf '  %s\n' "$t"; done
-    printf '\nProceed? [y/N]: '
-    read -r yn < /dev/tty || { printf '\n'; exit 130; }
-    case "$yn" in
-      y|Y|yes|YES) ;;
-      *) printf 'Nothing removed.\n'; exit 0 ;;
-    esac
-  fi
-
-  printf '\n'
-  for t in ${targets[@]+"${targets[@]}"}; do
-    if (( DRY )); then printf 'would remove %s\n' "$t"
-    else rm -rf "$t"; printf 'removed %s\n' "$t"; fi
-  done
-  for f in ${foreign[@]+"${foreign[@]}"}; do printf 'left alone %s (not ours)\n' "$f"; done
-
-  if (( ! PURGE )) && [[ -d "$CONFIG" ]]; then
-    printf '\nkept %s. Add --purge, or choose 2 interactively, to remove it too.\n' "$CONFIG"
-  fi
-  printf '\nNot touched: any backend credential (op.env / bws.env / age.key).\n'
-  printf '  Those are often shared with other tooling; remove by hand if you want them gone.\n'
-  exit 0
+  uninstall_args=()
+  if (( PURGE )); then uninstall_args+=(--purge); fi
+  if (( DRY )); then uninstall_args+=(--dry-run); fi
+  if (( ASSUME_YES )); then uninstall_args+=(--yes); fi
+  if [[ -n "$LINK_USER" ]]; then uninstall_args+=(--link-user "$LINK_USER"); fi
+  exec env VAULTED_AGENT_BIN_DIR="$PREFIX" VAULTED_AGENT_CONFIG_DIR="$CONFIG" \
+    "$uninstaller" uninstall ${uninstall_args[@]+"${uninstall_args[@]}"}
 fi
 
 # Default the service account to whoever invoked this. On a personal machine
@@ -357,46 +294,6 @@ esac
 printf '\n'
 
 # --- the launcher (Rust binary; machine defaults go in defaults.conf) ------
-# Prefer: VAULTED_AGENT_BIN → release binary in tree → cargo build --release.
-# Debug binaries are never installed unless --allow-debug-binary (stale debug
-# builds from another branch must not land in /usr/local/bin).
-resolve_rust_binary() {
-  local cand
-  for cand in \
-    "${VAULTED_AGENT_BIN:-}" \
-    "$REPO/target/release/vaulted-agent"
-  do
-    [[ -n "$cand" && -x "$cand" ]] || continue
-    printf '%s\n' "$cand"
-    return 0
-  done
-  if (( ALLOW_DEBUG_BINARY )) && [[ -x "$REPO/target/debug/vaulted-agent" ]]; then
-    printf 'warning: installing target/debug/vaulted-agent (--allow-debug-binary)\n' >&2
-    printf '%s\n' "$REPO/target/debug/vaulted-agent"
-    return 0
-  fi
-  if command -v cargo >/dev/null 2>&1; then
-    printf 'building vaulted-agent (cargo --release --locked)…\n' >&2
-    # Drop privileges for the build when we are root (Cargo build scripts are
-    # arbitrary code; the Bash runtime never needed root for this step).
-    local build_user="${SUDO_USER:-}"
-    if [[ "$(id -u)" -eq 0 && -n "$build_user" && "$build_user" != "root" ]]; then
-      (cd "$REPO" && sudo -u "$build_user" cargo build --release --locked) >&2 \
-        || die "cargo build --release --locked failed"
-    else
-      (cd "$REPO" && cargo build --release --locked) >&2 \
-        || die "cargo build --release --locked failed"
-    fi
-    [[ -x "$REPO/target/release/vaulted-agent" ]] \
-      || die "cargo build succeeded but binary missing"
-    printf '%s\n' "$REPO/target/release/vaulted-agent"
-    return 0
-  fi
-  die "no vaulted-agent binary found and cargo not on PATH.
-  Build on a machine with Rust: cargo build --release --locked
-  Or set VAULTED_AGENT_BIN=/path/to/vaulted-agent
-  Or use install-remote.sh which downloads a release asset."
-}
 RUST_BIN="$(resolve_rust_binary)"
 run install -m 0755 "$RUST_BIN" "$PREFIX/vaulted-agent"
 printf 'installed %s/vaulted-agent (Rust runtime from %s)\n' "$PREFIX" "$RUST_BIN"

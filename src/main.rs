@@ -107,7 +107,7 @@ fn main() {
                 Verb::Refresh => {
                     token_source().and_then(|ts| commands::cmd_refresh(&paths, &args, ts))
                 }
-                Verb::Uninstall => commands::cmd_uninstall(&args),
+                Verb::Uninstall => commands::cmd_uninstall(&paths, &args),
                 Verb::Update => vaulted_agent::update::cmd_update(&args),
                 Verb::Run => token_source().and_then(|ts| commands::cmd_run(&paths, &args, ts)),
                 Verb::EditManifest => commands::cmd_edit_manifest(&paths, &args),

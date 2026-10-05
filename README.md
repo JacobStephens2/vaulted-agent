@@ -545,12 +545,16 @@ to this launcher; anything else at those paths is left alone (“not ours”).
 Config is kept without `--purge`, since harness files are usually hand-written.
 **Backend credentials are never removed** - `op.env`, `bws.env` and `age.key`
 may be shared with other tooling. Delete those yourself if you want them gone.
+`--purge` removes everything else in the config directory, and the directory
+itself only when none of those files is in it. A removal that fails is
+reported, the rest still run, and the command exits non-zero.
 
 Add `--link-user NAME` to also remove that user's `~/.local/bin` symlink; the
 user who invoked sudo is checked automatically.
 
-From a checkout (no installed binary yet), the same logic is also reachable as
-`sudo ./install.sh --uninstall …`.
+From a checkout, `sudo ./install.sh --uninstall …` runs the same code: the
+installed launcher's `uninstall` when there is one, otherwise the binary an
+install from that checkout would use.
 
 ## Configuration
 

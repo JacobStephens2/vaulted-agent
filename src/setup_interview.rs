@@ -48,7 +48,7 @@ pub(crate) fn read_tty_line() -> Result<String> {
 }
 
 /// Write a question's text; the reply is read next.
-fn ask(read: &mut LineReader, text: &str) -> Result<String> {
+pub(crate) fn ask(read: &mut LineReader, text: &str) -> Result<String> {
     eprint!("{text}");
     let _ = io::stderr().flush();
     read()
