@@ -1,9 +1,12 @@
 //! `refresh`: bring a Refs file up to date with what the vault holds now.
 //!
+//! `setup bitwarden` writes its Refs file through here too ([`setup_refs`]),
+//! handing in the listing Token capture already fetched.
+//!
 //! What a run finds in the lines already in the file is a [`RefreshReport`]:
 //! data, built before anything is decided, printed by one renderer. The Refs
-//! module owns the file's grammar and its writes, which `setup`, `edit-manifest`
-//! and the launch share; this module owns the policy about what to report and
+//! module owns the file's grammar and its writes, which this module,
+//! `edit-manifest` and the launch share; this module owns the policy about what to report and
 //! what to change.
 
 use std::fs;
@@ -110,7 +113,86 @@ pub fn cmd_refresh(paths: &Paths, args: &[String], token_source: TokenSource) ->
     };
 
     let step = RefreshStep::new(be, exclude)?;
-    refresh_refs(paths, token_source, step, man_path, take_all, mode, prune)
+    refresh_refs(
+        paths,
+        Origin::Refresh,
+        ListingSource::Fetch(token_source),
+        step,
+        RunOptions {
+            man_path,
+            take_all,
+            mode,
+            prune,
+        },
+    )
+}
+
+/// `setup bitwarden`'s write: every secret in `listing`, merged into the
+/// Backend's Refs file when it exists, through the same flow as `refresh`.
+///
+/// The listing is the one Token capture fetched to prove the token live, so
+/// the vault is asked once, and the manager token is already gone. An empty
+/// listing is setup's to explain before calling here.
+pub(crate) fn setup_refs(paths: &Paths, listing: BwListing) -> Result<()> {
+    refresh_refs(
+        paths,
+        Origin::Setup,
+        ListingSource::Given(listing),
+        RefreshStep::Bitwarden,
+        RunOptions {
+            man_path: None,
+            take_all: true,
+            mode: None,
+            prune: false,
+        },
+    )
+}
+
+/// The verb writing the Refs file. One value rather than loose flags because
+/// it settles three things together — the header verb, the verb the
+/// writability remedy names, and whether the fix gate may ever open — and a
+/// setup run that prunes must not be expressible (ADR-0003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Refresh,
+    Setup,
+}
+
+impl Origin {
+    /// The command line, after the launcher, that re-runs this write.
+    fn command(self) -> &'static str {
+        match self {
+            Origin::Refresh => "refresh",
+            Origin::Setup => "setup bitwarden",
+        }
+    }
+
+    /// The writer named in the Refs file header.
+    fn header(self) -> &'static str {
+        match self {
+            Origin::Refresh => "vaulted-agent refresh",
+            Origin::Setup => "vaulted-agent setup",
+        }
+    }
+}
+
+/// What the command line asked of one run. `setup` asks for every secret,
+/// with the write mode settled by the file's presence, and never prunes.
+struct RunOptions {
+    /// An explicit Refs file; `None` is Vault wiring's choice.
+    man_path: Option<String>,
+    take_all: bool,
+    /// `--merge` / `--replace`; `None` settles on whether the file exists.
+    mode: Option<WriteMode>,
+    prune: bool,
+}
+
+/// Where the flow's listing comes from.
+enum ListingSource {
+    /// Load the manager token and ask the vault (`refresh`).
+    Fetch(TokenSource),
+    /// Already fetched by Token capture (`setup bitwarden`).
+    Given(BwListing),
 }
 
 /// Backend for a bare `refresh` (see [`Inventory::refresh_backend`]). An
@@ -220,20 +302,24 @@ impl RefreshStep {
     }
 
     /// List, let the operator choose, and turn the choice into mappings. The
-    /// manager token is loaded and dropped in here, so it is gone before the
-    /// flow writes anything.
+    /// manager token, when one is needed, is loaded and dropped in here, so it
+    /// is gone before the flow writes anything.
     fn gather(
         &self,
         paths: &Paths,
-        token_source: TokenSource,
+        listing: ListingSource,
         path: &Path,
         take_all: bool,
     ) -> Result<Gathered> {
-        match self {
-            RefreshStep::Bitwarden => gather_bitwarden(paths, token_source, take_all),
-            RefreshStep::OnePassword { exclusions } => {
+        match (self, listing) {
+            (RefreshStep::Bitwarden, listing) => gather_bitwarden(paths, listing, take_all),
+            (RefreshStep::OnePassword { exclusions }, ListingSource::Fetch(token_source)) => {
                 gather_onepassword(paths, token_source, path, take_all, exclusions)
             }
+            // Only `setup bitwarden` hands a listing in, and it is a `bws` one.
+            (RefreshStep::OnePassword { .. }, ListingSource::Given(_)) => Err(Error::Message(
+                "refresh: a Bitwarden listing cannot refresh a 1Password Refs file".into(),
+            )),
         }
     }
 
@@ -312,32 +398,43 @@ impl Fetched {
     }
 }
 
-/// One `refresh`, whichever Backend `step` lists from.
+/// One write of a Refs file, whichever Backend `step` lists from and whichever
+/// verb (`origin`) asked for it.
 fn refresh_refs(
     paths: &Paths,
-    token_source: TokenSource,
+    origin: Origin,
+    listing: ListingSource,
     mut step: RefreshStep,
-    man_path: Option<String>,
-    take_all: bool,
-    mode: Option<WriteMode>,
-    prune: bool,
+    opts: RunOptions,
 ) -> Result<()> {
+    let RunOptions {
+        man_path,
+        take_all,
+        mode,
+        prune,
+    } = opts;
     let path = match man_path {
         Some(man) => paths.resolve_manifest(&man),
         None => default_refs_file(paths, step.backend())?,
     };
     let mode = WriteMode::settle(mode, &path);
 
+    // Best effort and before the probe: on a host without the directory the
+    // probe would otherwise report a false "cannot write". A root-owned
+    // directory still fails the probe, with its friendly message.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
     // Checked before any vault work, not at the write. Expanding every
     // 1Password item costs a round trip apiece (~a minute on a 65-item vault);
     // discovering the file is root-owned only at the write meant paying all of
     // that to learn something knowable at the start.
-    ensure_manifest_writable(&path)?;
+    ensure_manifest_writable(&path, origin)?;
     step.read_recorded_exclusions(&path);
 
     // The manager token is loaded and dropped inside this step: nothing after
     // it can reach the vault, and nothing after it holds the token at the write.
-    let gathered = step.gather(paths, token_source, &path, take_all)?;
+    let gathered = step.gather(paths, listing, &path, take_all)?;
 
     // After the listing, because it is what makes a verdict possible; before
     // the write, so a pruned line is gone by the time merge decides what to
@@ -363,31 +460,34 @@ fn refresh_refs(
         // is not a gate, `secrets validate` is (invariant 5), and it already
         // fails on a dangling ref.
         report.render(&path);
-        apply_ref_edits(&path, &report.edits, mode, prune)?;
+        apply_ref_edits(&path, &report.edits, origin, mode, prune)?;
     }
     if let Some(refusal) = gathered.refusal {
         return Err(refusal);
     }
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
     let written = refs::write_refs(
         &path,
         &gathered.mappings,
         mode,
         step.style(),
-        "vaulted-agent refresh",
+        origin.header(),
     )?;
     step.print_summary(&path, mode, gathered.mappings.len(), written);
     Ok(())
 }
 
 /// Bitwarden: pick from the secrets the token can see.
-fn gather_bitwarden(paths: &Paths, token_source: TokenSource, take_all: bool) -> Result<Gathered> {
-    let token = token_source.load(paths, TokenKind::Bws)?;
-    let listing = backend::bws_listing(&token)?;
-    drop(token);
+fn gather_bitwarden(paths: &Paths, listing: ListingSource, take_all: bool) -> Result<Gathered> {
+    let listing = match listing {
+        ListingSource::Fetch(token_source) => {
+            let token = token_source.load(paths, TokenKind::Bws)?;
+            let listing = backend::bws_listing(&token)?;
+            drop(token);
+            listing
+        }
+        ListingSource::Given(listing) => listing,
+    };
     if listing.is_empty() {
         return Err(Error::Message(
             "No secrets visible to this token yet.".into(),
@@ -730,13 +830,16 @@ enum RefFixChoice {
     Ask,
     /// Non-interactive without `--prune`: report and change nothing.
     Report,
+    /// `setup`: report, change nothing, and point at `refresh --prune`.
+    LeaveToRefresh,
 }
 
 /// The decision, kept out of the I/O so it can be stated as a table.
 ///
-/// `setup` never calls this — fixing a manifest is maintenance, and `refresh`
-/// is the maintenance verb (ADR-0003).
+/// For `setup` the answer is never — fixing a manifest is maintenance, and
+/// `refresh` is the maintenance verb (ADR-0003) — whatever the TTY state.
 fn ref_fix_choice(
+    origin: Origin,
     pending: usize,
     prune_flag: bool,
     mode_is_replace: bool,
@@ -744,6 +847,9 @@ fn ref_fix_choice(
 ) -> RefFixChoice {
     if pending == 0 {
         return RefFixChoice::NothingPending;
+    }
+    if origin == Origin::Setup {
+        return RefFixChoice::LeaveToRefresh;
     }
     if mode_is_replace {
         return RefFixChoice::ReplaceRegenerates;
@@ -766,6 +872,7 @@ fn ref_fix_choice(
 fn apply_ref_edits(
     path: &Path,
     edits: &[(String, RefEdit)],
+    origin: Origin,
     mode: WriteMode,
     prune: bool,
 ) -> Result<()> {
@@ -775,6 +882,7 @@ fn apply_ref_edits(
     let what = describe_ref_edits(edits);
 
     let apply = match ref_fix_choice(
+        origin,
         edits.len(),
         prune,
         mode == WriteMode::Replace,
@@ -787,6 +895,10 @@ fn apply_ref_edits(
         }
         RefFixChoice::Report => {
             println!("  Left in place. Re-run with --prune to apply.\n");
+            return Ok(());
+        }
+        RefFixChoice::LeaveToRefresh => {
+            println!("  Left in place. To apply: vaulted-agent refresh --prune\n");
             return Ok(());
         }
         RefFixChoice::Apply => true,
@@ -822,10 +934,10 @@ fn apply_ref_edits(
 
 /// Fail now if the refs file cannot be written later.
 ///
-/// Manifests live in a root-owned directory, so `refresh` run as the operator
-/// or as the service user cannot write one. Nothing about that is visible from
-/// the menu, and the expensive part sits between the two points.
-fn ensure_manifest_writable(path: &Path) -> Result<()> {
+/// Manifests live in a root-owned directory, so `refresh` or `setup` run as the
+/// operator or as the service user cannot write one. Nothing about that is
+/// visible from the menu, and the expensive part sits between the two points.
+fn ensure_manifest_writable(path: &Path, origin: Origin) -> Result<()> {
     let writable = if path.is_file() {
         fs::OpenOptions::new().append(true).open(path).is_ok()
     } else {
@@ -855,9 +967,10 @@ fn ensure_manifest_writable(path: &Path) -> Result<()> {
         "cannot write {} as `{}`.\n  \
          Manifests are root-owned. Re-run as root, by full path — sudo's \
          secure_path will not have the launcher on it:\n    \
-         sudo {exe} refresh",
+         sudo {exe} {}",
         path.display(),
         crate::privilege::current_user(),
+        origin.command(),
     )))
 }
 
@@ -1292,20 +1405,50 @@ mod tests {
 
     #[test]
     fn prune_decision_table() {
+        use Origin::Refresh;
         // --prune removes; a TTY asks; neither reports and changes nothing.
-        assert_eq!(ref_fix_choice(2, true, false, false), RefFixChoice::Apply);
-        assert_eq!(ref_fix_choice(2, false, false, true), RefFixChoice::Ask);
-        assert_eq!(ref_fix_choice(2, false, false, false), RefFixChoice::Report);
+        assert_eq!(
+            ref_fix_choice(Refresh, 2, true, false, false),
+            RefFixChoice::Apply
+        );
+        assert_eq!(
+            ref_fix_choice(Refresh, 2, false, false, true),
+            RefFixChoice::Ask
+        );
+        assert_eq!(
+            ref_fix_choice(Refresh, 2, false, false, false),
+            RefFixChoice::Report
+        );
         // Nothing dangling is nothing to decide.
         assert_eq!(
-            ref_fix_choice(0, true, false, true),
+            ref_fix_choice(Refresh, 0, true, false, true),
             RefFixChoice::NothingPending
         );
         // --replace already prunes by construction, so --replace --prune is a
         // harmless no-op rather than an error.
         assert_eq!(
-            ref_fix_choice(3, true, true, true),
+            ref_fix_choice(Refresh, 3, true, true, true),
             RefFixChoice::ReplaceRegenerates
+        );
+    }
+
+    #[test]
+    fn setup_never_fixes_whatever_the_tty_or_flags() {
+        // Fixing a manifest is maintenance, and `refresh` is the maintenance
+        // verb (ADR-0003): setup reports and points there, never applies.
+        for prune in [false, true] {
+            for replace in [false, true] {
+                for interactive in [false, true] {
+                    assert_eq!(
+                        ref_fix_choice(Origin::Setup, 2, prune, replace, interactive),
+                        RefFixChoice::LeaveToRefresh
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            ref_fix_choice(Origin::Setup, 0, false, false, true),
+            RefFixChoice::NothingPending
         );
     }
 

@@ -292,3 +292,64 @@ fn several_refs_files_on_the_backend_refuse_with_a_setup_hint() {
     assert!(text.contains("one Refs file"), "{text}");
     assert_eq!(read(&seam, "harnesses.d/claude.conf"), DAY_ONE);
 }
+
+const WIRED: &str =
+    "backend = bitwarden\nmanifest = openai.env.refs\ncommand = claude\nworkdir = caller\n";
+
+/// A machine `setup bitwarden` has already wired, whose Refs file holds `refs`.
+fn configured_seam(refs: &str) -> CliSeam {
+    let seam = CliSeam::new();
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "auth_mode = file\ndefault_backend = bitwarden\n",
+    )
+    .unwrap();
+    fs::write(seam.config_dir.join("manifests/openai.env.refs"), refs).unwrap();
+    seam.write_harness("claude", WIRED);
+    let secrets = seam.write_secrets_json("secrets.json", r#"{"OPENAI_API_KEY":"sk-x"}"#);
+    seam.install_fake_bws(&secrets);
+    seam
+}
+
+/// Issue #168: setup writes through the Refresh module, so it prints the
+/// Refresh report too, and never applies its edits (ADR-0003).
+#[test]
+fn setup_bitwarden_reports_a_dangling_ref_keeps_it_and_still_adds_new_mappings() {
+    let seam = configured_seam("GONE_API_KEY=name:GONE_API_KEY\n");
+    let out = run_with_stdin(
+        seam.vaulted_agent()
+            .args(["setup", "bitwarden", "--set-token"]),
+        &format!("{BWS_TOKEN}\n"),
+    );
+    let text = combined(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("Dangling refs in"), "{text}");
+    assert!(text.contains("vaulted-agent refresh --prune"), "{text}");
+    assert!(text.contains("Updated refs file (+1 mapping(s))"), "{text}");
+    let refs = read(&seam, "manifests/openai.env.refs");
+    assert!(refs.contains("GONE_API_KEY=name:GONE_API_KEY"), "{refs}");
+    assert!(refs.contains("OPENAI_API_KEY="), "{refs}");
+}
+
+#[test]
+fn setup_bitwarden_refuses_an_unwritable_refs_file_with_the_setup_remedy() {
+    use std::os::unix::fs::PermissionsExt;
+    const BEFORE: &str = "GONE_API_KEY=name:GONE_API_KEY\n";
+    let seam = configured_seam(BEFORE);
+    let path = seam.config_dir.join("manifests/openai.env.refs");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    if fs::OpenOptions::new().append(true).open(&path).is_ok() {
+        return; // root ignores the mode; nothing to prove here
+    }
+    let out = run_with_stdin(
+        seam.vaulted_agent()
+            .args(["setup", "bitwarden", "--set-token"]),
+        &format!("{BWS_TOKEN}\n"),
+    );
+    let text = combined(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("cannot write"), "{text}");
+    assert!(text.contains("setup bitwarden"), "{text}");
+    assert!(!text.contains(" refresh\n"), "{text}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), BEFORE);
+}

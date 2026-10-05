@@ -23,7 +23,6 @@ use crate::onepassword;
 use crate::preflight::{self, Form, Mode, VaultProbe};
 use crate::refresh;
 pub use crate::refresh::cmd_refresh;
-use crate::refs::{self, Mapping, RefsStyle, WriteMode};
 use crate::secret::ManagerToken;
 use crate::setup_interview::{self, read_tty_line, write_auth_mode, BackendChoice, Interview};
 use crate::token_file;
@@ -623,28 +622,9 @@ fn setup_bitwarden(paths: &Paths, token_source: TokenSource, set_token: bool) ->
         return Ok(());
     }
     println!("{} secret(s) visible.", secrets.len());
-    let man_path = refresh::default_refs_file(paths, Backend::Bitwarden)?;
-    fs::create_dir_all(&paths.manifest_dir).ok();
-    let mode = WriteMode::settle(None, &man_path);
-    let written = refs::write_refs(
-        &man_path,
-        &Mapping::bitwarden_selection(&secrets, None),
-        mode,
-        RefsStyle::Bitwarden,
-        "vaulted-agent setup",
-    )?;
-    if mode == WriteMode::Merge {
-        if written.recovered > 0 {
-            println!(
-                "Split {} mapping(s) that were glued onto one line (va 0.3.0 refresh)",
-                written.recovered
-            );
-        }
-        println!("Merged into {} (+{})", man_path.display(), written.added);
-    } else {
-        println!("Wrote {}", man_path.display());
-    }
-    Ok(())
+    // The same write as `refresh --all`, report included; setup never applies
+    // the report's edits (ADR-0003).
+    refresh::setup_refs(paths, secrets)
 }
 
 fn setup_onepassword(paths: &Paths, token_source: TokenSource, set_token: bool) -> Result<()> {
