@@ -43,6 +43,13 @@ pub enum Backend {
     Plainfile,
 }
 
+/// Executable and official installation guidance for one Backend.
+pub(crate) struct BackendCli {
+    pub executable: &'static str,
+    pub name: &'static str,
+    pub installation_url: &'static str,
+}
+
 impl Backend {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -54,15 +61,31 @@ impl Backend {
         }
     }
 
-    /// Password-manager CLI used to resolve this Backend's Manifests.
-    pub fn required_executable(self) -> Option<&'static str> {
-        match self {
-            Self::Bitwarden => Some("bws"),
-            Self::OnePassword => Some("op"),
-            Self::Pass => Some("pass"),
-            Self::Sops => Some("sops"),
-            Self::Plainfile => None,
-        }
+    /// The CLI prerequisite shared by setup and doctor.
+    pub(crate) fn required_cli(self) -> Option<BackendCli> {
+        Some(match self {
+            Self::Bitwarden => BackendCli {
+                executable: "bws",
+                name: "Bitwarden Secrets Manager CLI",
+                installation_url: "https://bitwarden.com/help/secrets-manager-cli/",
+            },
+            Self::OnePassword => BackendCli {
+                executable: "op",
+                name: "1Password CLI",
+                installation_url: "https://developer.1password.com/docs/cli/get-started/",
+            },
+            Self::Pass => BackendCli {
+                executable: "pass",
+                name: "pass",
+                installation_url: "https://www.passwordstore.org/",
+            },
+            Self::Sops => BackendCli {
+                executable: "sops",
+                name: "sops",
+                installation_url: "https://getsops.io/",
+            },
+            Self::Plainfile => return None,
+        })
     }
 
     pub fn needs_manager_token(self) -> bool {

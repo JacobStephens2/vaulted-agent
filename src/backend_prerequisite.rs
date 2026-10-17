@@ -42,9 +42,10 @@ fn probe(tool: &str, account: Option<&str>) -> bool {
 /// context. The diagnostic is also the installer's wire-only outcome marker:
 /// `Vault setup incomplete:` must remain present when a prerequisite fails.
 pub(crate) fn diagnostic(paths: &Paths, backend: Backend) -> Result<Option<String>> {
-    let Some(tool) = backend.required_executable() else {
+    let Some(cli) = backend.required_cli() else {
         return Ok(None);
     };
+    let tool = cli.executable;
     let current = privilege::current_user();
     let launch = Defaults::load(paths)?
         .service_user
@@ -66,19 +67,8 @@ pub(crate) fn diagnostic(paths: &Paths, backend: Backend) -> Result<Option<Strin
     if contexts.is_empty() {
         return Ok(None);
     }
-    let (name, url) = match backend {
-        Backend::Bitwarden => (
-            "Bitwarden Secrets Manager CLI",
-            "https://bitwarden.com/help/secrets-manager-cli/",
-        ),
-        Backend::OnePassword => (
-            "1Password CLI",
-            "https://developer.1password.com/docs/cli/get-started/",
-        ),
-        Backend::Pass => ("pass", "https://www.passwordstore.org/"),
-        Backend::Sops => ("sops", "https://getsops.io/"),
-        Backend::Plainfile => unreachable!("plainfile has no executable"),
-    };
+    let name = cli.name;
+    let url = cli.installation_url;
     Ok(Some(format!(
         "Vault setup incomplete: {backend} requires executable `{tool}` ({name}).\n  \
          Unavailable in: {}.\n  Install: {url}\n  \

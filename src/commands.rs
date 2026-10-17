@@ -518,7 +518,8 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                 warn += 1;
             }
         }
-        if let Some(tool) = be.required_executable() {
+        if let Some(cli) = be.required_cli() {
+            let tool = cli.executable;
             if !backend_prerequisite::available(tool) {
                 println!("  ERROR: {tool} not on PATH or not executable");
                 issues += 1;

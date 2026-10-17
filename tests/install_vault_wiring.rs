@@ -7,6 +7,7 @@
 //! on PATH so no vault is ever contacted.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -342,18 +343,11 @@ fn missing_backend_cli_finishes_install_without_reading_tokens_in_either_auth_mo
                 }
             }
         }
-        let marker = install.tmp.path().join("token-read");
-        // tr is used only to read --bws-token-file; record any such read.
-        fs::remove_file(install.bin.join("tr")).unwrap();
-        install.executable(
-            "tr",
-            &format!(
-                "#!/bin/sh\n: > '{}'\nexec /usr/bin/tr \"$@\"\n",
-                marker.display()
-            ),
-        );
-        let token_file = install.tmp.path().join("token");
-        fs::write(&token_file, BWS_TOKEN).unwrap();
+        // The token source is a real pipe. Retain a reader to verify that the
+        // installer leaves its bytes untouched, independent of how it reads.
+        let (mut token_input, mut token_writer) = std::io::pipe().unwrap();
+        token_writer.write_all(BWS_TOKEN.as_bytes()).unwrap();
+        drop(token_writer);
         let out = install
             .installer(&[
                 "--backend",
@@ -361,16 +355,19 @@ fn missing_backend_cli_finishes_install_without_reading_tokens_in_either_auth_mo
                 "--auth-mode",
                 auth,
                 "--bws-token-file",
-                token_file.to_str().unwrap(),
+                "/dev/stdin",
                 "--no-setup",
             ])
             .env("PATH", &install.bin)
+            .stdin(token_input.try_clone().unwrap())
             .output()
             .unwrap();
         let all = assert_ok(&out);
-        assert!(
-            !marker.exists(),
-            "installer read token despite missing bws:\n{all}"
+        let mut unread = String::new();
+        token_input.read_to_string(&mut unread).unwrap();
+        assert_eq!(
+            unread, BWS_TOKEN,
+            "installer read the token despite missing bws:\n{all}"
         );
         assert!(
             all.contains("Vault setup incomplete") && all.contains("bws"),
