@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod backend;
+mod backend_prerequisite;
 pub mod bitwarden;
 pub mod commands;
 pub mod conf_file;

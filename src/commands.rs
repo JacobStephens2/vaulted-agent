@@ -6,10 +6,10 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::auth::{self, TokenKind, TokenSource};
 use crate::backend;
+use crate::backend_prerequisite;
 use crate::bitwarden::BwListing;
 use crate::config::{
     env_blind_agent_reason, list_harness_names, parse_dotenv_keys, AuthMode, Backend, Harness,
@@ -346,18 +346,10 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
         None => println!("checked as: {running_as} (no service_user set, same as a launch)"),
     }
 
-    // Redirect stdout so `command -v` path noise never pollutes the report.
-    let have = |bin: &str| {
-        Command::new("sh")
-            .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
-    let have_bws = have("bws");
-    let have_op = have("op");
-    let have_sops = have("sops");
-    let have_pass = have("pass");
+    let have_bws = backend_prerequisite::available("bws");
+    let have_op = backend_prerequisite::available("op");
+    let have_sops = backend_prerequisite::available("sops");
+    let have_pass = backend_prerequisite::available("pass");
     println!(
         "tools: bws={} op={} sops={} pass={}",
         yn(have_bws),
@@ -526,28 +518,11 @@ pub fn cmd_doctor(paths: &Paths) -> Result<()> {
                 warn += 1;
             }
         }
-        match be {
-            Backend::Bitwarden if !have_bws => {
-                println!("  ERROR: bws not on PATH");
+        if let Some(tool) = be.required_executable() {
+            if !backend_prerequisite::available(tool) {
+                println!("  ERROR: {tool} not on PATH or not executable");
                 issues += 1;
             }
-            Backend::OnePassword if !have_op => {
-                println!("  ERROR: op not on PATH");
-                issues += 1;
-            }
-            Backend::Sops if !have_sops => {
-                println!("  ERROR: sops not on PATH");
-                issues += 1;
-            }
-            Backend::Pass if !have_pass => {
-                println!("  ERROR: pass not on PATH");
-                issues += 1;
-            }
-            Backend::Plainfile
-            | Backend::Bitwarden
-            | Backend::OnePassword
-            | Backend::Sops
-            | Backend::Pass => {}
         }
         if let Some(msg) =
             workdir_warning(service_user.as_deref(), h.workdir.as_deref(), name, &caller)
@@ -652,10 +627,16 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
     let (set_token, answers, backend) = match setup_interview::interview(
         args,
         &paths.config_dir,
-        || setup_interview::Context::from_runtime(paths),
+        |infer_backend| setup_interview::Context::from_runtime(paths, infer_backend),
         &mut read_tty_line,
     )? {
-        Interview::WireOnly(be) => return wire(paths, be),
+        Interview::WireOnly(be) => {
+            wire(paths, be)?;
+            if let Some(message) = backend_prerequisite::diagnostic(paths, be)? {
+                eprintln!("WARNING: {message}");
+            }
+            return Ok(());
+        }
         Interview::Setup {
             set_token,
             answers,
@@ -703,6 +684,9 @@ pub fn cmd_setup(paths: &Paths, args: &[String], token_source: TokenSource) -> R
     // Vault wiring first: it needs no token, so a missing or rejected token
     // still leaves the machine wired (installer order).
     wire(paths, be)?;
+    if let Some(message) = backend_prerequisite::diagnostic(paths, be)? {
+        return Err(Error::Message(message));
+    }
     match be {
         Backend::Bitwarden => setup_bitwarden(paths, token_source, set_token),
         Backend::OnePassword => setup_onepassword(paths, token_source, set_token),

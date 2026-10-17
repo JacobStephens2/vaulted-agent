@@ -141,7 +141,7 @@ pub(crate) struct Context {
 }
 
 impl Context {
-    pub(crate) fn from_runtime(paths: &Paths) -> Result<Self> {
+    pub(crate) fn from_runtime(paths: &Paths, infer_backend: bool) -> Result<Self> {
         let defaults = Defaults::load(paths)?;
         let doors = |kind| DoorFacts::from_runtime(paths, kind);
         Ok(Self {
@@ -149,8 +149,11 @@ impl Context {
             auth_mode: defaults.auth_mode,
             service_user: defaults.service_user,
             me: privilege::current_user(),
-            auto_backend: auth::auto_pick(doors(TokenKind::Bws), doors(TokenKind::Op))
-                .map(TokenKind::backend),
+            auto_backend: if infer_backend {
+                auth::auto_pick(doors(TokenKind::Bws), doors(TokenKind::Op)).map(TokenKind::backend)
+            } else {
+                None
+            },
         })
     }
 }
@@ -203,7 +206,7 @@ pub(crate) enum Interview {
 pub(crate) fn interview(
     args: &[String],
     config_dir: &Path,
-    context: impl FnOnce() -> Result<Context>,
+    context: impl FnOnce(bool) -> Result<Context>,
     read: &mut LineReader,
 ) -> Result<Interview> {
     let command = Command::parse(args)?;
@@ -215,7 +218,7 @@ pub(crate) fn interview(
         let be = command.backend.expect("--wire-only names a backend");
         return Ok(Interview::WireOnly(be));
     }
-    let ctx = context()?;
+    let ctx = context(command.backend.is_none())?;
 
     // Nothing named or inferred: a piped token has no backend to go with,
     // and guessing would store a credential against the wrong vault.
@@ -560,7 +563,7 @@ mod tests {
         interview(
             &args(argv),
             Path::new("/cfg"),
-            || Ok(ctx),
+            |_| Ok(ctx),
             &mut scripted(lines),
         )
     }
@@ -580,7 +583,7 @@ mod tests {
             let err = interview(
                 &args(argv),
                 Path::new("/cfg"),
-                || panic!("context was read for {argv:?}"),
+                |_| panic!("context was read for {argv:?}"),
                 &mut never(),
             )
             .unwrap_err();
@@ -615,7 +618,7 @@ mod tests {
         let got = interview(
             &args(&["bws", "--wire-only"]),
             Path::new("/cfg"),
-            || panic!("context was read"),
+            |_| panic!("context was read"),
             &mut never(),
         )
         .unwrap();
@@ -627,7 +630,7 @@ mod tests {
         let err = interview(
             &args(&["--set-token"]),
             Path::new("/cfg"),
-            || Ok(context()),
+            |_| Ok(context()),
             &mut never(),
         )
         .unwrap_err();
@@ -702,7 +705,7 @@ mod tests {
             auto_backend: Some(Backend::Bitwarden),
             ..context()
         };
-        let got = interview(&[], Path::new("/cfg"), || Ok(ctx.clone()), &mut never()).unwrap();
+        let got = interview(&[], Path::new("/cfg"), |_| Ok(ctx.clone()), &mut never()).unwrap();
         assert_eq!(
             got,
             Interview::Setup {
@@ -715,7 +718,7 @@ mod tests {
             auto_backend: None,
             ..ctx
         };
-        let got = interview(&[], Path::new("/cfg"), || Ok(ctx), &mut never()).unwrap();
+        let got = interview(&[], Path::new("/cfg"), |_| Ok(ctx), &mut never()).unwrap();
         assert!(matches!(
             got,
             Interview::Setup {

@@ -54,6 +54,17 @@ impl Backend {
         }
     }
 
+    /// Password-manager CLI used to resolve this Backend's Manifests.
+    pub fn required_executable(self) -> Option<&'static str> {
+        match self {
+            Self::Bitwarden => Some("bws"),
+            Self::OnePassword => Some("op"),
+            Self::Pass => Some("pass"),
+            Self::Sops => Some("sops"),
+            Self::Plainfile => None,
+        }
+    }
+
     pub fn needs_manager_token(self) -> bool {
         matches!(self, Self::Bitwarden | Self::OnePassword)
     }

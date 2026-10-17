@@ -323,3 +323,65 @@ fn dry_run_over_prompt_mode_stores_no_token() {
     assert!(!all.contains("--set-token"), "{all}");
     assert!(all.contains("auth_mode=prompt"), "{all}");
 }
+
+#[test]
+fn missing_backend_cli_finishes_install_without_reading_tokens_in_either_auth_mode() {
+    for auth in ["file", "prompt"] {
+        let install = Install::new();
+        // Build a controlled PATH containing the installer's OS utilities,
+        // excluding every vault CLI regardless of what's installed on the host.
+        for dir in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let name = entry.file_name();
+                if ["bws", "op", "pass", "sops"].iter().any(|n| name == *n) {
+                    continue;
+                }
+                let dest = install.bin.join(name);
+                if !dest.exists() {
+                    std::os::unix::fs::symlink(entry.path(), dest).unwrap();
+                }
+            }
+        }
+        let marker = install.tmp.path().join("token-read");
+        // tr is used only to read --bws-token-file; record any such read.
+        fs::remove_file(install.bin.join("tr")).unwrap();
+        install.executable(
+            "tr",
+            &format!(
+                "#!/bin/sh\n: > '{}'\nexec /usr/bin/tr \"$@\"\n",
+                marker.display()
+            ),
+        );
+        let token_file = install.tmp.path().join("token");
+        fs::write(&token_file, BWS_TOKEN).unwrap();
+        let out = install
+            .installer(&[
+                "--backend",
+                "bitwarden",
+                "--auth-mode",
+                auth,
+                "--bws-token-file",
+                token_file.to_str().unwrap(),
+                "--no-setup",
+            ])
+            .env("PATH", &install.bin)
+            .output()
+            .unwrap();
+        let all = assert_ok(&out);
+        assert!(
+            !marker.exists(),
+            "installer read token despite missing bws:\n{all}"
+        );
+        assert!(
+            all.contains("Vault setup incomplete") && all.contains("bws"),
+            "{all}"
+        );
+        assert!(
+            all.contains("Launcher installation complete; vault setup incomplete"),
+            "{all}"
+        );
+        assert!(!all.contains("backend ready"), "{all}");
+        assert!(!install.config.join("bws.env").exists(), "{all}");
+        assert_wired(&install, "bitwarden", "openai.env.refs");
+    }
+}
