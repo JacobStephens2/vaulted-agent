@@ -104,6 +104,9 @@ fn an_unreadable_bitwarden_token_file_still_picks_bitwarden() {
         return;
     }
     let seam = day_one_seam();
+    // Reach Token capture without depending on a host-installed bws passing
+    // setup's executable prerequisite check.
+    seam.write_executable("bws", REJECTING);
     let bws = seam.config_dir.join("bws.env");
     fs::write(&bws, "BWS_ACCESS_TOKEN=0.x:y\n").unwrap();
     fs::set_permissions(&bws, fs::Permissions::from_mode(0o000)).unwrap();

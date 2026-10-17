@@ -195,6 +195,7 @@ fn wire_only_without_a_backend_is_refused() {
 #[test]
 fn no_token_and_no_terminal_still_wires_then_fails_with_the_set_token_hint() {
     let seam = day_one_seam();
+    seam.write_executable("bws", "#!/bin/sh\nexit 1\n");
     let out = seam
         .vaulted_agent()
         .args(["setup", "bitwarden"])

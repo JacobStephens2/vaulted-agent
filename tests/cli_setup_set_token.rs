@@ -105,6 +105,7 @@ fn set_token_strips_a_leading_key_prefix() {
 fn set_token_rejects_empty_stdin() {
     // Nobody pipes by accident: empty is an error here, not a skip.
     let seam = file_mode_seam("file");
+    seam.write_executable("bws", "#!/bin/sh\nexit 1\n");
     let out = run_with_stdin(
         seam.vaulted_agent()
             .args(["setup", "bitwarden", "--set-token"]),
@@ -190,6 +191,7 @@ fn an_invalid_token_never_lands_on_disk() {
 #[test]
 fn set_token_is_refused_in_prompt_mode() {
     let seam = file_mode_seam("prompt");
+    seam.write_executable("bws", "#!/bin/sh\nexit 1\n");
     let out = run_with_stdin(
         seam.vaulted_agent()
             .env("VAULTED_AGENT_AUTH_MODE", "prompt")
@@ -210,6 +212,7 @@ fn no_terminal_and_no_token_points_at_set_token() {
     // `.output()` gives the child a null stdin, so there is no interactive
     // paste available — the same state as an agent-to-agent or CI invocation.
     let seam = file_mode_seam("file");
+    seam.write_executable("bws", "#!/bin/sh\nexit 1\n");
     let out = seam
         .vaulted_agent()
         .args(["setup", "bitwarden"])
@@ -230,6 +233,7 @@ fn capture_never_overwrites_an_unreadable_token_file() {
         return;
     }
     let seam = file_mode_seam("file");
+    seam.write_executable("bws", "#!/bin/sh\nexit 1\n");
     let path = seam.config_dir.join("bws.env");
     fs::write(&path, "BWS_ACCESS_TOKEN=already-working\n").unwrap();
     let mut perms = fs::metadata(&path).unwrap().permissions();
