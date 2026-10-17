@@ -108,6 +108,7 @@ fn doctor_says_a_token_file_holds_no_value_for_an_empty_key() {
 #[test]
 fn setup_without_set_token_refuses_a_malformed_token_file() {
     let seam = CliSeam::new();
+    seam.write_executable("bws", "#!/bin/sh\nexit 1\n");
     fs::write(seam.config_dir.join("defaults.conf"), "auth_mode = file\n").unwrap();
     let path = seam.config_dir.join("bws.env");
     fs::write(&path, "stray line\n").unwrap();

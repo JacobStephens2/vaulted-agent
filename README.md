@@ -60,6 +60,16 @@ setup then maps your secrets into that refs file (env var → secret *reference*
 only). `va setup <backend> --wire-only` does the wiring and stops before the
 token. `sops` records `default_backend` only.
 
+Setup checks the selected Backend's executable (`bws` for Bitwarden Secrets
+Manager, `op` for 1Password, `pass`, or `sops`) before Token capture or live
+vault work. Full setup (including `--set-token`) fails if the tool is missing
+or not executable. Checks cover setup's PATH and the configured launch
+account's sudo PATH; a denied account check is reported as incomplete too.
+Install the named CLI using the official link in the diagnostic, make it
+available to both accounts, and rerun `va setup <backend>`. `--wire-only`
+still completes wiring and returns success, with an incomplete-vault warning.
+No CLI is required for skipping vault setup or launching plainfile Harnesses.
+
 ### 3. Launch
 
 ```bash
@@ -341,7 +351,11 @@ as `va setup <backend>`), and, with `auth_mode = file`, the Manager token piped
 to `vaulted-agent setup <backend> --set-token`. Install-time tokens are
 therefore **verified against the vault before they are stored**; a rejected
 token does not stop the install, which says the token was not stored and shows
-the launcher's reason. Skipping the backend leaves `default_backend` as it is.
+the launcher's reason. If the selected Backend's CLI is unavailable, installation
+still finishes, skips reading/requesting/verifying a Manager token in either
+Auth mode, and repeats the incomplete-vault warning in its final summary.
+Launcher installation and Vault wiring alone do not make credentials ready.
+Skipping the backend leaves `default_backend` as it is.
 On a fresh Bitwarden install the starter refs file is `openai.env.refs` (it
 used to be `bitwarden.refs`; hosts that have one keep using it). Useful flags:
 

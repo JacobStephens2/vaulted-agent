@@ -587,6 +587,7 @@ apply_auth_mode
 if [[ -n "$OP_ENV" && "$BACKEND_CHOICE" != onepassword ]]; then
   printf '  --op-env %s ignored: it is a token source for --backend onepassword only\n' "$OP_ENV"
 fi
+VAULT_SETUP_INCOMPLETE=""
 case "$BACKEND_CHOICE" in
   skip)
     printf '\nVault setup skipped: default_backend and Harnesses left as they are.\n'
@@ -595,22 +596,34 @@ case "$BACKEND_CHOICE" in
     ;;
   *)
     SETUP_BACKEND="$BACKEND_CHOICE"
-    run_launcher setup "$BACKEND_CHOICE" --wire-only \
-      || die "vault wiring failed (message above). Retry: sudo vaulted-agent setup $BACKEND_CHOICE --wire-only"
-    case "$BACKEND_CHOICE" in
-      bitwarden|onepassword) store_manager_token "$BACKEND_CHOICE" ;;
-      pass)
-        printf '  pass: ensure the service account can run `pass show` (GPG key).\n'
-        printf '  auth_mode=%s is recorded; pass uses GPG, not a pasteable vault token file.\n' \
-          "$AUTH_MODE_CHOICE"
-        ;;
-      sops)
-        printf '  sops: place an age identity at %s/age.key (0600); give each Harness that\n' "$CONFIG"
-        printf '  should use it backend = sops and a sops-encrypted manifest of its own.\n'
-        printf '  auth_mode=%s is recorded; sops uses age.key, not a pasteable vault token.\n' \
-          "$AUTH_MODE_CHOICE"
-        ;;
+    # The Launcher owns prerequisite checks. Wire-only succeeds even when a
+    # CLI is missing; retain its diagnostic as the token-capture gate and final
+    # reminder. Do not read a token source until that gate passes.
+    if wiring_report="$(run_launcher setup "$BACKEND_CHOICE" --wire-only 2>&1)"; then
+      printf '%s\n' "$wiring_report"
+    else
+      printf '%s\n' "$wiring_report" >&2
+      die "vault wiring failed (message above). Retry: sudo vaulted-agent setup $BACKEND_CHOICE --wire-only"
+    fi
+    case "$wiring_report" in
+      *'Vault setup incomplete:'*) VAULT_SETUP_INCOMPLETE="$wiring_report" ;;
     esac
+    if [[ -z "$VAULT_SETUP_INCOMPLETE" ]]; then
+      case "$BACKEND_CHOICE" in
+        bitwarden|onepassword) store_manager_token "$BACKEND_CHOICE" ;;
+        pass)
+          printf '  pass: ensure the service account can run `pass show` (GPG key).\n'
+          printf '  auth_mode=%s is recorded; pass uses GPG, not a pasteable vault token file.\n' \
+            "$AUTH_MODE_CHOICE"
+          ;;
+        sops)
+          printf '  sops: place an age identity at %s/age.key (0600); give each Harness that\n' "$CONFIG"
+          printf '  should use it backend = sops and a sops-encrypted manifest of its own.\n'
+          printf '  auth_mode=%s is recorded; sops uses age.key, not a pasteable vault token.\n' \
+            "$AUTH_MODE_CHOICE"
+          ;;
+      esac
+    fi
     ;;
 esac
 
@@ -772,3 +785,9 @@ printf '    (or: sudo -u %s %s/vaulted-agent)\n' "$SERVICE_USER" "$PREFIX"
 printf '\nTo remove this install later:\n'
 printf '  sudo vaulted-agent uninstall\n'
 printf '  sudo vaulted-agent uninstall --purge   # also remove config\n'
+
+if [[ -n "$VAULT_SETUP_INCOMPLETE" ]]; then
+  printf '\nLauncher installation complete; vault setup incomplete.\n'
+  printf '  Token capture/verification skipped; credentials are not ready.\n'
+  printf '%s\n' "$VAULT_SETUP_INCOMPLETE"
+fi

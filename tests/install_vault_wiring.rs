@@ -7,6 +7,7 @@
 //! on PATH so no vault is ever contacted.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -322,4 +323,62 @@ fn dry_run_over_prompt_mode_stores_no_token() {
     assert!(all.contains("setup bitwarden --wire-only"), "{all}");
     assert!(!all.contains("--set-token"), "{all}");
     assert!(all.contains("auth_mode=prompt"), "{all}");
+}
+
+#[test]
+fn missing_backend_cli_finishes_install_without_reading_tokens_in_either_auth_mode() {
+    for auth in ["file", "prompt"] {
+        let install = Install::new();
+        // Build a controlled PATH containing the installer's OS utilities,
+        // excluding every vault CLI regardless of what's installed on the host.
+        for dir in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let name = entry.file_name();
+                if ["bws", "op", "pass", "sops"].iter().any(|n| name == *n) {
+                    continue;
+                }
+                let dest = install.bin.join(name);
+                if !dest.exists() {
+                    std::os::unix::fs::symlink(entry.path(), dest).unwrap();
+                }
+            }
+        }
+        // The token source is a real pipe. Retain a reader to verify that the
+        // installer leaves its bytes untouched, independent of how it reads.
+        let (mut token_input, mut token_writer) = std::io::pipe().unwrap();
+        token_writer.write_all(BWS_TOKEN.as_bytes()).unwrap();
+        drop(token_writer);
+        let out = install
+            .installer(&[
+                "--backend",
+                "bitwarden",
+                "--auth-mode",
+                auth,
+                "--bws-token-file",
+                "/dev/stdin",
+                "--no-setup",
+            ])
+            .env("PATH", &install.bin)
+            .stdin(token_input.try_clone().unwrap())
+            .output()
+            .unwrap();
+        let all = assert_ok(&out);
+        let mut unread = String::new();
+        token_input.read_to_string(&mut unread).unwrap();
+        assert_eq!(
+            unread, BWS_TOKEN,
+            "installer read the token despite missing bws:\n{all}"
+        );
+        assert!(
+            all.contains("Vault setup incomplete") && all.contains("bws"),
+            "{all}"
+        );
+        assert!(
+            all.contains("Launcher installation complete; vault setup incomplete"),
+            "{all}"
+        );
+        assert!(!all.contains("backend ready"), "{all}");
+        assert!(!install.config.join("bws.env").exists(), "{all}");
+        assert_wired(&install, "bitwarden", "openai.env.refs");
+    }
 }
