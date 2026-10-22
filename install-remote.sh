@@ -49,7 +49,7 @@ DEFAULT_VERSION="v0.4.26"
 # The tag's own copy of this file cannot know its archive's digest, so prepare
 # empties it and deploy-site records it once the tag exists. Empty refuses the
 # default archive. Caller-supplied versions are not checked against it.
-DEFAULT_ARCHIVE_SHA256=""
+DEFAULT_ARCHIVE_SHA256="51f43756cbb7bbad6f0eb74c74f0f2ea22dea6928e89147fa405a04ff36c4ad7"
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"
