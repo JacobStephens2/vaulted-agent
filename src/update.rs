@@ -161,11 +161,11 @@ pub fn cmd_update(args: &[String]) -> Result<()> {
     let work = work_dir()?;
     let extracted = match env::var_os("VAULTED_AGENT_UPDATE_ASSET") {
         Some(p) => {
-            let bin = extract_tarball(Path::new(&p), &work)?;
+            let bin = extract_tarball(Path::new(&p), work.path())?;
             prepare_bin(&bin)?;
             bin
         }
-        None => download_asset(&tag, &work)?,
+        None => download_asset(&tag, work.path())?,
     };
 
     if opts.dry_run {
@@ -175,12 +175,13 @@ pub fn cmd_update(args: &[String]) -> Result<()> {
             dest.display()
         );
         sync_with_target(&extracted, true)?;
-        let _ = fs::remove_dir_all(&work);
         return Ok(());
     }
 
     install_over(&extracted, &dest)?;
-    let _ = fs::remove_dir_all(&work);
+    // Harness sync runs the installed binary, not the download. Remove the
+    // download first; dry-run sync still needs the extracted file.
+    drop(work);
     println!("updated {}", dest.display());
     sync_with_target(&dest, false).map_err(|e| {
         Error::Message(format!(
@@ -266,12 +267,24 @@ fn resolve_dest() -> Result<PathBuf> {
     Ok(fs::canonicalize(&exe).unwrap_or(exe))
 }
 
-fn work_dir() -> Result<PathBuf> {
-    let dir = env::temp_dir().join(format!("vaulted-agent-update-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).map_err(|e| Error::Io {
-        path: dir.clone(),
-        source: e,
+/// Private directory for one update's download: created exclusively, with an
+/// unpredictable name and mode 0700, the same contract as `mktemp -d` in
+/// install-remote.sh. `mkdir` masks the requested mode with the umask, so the
+/// mode is set again. 0700 grants no group or other access.
+fn work_dir() -> Result<tempfile::TempDir> {
+    let dir = tempfile::Builder::new()
+        .prefix("vaulted-agent-update-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .map_err(|source| Error::Io {
+            path: env::temp_dir(),
+            source,
+        })?;
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).map_err(|source| {
+        Error::Io {
+            path: dir.path().to_path_buf(),
+            source,
+        }
     })?;
     Ok(dir)
 }
@@ -625,6 +638,57 @@ mod tests {
     fn parse_latest_tag_reads_tag_name() {
         let json = r#"{"tag_name":"v0.4.20","draft":false}"#;
         assert_eq!(parse_latest_tag(json).unwrap(), "v0.4.20");
+    }
+
+    #[test]
+    fn download_directory_is_exclusive_private_and_unpredictable() {
+        let planted = env::temp_dir().join(format!("vaulted-agent-update-{}", std::process::id()));
+        let _guard = PlantedDir::reset(&planted);
+        fs::create_dir(&planted).unwrap();
+        fs::write(planted.join("pwned"), b"x").unwrap();
+        // No write bit: remove_dir_all cannot clear a planted directory, which
+        // is the sticky-/tmp case the predictable name loses.
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let dir = work_dir().unwrap();
+        let path = dir.path();
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "download directory must be mode 0700");
+        assert_ne!(
+            path,
+            planted.as_path(),
+            "download directory must not reuse a planted predictable path"
+        );
+        assert!(
+            !path.join("pwned").exists(),
+            "download directory must be a new directory, not the planted one"
+        );
+        assert!(
+            planted.join("pwned").is_file(),
+            "creating the download directory must not clobber the planted path"
+        );
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_ne!(name, format!("vaulted-agent-update-{}", std::process::id()));
+    }
+
+    /// Restores write permission so the planted path can be removed.
+    struct PlantedDir(PathBuf);
+
+    impl PlantedDir {
+        fn reset(path: &Path) -> Self {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+            let _ = fs::remove_dir_all(path);
+            let _ = fs::remove_file(path);
+            Self(path.to_path_buf())
+        }
+    }
+
+    impl Drop for PlantedDir {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            let _ = fs::remove_dir_all(&self.0);
+            let _ = fs::remove_file(&self.0);
+        }
     }
 
     #[test]

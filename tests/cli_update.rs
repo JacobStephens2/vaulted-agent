@@ -130,6 +130,74 @@ fn update_replaces_dest_from_a_local_tarball() {
 }
 
 #[test]
+fn update_download_directory_is_private_and_unpredictable() {
+    let seam = CliSeam::new();
+    let tmp = seam.root.join("download-tmp");
+    fs::create_dir(&tmp).unwrap();
+    let record = seam.root.join("download-dir.txt");
+    let dest = seam.root.join("installed/vaulted-agent");
+    fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    write_executable(&dest, "#!/bin/sh\necho vaulted-agent 0.0.1\n");
+
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+if [ "$1" = version ]; then
+  dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+  mode=$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%OLp' "$dir")
+  name=$(basename "$dir")
+  printf '%s\n%s\n%s\n%s\n' "$mode" "$name" "$PPID" "$dir" > '{record}'
+fi
+exit 0
+"#,
+        record = record.display()
+    );
+    let tgz = pack_asset(&seam.root, "vaulted-agent", &script);
+
+    let out = seam
+        .vaulted_agent()
+        .arg("update")
+        .arg("v9.9.9")
+        .env("TMPDIR", &tmp)
+        .env("VAULTED_AGENT_UPDATE_DEST", &dest)
+        .env("VAULTED_AGENT_UPDATE_ASSET", &tgz)
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let recorded = fs::read_to_string(&record).expect("download directory record");
+    let mut lines = recorded.lines();
+    let mode = lines.next().expect("mode");
+    let name = lines.next().expect("name");
+    let ppid = lines.next().expect("ppid");
+    let dir = lines.next().expect("dir");
+    assert_eq!(
+        mode, "700",
+        "download directory must be mode 0700\n{recorded}"
+    );
+    assert_ne!(
+        name,
+        format!("vaulted-agent-update-{ppid}"),
+        "download directory must not be named from the process id\n{recorded}"
+    );
+    let tmp = fs::canonicalize(&tmp).unwrap();
+    let parent = fs::canonicalize(Path::new(dir).parent().unwrap()).unwrap();
+    assert_eq!(
+        parent, tmp,
+        "download directory must be created under TMPDIR"
+    );
+    assert!(
+        !Path::new(dir).exists(),
+        "download directory must not outlive va update"
+    );
+}
+
+#[test]
 fn update_dry_run_does_not_replace_dest() {
     let seam = CliSeam::new();
     let dest = seam.root.join("installed/vaulted-agent");
