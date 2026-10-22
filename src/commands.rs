@@ -748,11 +748,10 @@ fn run_refusal(service_user: Option<&str>, allow_run: bool) -> Option<String> {
 /// Why a Manifest override on this Harness is refused, or None when it may proceed.
 ///
 /// The override does not change the Backend. Once a Service user is set and
-/// `run` is refused, a plainfile Manifest is the same hole `run` is closed
-/// for: the caller names a file of secret values, and that file would be read
-/// as the Service user. A vault Backend's override only selects refs that
-/// account's token can resolve, so it is left alone. Callers must refuse
-/// before the Manifest is resolved.
+/// `run` is refused, plainfile is refused before the file is read: the caller
+/// names a file of secret values, and that file would be read as the Service
+/// user. Every other Backend, including pass and sops, is left as it was.
+/// Callers must refuse before the Manifest is resolved.
 fn plainfile_override_refusal(
     backend: Backend,
     service_user: Option<&str>,

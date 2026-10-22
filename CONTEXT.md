@@ -54,7 +54,7 @@ Single-context glossary for agents and architecture work. Prefer these terms ove
 | **Service-user re-exec** | When `service_user` differs from the caller, plan a sudo hop (original argv preserved for sudoers); pure decision, thin adapter. |
 | **Caller cwd** | Invocation directory preserved across sudo re-exec (`VAULTED_AGENT_CALLER_CWD`) for `workdir = caller`. |
 | **Workdir** | Where a Harness's agent starts: the Caller cwd when `workdir` is `caller`, empty or unset, otherwise a fixed path with a leading `$HOME` / `${HOME}` expanded. The launch preflight and `doctor` judge whether the launching account can enter it through one module, which also owns the traverse-only `setfacl` remedy that `setup` prints (`src/workdir.rs`). |
-| **Manifest override** | Launcher flag `-m` / `--manifest` before the harness name: this launch uses another refs file (replace, no merge). Refused under conductor links. |
+| **Manifest override** | Launcher flag `-m` / `--manifest` before the harness name: this launch uses another Manifest (replace, no merge). The override does not change the Backend. Refused under conductor links. Also refused on a plainfile Harness when a Service user is set and `run` is refused, before that Manifest is resolved. A vault-backend Harness still accepts it. |
 | **Default section label** | 1Password’s unnamed custom-field section (`add more`); must not appear in generated env **names** (still may appear inside `op://` for inject). |
 
 ## Operator surface (acceptance seam)
