@@ -2,6 +2,23 @@ mod common;
 
 use common::CliSeam;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+
+fn is_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(1)
+        == 0
+}
 
 fn write_plain_harness(seam: &CliSeam, name: &str, manifest: &str, command: &str) {
     fs::write(
@@ -317,6 +334,157 @@ fn manifest_override_swaps_which_secrets_reach_the_agent() {
     // Announced, so a scrollback search can find which launch was overridden.
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("narrow.env"), "{err}");
+}
+
+#[test]
+fn plainfile_manifest_override_is_refused_before_resolve_when_run_is_refused() {
+    // A Service user with `run` refused (the default: no `allow_run = yes`)
+    // means a grant of this launcher must not become a way to name any file
+    // that account can read. The override does not change the Backend, so a
+    // plainfile Harness still treats the named file as secret values. Reject
+    // it before that file is resolved, and do not launch.
+    let seam = CliSeam::new();
+    seam.install_stub_agent("agent");
+    fs::write(
+        seam.config_dir.join("manifests/wide.env"),
+        "APP_DB_PASS=configured\n",
+    )
+    .unwrap();
+    let override_path = seam.config_dir.join("manifests/narrow.env");
+    fs::write(&override_path, "LEAKED=from-override\n").unwrap();
+    // Owner can still stat this. A resolve has to read it, and that fails
+    // for anyone but root. The refusal must not be that read error.
+    fs::set_permissions(&override_path, fs::Permissions::from_mode(0o000)).unwrap();
+    write_plain_harness(&seam, "claude", "wide.env", "agent");
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "service_user = conductor\n",
+    )
+    .unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .args(["-m", "narrow.env", "claude"])
+        .output()
+        .expect("launch");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("-m is refused on plainfile harness 'claude'"),
+        "{err}"
+    );
+    assert!(err.contains("service_user=conductor"), "{err}");
+    assert!(err.contains("run is disabled"), "{err}");
+    assert!(err.contains("does not change the backend"), "{err}");
+    assert!(
+        !err.contains("launching with manifest"),
+        "override was accepted: {err}"
+    );
+    assert!(!stdout.contains("from-override"), "{stdout}");
+    assert!(!err.contains("from-override"), "{err}");
+    if !is_root() {
+        assert!(
+            !err.contains("Permission denied"),
+            "override was resolved: {err}"
+        );
+    }
+    assert!(
+        !seam.work_dir.join("agent.record").exists(),
+        "harness launched: {err}"
+    );
+}
+
+#[test]
+fn plainfile_manifest_override_still_launches_when_run_is_allowed() {
+    // `allow_run = yes` is the explicit grant that restores `run`. The same
+    // grant restores a plainfile Manifest override: the caller can already
+    // name any file through `run -m`.
+    let seam = CliSeam::new();
+    seam.install_stub_agent("agent");
+    fs::write(
+        seam.config_dir.join("manifests/wide.env"),
+        "APP_DB_PASS=configured\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("manifests/narrow.env"),
+        "REPORTING_DB_PASS=readonly\n",
+    )
+    .unwrap();
+    write_plain_harness(&seam, "claude", "wide.env", "agent");
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "service_user = conductor\nallow_run = yes\n",
+    )
+    .unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .args(["-m", "narrow.env", "claude"])
+        .output()
+        .expect("launch");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rec = seam.read_stub_record("agent");
+    assert!(rec.contains("ENV REPORTING_DB_PASS=readonly"), "{rec}");
+    assert!(!rec.contains("ENV APP_DB_PASS"), "{rec}");
+}
+
+#[test]
+fn vault_backend_manifest_override_still_resolves_when_run_is_refused() {
+    // The override does not change the Backend. A Bitwarden Harness still
+    // takes `-m` while `run` is refused: the named file is refs, resolved
+    // with the Service user's token, not a file of secret values.
+    let seam = CliSeam::new();
+    seam.install_stub_agent("agent");
+    fs::write(
+        seam.config_dir.join("manifests/wide.env.refs"),
+        "OPENAI_API_KEY=name:wide-key\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("manifests/narrow.env.refs"),
+        "OPENAI_API_KEY=name:narrow-key\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("harnesses.d/claude.conf"),
+        "backend = bitwarden\nmanifest = wide.env.refs\ncommand = agent\n",
+    )
+    .unwrap();
+    fs::write(
+        seam.config_dir.join("defaults.conf"),
+        "service_user = conductor\n",
+    )
+    .unwrap();
+
+    let out = seam
+        .vaulted_agent()
+        .env("VAULTED_AGENT_HANDOFF", "spawn")
+        .env("VAULTED_AGENT_NO_REEXEC", "1")
+        .args(["-m", "narrow.env.refs", "claude"])
+        .output()
+        .expect("launch");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("launching with manifest 'narrow.env.refs'"),
+        "{err}"
+    );
+    assert!(!err.contains("-m is refused"), "{err}");
+    assert!(
+        err.contains("bws.env") || err.contains("BWS_ACCESS_TOKEN"),
+        "override was not resolved: {err}"
+    );
+    assert!(!seam.work_dir.join("agent.record").exists(), "{err}");
 }
 
 #[test]
