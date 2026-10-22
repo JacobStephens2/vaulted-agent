@@ -6,15 +6,24 @@
 # root on other people's machines; the asset gate exists so an unpinned
 # one-liner never points at a tag that 404s.
 #
+# One command, from a clean main:
+#
+#   ./scripts/release.sh release vX.Y.Z
+#
 # Order:
-#   1. prepare vX.Y.Z     bump crate, bootstrap pin, AGENTS/README pins
-#      (merge that commit; do not deploy yet)
+#   1. prepare vX.Y.Z     bump crate, bootstrap pin, AGENTS/README pins,
+#                         MIGRATION (unreleased) headings; release only:
+#                         on release/vX.Y.Z, PR, wait for CI, merge
 #   2. tag vX.Y.Z         annotated tag; release.yml publishes assets
 #   3. wait-assets vX.Y.Z poll until musl asset + source tar return 200
-#   4. deploy-site vX.Y.Z refresh install.sh, AGENTS.md, product-page pin
+#   4. deploy-site vX.Y.Z record the archive digest, run the bootstrap
+#                         tests, refresh install.sh, AGENTS.md, product-page
+#                         pin, and commit the site repo
 #   5. readme-latest      the two Latest: links, only after the tag exists
+#   6. commit the Latest: links and recorded digest to main and push
 #
-#   cut vX.Y.Z            steps 2–5 (prepare already merged)
+#   cut vX.Y.Z            steps 2–6 (prepare already merged)
+#   release vX.Y.Z        steps 1–6; rerun after a failure to resume
 #
 # Local rehearsal (no SSH):
 #   VAULTED_AGENT_DEPLOY_LOCAL=1 VAULTED_AGENT_DEPLOY_PATH=/tmp/va-site \
@@ -30,6 +39,10 @@ DEPLOY_HOST="${VAULTED_AGENT_DEPLOY_HOST:-jacob@stephens.page}"
 DEPLOY_PATH="${VAULTED_AGENT_DEPLOY_PATH:-/var/www/stephens.page/vaulted-agent}"
 WAIT_TIMEOUT="${VAULTED_AGENT_WAIT_ASSETS_TIMEOUT:-900}"
 WAIT_INTERVAL="${VAULTED_AGENT_WAIT_ASSETS_INTERVAL:-15}"
+# On the web host itself, SSH to the same machine has no key; write in place.
+if [[ -z "${VAULTED_AGENT_DEPLOY_LOCAL:-}" && -d "$DEPLOY_PATH" && -w "$DEPLOY_PATH" ]]; then
+  VAULTED_AGENT_DEPLOY_LOCAL=1
+fi
 
 die() { printf 'release: %s\n' "$*" >&2; exit 1; }
 log() { printf 'release: %s\n' "$*" >&2; }
@@ -39,24 +52,36 @@ usage() {
 Usage: scripts/release.sh <command> [--dry-run] vX.Y.Z
 
 Commands:
+  release        The whole release from a clean main: prepare on
+                 release/vX.Y.Z, open the PR, wait for CI, merge, then cut.
+                 Steps already done (merged bump, pushed tag) are skipped,
+                 so rerun it to resume.
   prepare        Bump Cargo.toml, Cargo.lock, install-remote.sh, AGENTS.md,
-                 README pin examples, and the MIGRATION.md update-pin line.
-                 Does not rewrite README Latest: links (those 404 until tagged).
+                 README pin examples, the MIGRATION.md update-pin line, and
+                 the MIGRATION.md (unreleased) headings. Empties the archive
+                 digest in install-remote.sh. Does not rewrite README Latest:
+                 links (those 404 until tagged).
   check-assets   Exit 0 iff the musl asset and source tarball return 200.
   wait-assets    Poll check-assets until they exist (or timeout).
-  deploy-site    After assets exist: verify the local file is the bootstrap,
-                 back up the live files, install install.sh + AGENTS.md, and
-                 rewrite the product-page pin. Refuses a fat installer or a
-                 DEFAULT_VERSION that does not match the tag.
+  deploy-site    After assets exist: record the source archive's sha256 in
+                 install-remote.sh, run tests/install_remote_bootstrap.sh
+                 against it, back up the live files, install install.sh +
+                 AGENTS.md, rewrite the product-page pin, and commit (and
+                 push) the site repo when DEPLOY_PATH is in one. Refuses a fat
+                 installer or a DEFAULT_VERSION that does not match the tag.
   readme-latest  Rewrite the two README Latest: links.
   tag            Create and push an annotated tag (git signing as configured).
-  cut            tag + wait-assets + deploy-site + readme-latest.
+  cut            tag (unless pushed) + wait-assets + deploy-site +
+                 readme-latest, then commit README.md and install-remote.sh
+                 to main and push.
 
 Environment:
   VAULTED_AGENT_RELEASE_ROOT     repo root (default: parent of scripts/)
   VAULTED_AGENT_DEPLOY_HOST      default jacob@stephens.page
   VAULTED_AGENT_DEPLOY_PATH      default /var/www/stephens.page/vaulted-agent
-  VAULTED_AGENT_DEPLOY_LOCAL=1   write DEPLOY_PATH on this machine (no SSH)
+  VAULTED_AGENT_DEPLOY_LOCAL=1   write DEPLOY_PATH on this machine (no SSH);
+                                 the default when DEPLOY_PATH is a writable
+                                 directory here
   VAULTED_AGENT_SITE_URL         default https://vaultedagent.com
   GITHUB / VAULTED_AGENT_REPO    asset URL prefix
 EOF
@@ -69,7 +94,7 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
-    prepare|check-assets|wait-assets|deploy-site|readme-latest|tag|cut)
+    release|prepare|check-assets|wait-assets|deploy-site|readme-latest|tag|cut)
       [[ -z "$CMD" ]] || die "duplicate command"
       CMD=$arg
       ;;
@@ -134,7 +159,7 @@ cmd_prepare() {
   [[ "$old_tag" != "$VERSION" ]] || die "Cargo.toml is already $VERSION"
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "would bump $old_tag -> $VERSION in Cargo.toml Cargo.lock install-remote.sh AGENTS.md README (pins) MIGRATION.md (update pin)"
+    log "would bump $old_tag -> $VERSION in Cargo.toml Cargo.lock install-remote.sh AGENTS.md README (pins) MIGRATION.md (update pin, unreleased headings)"
     return 0
   fi
 
@@ -156,7 +181,13 @@ cmd_prepare() {
   ' "$lock" | replace_file "$lock"
 
   grep -q "DEFAULT_VERSION=\"${old_tag}\"" "$remote" || die "install-remote.sh pin is not $old_tag"
-  sed "s/DEFAULT_VERSION=\"${old_tag}\"/DEFAULT_VERSION=\"${VERSION}\"/" "$remote" | replace_file "$remote"
+  grep -qE '^DEFAULT_ARCHIVE_SHA256="[0-9a-f]*"$' "$remote" \
+    || die "install-remote.sh has no DEFAULT_ARCHIVE_SHA256 line"
+  # The digest names the old tag's archive. Empty refuses the default archive
+  # until deploy-site records the new one.
+  sed -e "s/DEFAULT_VERSION=\"${old_tag}\"/DEFAULT_VERSION=\"${VERSION}\"/" \
+    -e 's/^DEFAULT_ARCHIVE_SHA256="[0-9a-f]*"$/DEFAULT_ARCHIVE_SHA256=""/' \
+    "$remote" | replace_file "$remote"
 
   python3 - "$agents" "$old_tag" "$old_bare" "$VERSION" "$BARE" <<'PY'
 import pathlib, sys
@@ -186,7 +217,14 @@ repl = f"`va update {new_tag}`"
 text = pathlib.Path(path).read_text()
 if needle not in text:
     raise SystemExit(f"MIGRATION.md missing {needle}")
-pathlib.Path(path).write_text(text.replace(needle, repl))
+text = text.replace(needle, repl)
+# Sections written since the last release ship in this one.
+lines = []
+for line in text.splitlines(keepends=True):
+    if line.startswith("# ") and line.rstrip("\n").endswith(" (unreleased)"):
+        line = line.replace(" (unreleased)", f" ({new_tag})")
+    lines.append(line)
+pathlib.Path(path).write_text("".join(lines))
 PY
 
   log "prepared $VERSION (Latest: links unchanged until readme-latest)"
@@ -228,6 +266,45 @@ bootstrap_is_safe() {
   [[ "$pin" == "$VERSION" ]] || die "$file DEFAULT_VERSION=$pin (want $VERSION)"
   grep -q 'detect_assets' "$file" \
     || die "$file has no detect_assets — refusing to host the fat installer"
+  if [[ -n "${2:-}" ]]; then
+    grep -qx "DEFAULT_ARCHIVE_SHA256=\"$2\"" "$file" \
+      || die "$file does not record archive digest $2"
+  fi
+}
+
+# The tag's archive can only be hashed once the tag exists, so the digest is
+# written here rather than by prepare.
+record_digest() {
+  local file=$1 sum=$2
+  grep -qE '^DEFAULT_ARCHIVE_SHA256="[0-9a-f]*"$' "$file" \
+    || die "$file has no DEFAULT_ARCHIVE_SHA256 line"
+  sed "s/^DEFAULT_ARCHIVE_SHA256=\"[0-9a-f]*\"$/DEFAULT_ARCHIVE_SHA256=\"${sum}\"/" "$file" \
+    | replace_file "$file"
+}
+
+bootstrap_tests_pass() {
+  local file=$1
+  local suite="$ROOT/tests/install_remote_bootstrap.sh"
+  [[ -f "$suite" ]] || die "missing $suite"
+  INSTALL_SH="$file" bash "$suite" >&2 \
+    || die "tests/install_remote_bootstrap.sh failed against the staged install.sh"
+}
+
+# The site tree is a git checkout on the web host. Record what was deployed
+# there, and push when the checkout tracks a remote.
+commit_site() {
+  local files="install.sh AGENTS.md"
+  remote_run "test -f '$DEPLOY_PATH/index.html'" && files="$files index.html"
+  if ! remote_run "git -C '$DEPLOY_PATH' rev-parse --is-inside-work-tree" >/dev/null 2>&1; then
+    log "$DEPLOY_PATH is not a git checkout; nothing to commit"
+    return 0
+  fi
+  remote_run "cd '$DEPLOY_PATH' && git add -- $files && if git diff --cached --quiet -- $files; then echo 'release: site already records $VERSION' >&2; else git commit -q -m 'Publish Vaulted Agent $VERSION install pin' -- $files; fi"
+  if remote_run "git -C '$DEPLOY_PATH' rev-parse --abbrev-ref --symbolic-full-name '@{u}'" >/dev/null 2>&1; then
+    remote_run "git -C '$DEPLOY_PATH' push -q" \
+      || die "deployed, but pushing the site repo failed; push $DEPLOY_PATH by hand"
+  fi
+  log "site repo records $VERSION"
 }
 
 remote_run() {
@@ -273,6 +350,8 @@ cmd_deploy_site() {
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "would record the sha256 of $SOURCE_TAR in $remote"
+    log "would run tests/install_remote_bootstrap.sh against it"
     log "would deploy $remote -> $DEPLOY_PATH/install.sh (pin $VERSION)"
     log "would deploy $agents -> $DEPLOY_PATH/AGENTS.md"
     if [[ -n "$previous" && "$previous" != "$VERSION" ]]; then
@@ -286,9 +365,14 @@ cmd_deploy_site() {
   # Clear the trap before returning: RETURN traps are global, and a later
   # function (readme-latest under cut) would expand the unset local.
   trap 'rm -rf "$stage"; trap - RETURN' RETURN
+  local archive_sum
+  curl -fsSL "$SOURCE_TAR" >"$stage/source.tar.gz" || die "could not download $SOURCE_TAR"
+  archive_sum=$(digest "$stage/source.tar.gz")
+  record_digest "$remote" "$archive_sum"
   install -m 0644 "$remote" "$stage/install.sh"
   install -m 0644 "$agents" "$stage/AGENTS.md"
-  bootstrap_is_safe "$stage/install.sh"
+  bootstrap_is_safe "$stage/install.sh" "$archive_sum"
+  bootstrap_tests_pass "$stage/install.sh"
 
   local dest_index=""
   if [[ "${VAULTED_AGENT_DEPLOY_LOCAL:-}" == 1 ]]; then
@@ -344,6 +428,7 @@ cmd_deploy_site() {
       || die "product page does not mention $VERSION after deploy"
   fi
   log "deployed $VERSION to $DEPLOY_PATH"
+  commit_site
 }
 
 live_digest() {
@@ -408,14 +493,111 @@ cmd_tag() {
   log "tagged $VERSION"
 }
 
+git_() { git -C "$ROOT" "$@"; }
+gh_() { gh -R "$REPO" "$@"; }
+
+cargo_version() {
+  sed -nE 's/^version = "([0-9.]+)"/\1/p' "$ROOT/Cargo.toml" | head -n1
+}
+
+require_clean_main() {
+  [[ "$(git_ symbolic-ref --short HEAD)" == main ]] || die "run from main"
+  git_ diff --quiet && git_ diff --cached --quiet || die "working tree dirty"
+  git_ pull -q --ff-only origin main
+}
+
+tag_pushed() {
+  git_ ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1
+}
+
+# A new PR has no checks for a few seconds, and `gh pr checks --watch` exits
+# on "no checks reported" instead of waiting for them.
+wait_for_checks() {
+  local url=$1 i n
+  for ((i = 0; i < 60; i++)); do
+    n=$(gh_ pr view "$url" --json statusCheckRollup --jq '.statusCheckRollup | length')
+    [[ "$n" -gt 0 ]] && break
+    sleep 5
+  done
+  [[ "$n" -gt 0 ]] || die "no CI checks appeared on $url"
+  gh_ pr checks "$url" --watch --fail-fast >&2 \
+    || die "CI failed on $url; fix it on release/$VERSION, then rerun release"
+}
+
+# prepare on release/vX.Y.Z, then PR, CI, merge. An open PR from an earlier
+# run is reused.
+merge_release_pr() {
+  local branch="release/$VERSION" url prev
+  url=$(gh_ pr list --head "$branch" --state open --json url --jq '.[0].url // ""')
+  if [[ -z "$url" ]]; then
+    prev=$(git_ describe --tags --abbrev=0)
+    git_ switch -q -c "$branch"
+    cmd_prepare
+    git_ commit -q -am "Release $VERSION"
+    git_ push -q -u origin "$branch"
+    url=$(gh_ pr create --base main --head "$branch" --title "Release $VERSION" \
+      --body "$(printf 'Bump the release pins to %s. Changes since %s:\n\n' "$VERSION" "$prev"; \
+        git_ log --no-merges --format='- %s' "$prev..main")")
+    git_ switch -q main
+    log "opened $url"
+  fi
+  wait_for_checks "$url"
+  gh_ pr merge "$url" --merge
+  git_ pull -q --ff-only origin main
+  git_ branch -q -D "$branch" 2>/dev/null || true
+  [[ "$(cargo_version)" == "$BARE" ]] || die "main is not $VERSION after merging $url"
+  log "merged $url"
+}
+
+# deploy-site recorded the archive digest and readme-latest the links; main
+# should match what is hosted.
+record_on_main() {
+  if git_ diff --quiet -- README.md install-remote.sh; then
+    log "main already records $VERSION"
+    return 0
+  fi
+  [[ "$(git_ symbolic-ref --short HEAD)" == main ]] \
+    || die "commit README.md and install-remote.sh on main and push"
+  git_ commit -q -m "Record $VERSION release links and archive digest" -- README.md install-remote.sh
+  git_ push -q origin main
+  log "pushed the $VERSION links and archive digest to main"
+}
+
 cmd_cut() {
-  cmd_tag
+  if tag_pushed; then
+    log "tag $VERSION already on origin"
+  else
+    cmd_tag
+  fi
   cmd_wait_assets
   cmd_deploy_site
   cmd_readme_latest
+  [[ "$DRY_RUN" -eq 1 ]] || record_on_main
+}
+
+cmd_release() {
+  local tool
+  for tool in git gh curl python3; do
+    command -v "$tool" >/dev/null 2>&1 || die "need $tool"
+  done
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "would pull main, then (unless main is already $VERSION) prepare on release/$VERSION, open a PR, wait for CI, merge"
+    log "would tag $VERSION (unless pushed), wait for assets, deploy-site, readme-latest"
+    log "would commit README.md + install-remote.sh to main and push"
+    return 0
+  fi
+  require_clean_main
+  if [[ "$(cargo_version)" == "$BARE" ]]; then
+    log "main is already $VERSION; skipping the release PR"
+  else
+    merge_release_pr
+  fi
+  cmd_cut
+  log "released $VERSION"
 }
 
 case "$CMD" in
+  release) cmd_release ;;
   prepare) cmd_prepare ;;
   check-assets) cmd_check_assets ;;
   wait-assets) cmd_wait_assets ;;
