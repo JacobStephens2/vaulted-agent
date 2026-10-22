@@ -508,10 +508,11 @@ agent runs as, and `agent ALL=(ALL) NOPASSWD: ALL` makes every manifest
 boundary above it decorative — and turns each of the paragraphs above from a
 hardening measure into the only thing standing between a harness grant and root.
 
-Maintainers: cut a release with `scripts/release.sh` (`prepare` on the
-release branch, `cut` after merge). The `curl … | bash` one-liner serves
-`install-remote.sh` from this repo; the script will not refresh the hosted
-copy until the GitHub assets exist. See
+Maintainers: cut a release with `scripts/release.sh release vX.Y.Z` from a
+clean `main`. It opens and merges the version-bump PR, tags, and refreshes the
+hosted installer. The `curl … | bash` one-liner serves `install-remote.sh` from
+this repo; the script will not refresh the hosted copy until the GitHub assets
+exist. See
 [docs/hosting-the-installer.md](docs/hosting-the-installer.md).
 
 ## Updating

@@ -81,6 +81,18 @@ impl Fixture {
     }
 }
 
+/// sha256 of the curl stub's body for any 200 URL, i.e. the "archive" deploy-site hashes.
+const STUB_ARCHIVE_SHA256: &str =
+    "bc963a95b0b1b4bb615fb1400d190a8fabdc67b9a80f577b0f0ef5cfeb996f26";
+
+fn bootstrap(version: &str) -> String {
+    format!(
+        "#!/usr/bin/env bash\nDEFAULT_VERSION=\"{version}\"\n\
+         DEFAULT_ARCHIVE_SHA256=\"1111111111111111111111111111111111111111111111111111111111111111\"\n\
+         detect_assets() {{ :; }}\n"
+    )
+}
+
 fn write_tree(root: &Path) {
     fs::write(
         root.join("Cargo.toml"),
@@ -93,12 +105,17 @@ fn write_tree(root: &Path) {
     )
     .unwrap();
     let remote = root.join("install-remote.sh");
+    fs::write(&remote, bootstrap("v0.4.24")).unwrap();
+    fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).unwrap();
+    // Stand-in for the bootstrap suite: record the file it was pointed at.
+    let tests = root.join("tests");
+    fs::create_dir_all(&tests).unwrap();
     fs::write(
-        &remote,
-        "#!/usr/bin/env bash\nDEFAULT_VERSION=\"v0.4.24\"\ndetect_assets() { :; }\n",
+        tests.join("install_remote_bootstrap.sh"),
+        "printf '%s\\n' \"$INSTALL_SH\" >\"$(dirname \"$0\")/bootstrap-tested\"\n\
+         cp \"$INSTALL_SH\" \"$(dirname \"$0\")/bootstrap-tested.sh\"\n",
     )
     .unwrap();
-    fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(
         root.join("install.sh"),
         "#!/usr/bin/env bash\n# fat installer — must never be hosted\nSERVICE_USER=\"\"\n",
@@ -122,7 +139,9 @@ fn write_tree(root: &Path) {
     .unwrap();
     fs::write(
         root.join("MIGRATION.md"),
-        "# Migration: updates add missing Harnesses (v0.4.24)\n\
+        "# Migration: a bad `defaults.conf` stops the run (unreleased)\n\
+         Text that mentions (unreleased) mid-line stays.\n\
+         # Migration: updates add missing Harnesses (v0.4.24)\n\
          `va update v0.4.24` pins. `--check` and `--dry-run` write nothing.\n",
     )
     .unwrap();
@@ -216,6 +235,10 @@ fn prepare_bumps_crate_bootstrap_and_pins_but_not_latest_links() {
         bootstrap.contains("DEFAULT_VERSION=\"v0.4.25\""),
         "{bootstrap}"
     );
+    assert!(
+        bootstrap.contains("DEFAULT_ARCHIVE_SHA256=\"\"\n"),
+        "prepare must empty the old tag's archive digest: {bootstrap}"
+    );
     let mode = fs::metadata(fx.root.join("install-remote.sh"))
         .unwrap()
         .permissions()
@@ -258,6 +281,14 @@ fn prepare_bumps_crate_bootstrap_and_pins_but_not_latest_links() {
         migration.contains("`va update v0.4.25` pins."),
         "{migration}"
     );
+    assert!(
+        migration.contains("# Migration: a bad `defaults.conf` stops the run (v0.4.25)"),
+        "unreleased headings ship in this release: {migration}"
+    );
+    assert!(
+        migration.contains("Text that mentions (unreleased) mid-line stays."),
+        "only headings change: {migration}"
+    );
 }
 
 #[test]
@@ -280,11 +311,7 @@ fn check_assets_passes_when_both_urls_are_200() {
 fn deploy_site_refuses_when_assets_404() {
     let fx = Fixture::new();
     fx.set_asset("v0.4.25", "404");
-    fs::write(
-        fx.root.join("install-remote.sh"),
-        "#!/usr/bin/env bash\nDEFAULT_VERSION=\"v0.4.25\"\ndetect_assets() { :; }\n",
-    )
-    .unwrap();
+    fs::write(fx.root.join("install-remote.sh"), bootstrap("v0.4.25")).unwrap();
     fs::write(fx.site.join("install.sh"), "old-bootstrap\n").unwrap();
     let out = fx.run(&["deploy-site", "v0.4.25"]);
     assert_fails(&out, "404");
@@ -324,11 +351,7 @@ fn deploy_site_refuses_when_bootstrap_pin_does_not_match() {
 fn deploy_site_writes_bootstrap_and_backup_when_assets_ok() {
     let fx = Fixture::new();
     fx.set_asset("v0.4.25", "200");
-    fs::write(
-        fx.root.join("install-remote.sh"),
-        "#!/usr/bin/env bash\nDEFAULT_VERSION=\"v0.4.25\"\ndetect_assets() { :; }\n",
-    )
-    .unwrap();
+    fs::write(fx.root.join("install-remote.sh"), bootstrap("v0.4.25")).unwrap();
     fs::write(
         fx.root.join("AGENTS.md"),
         "Current release pin (product install): **v0.4.25**\n",
@@ -367,17 +390,112 @@ fn deploy_site_writes_bootstrap_and_backup_when_assets_ok() {
         page.contains("Upgrading from v0.4.23 or earlier."),
         "historical notes must stay: {page}"
     );
+
+    let want = format!("DEFAULT_ARCHIVE_SHA256=\"{STUB_ARCHIVE_SHA256}\"");
+    assert!(
+        dest.contains(&want),
+        "hosted file records the tag archive digest: {dest}"
+    );
+    let repo = fs::read_to_string(fx.root.join("install-remote.sh")).unwrap();
+    assert!(
+        repo.contains(&want),
+        "the tree records it too, for main: {repo}"
+    );
+    let tested = fs::read_to_string(fx.root.join("tests/bootstrap-tested.sh")).unwrap();
+    assert!(
+        tested.contains(&want),
+        "the bootstrap suite ran against the stamped file: {tested}"
+    );
+}
+
+#[test]
+fn deploy_site_refuses_when_bootstrap_suite_fails() {
+    let fx = Fixture::new();
+    fx.set_asset("v0.4.25", "200");
+    fs::write(fx.root.join("install-remote.sh"), bootstrap("v0.4.25")).unwrap();
+    fs::write(
+        fx.root.join("tests/install_remote_bootstrap.sh"),
+        "exit 1\n",
+    )
+    .unwrap();
+    fs::write(fx.site.join("install.sh"), "old-bootstrap\n").unwrap();
+    let out = fx.run(&["deploy-site", "v0.4.25"]);
+    assert_fails(&out, "install_remote_bootstrap.sh failed");
+    let dest = fs::read_to_string(fx.site.join("install.sh")).unwrap();
+    assert_eq!(dest, "old-bootstrap\n");
+}
+
+#[test]
+fn deploy_site_commits_a_site_checkout() {
+    let fx = Fixture::new();
+    fx.set_asset("v0.4.25", "200");
+    fs::write(fx.root.join("install-remote.sh"), bootstrap("v0.4.25")).unwrap();
+    fs::write(fx.site.join("install.sh"), bootstrap("v0.4.24")).unwrap();
+    fs::write(fx.site.join("AGENTS.md"), "old-agents\n").unwrap();
+    fs::write(fx.site.join("unrelated.txt"), "work in progress\n").unwrap();
+    // As on the host: backups stay out of the site repo.
+    fs::write(fx.site.join(".gitignore"), "*.bak\n").unwrap();
+    git(&fx.site, &["init", "-q", "-b", "main"]);
+    git(&fx.site, &["add", ".gitignore", "install.sh", "AGENTS.md"]);
+    git(&fx.site, &["commit", "-q", "-m", "v0.4.24"]);
+
+    let out = fx
+        .cmd(&["deploy-site", "v0.4.25"])
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.test")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.test")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "false")
+        .output()
+        .expect("run release.sh");
+    assert_ok(&out);
+
+    let subject = git(&fx.site, &["log", "-1", "--format=%s"]);
+    assert_eq!(subject.trim(), "Publish Vaulted Agent v0.4.25 install pin");
+    let status = git(&fx.site, &["status", "--porcelain"]);
+    assert_eq!(
+        status.trim(),
+        "?? unrelated.txt",
+        "only the deployed files are committed"
+    );
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.test"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn release_runs_only_from_main() {
+    let fx = Fixture::new();
+    git(&fx.root, &["init", "-q", "-b", "feature"]);
+    git(&fx.root, &["add", "."]);
+    git(&fx.root, &["commit", "-q", "-m", "fixture"]);
+    fs::write(fx.path_dir.join("gh"), "#!/bin/sh\nexit 99\n").unwrap();
+    fs::set_permissions(fx.path_dir.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let out = fx.run(&["release", "v0.4.25"]);
+    assert_fails(&out, "run from main");
 }
 
 #[test]
 fn deploy_site_dry_run_writes_nothing() {
     let fx = Fixture::new();
     fx.set_asset("v0.4.25", "200");
-    fs::write(
-        fx.root.join("install-remote.sh"),
-        "#!/usr/bin/env bash\nDEFAULT_VERSION=\"v0.4.25\"\ndetect_assets() { :; }\n",
-    )
-    .unwrap();
+    fs::write(fx.root.join("install-remote.sh"), bootstrap("v0.4.25")).unwrap();
     fs::write(fx.site.join("install.sh"), "old-bootstrap\n").unwrap();
     let out = fx.run(&["deploy-site", "--dry-run", "v0.4.25"]);
     assert_ok(&out);
