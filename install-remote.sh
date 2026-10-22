@@ -43,13 +43,13 @@ REPO="${VAULTED_AGENT_REPO:-$DEFAULT_REPO}"
 # Default pin. Overridden by VAULTED_AGENT_VERSION=... or "latest".
 # scripts/release.sh prepare bumps it. Must match a published GitHub release
 # tag (and Cargo.toml version).
-DEFAULT_VERSION="v0.4.25"
+DEFAULT_VERSION="v0.4.26"
 # sha256 of the GitHub tag archive for DEFAULT_VERSION:
 #   ${DEFAULT_REPO}/archive/refs/tags/${DEFAULT_VERSION}.tar.gz
 # The tag's own copy of this file cannot know its archive's digest, so prepare
 # empties it and deploy-site records it once the tag exists. Empty refuses the
 # default archive. Caller-supplied versions are not checked against it.
-DEFAULT_ARCHIVE_SHA256="81492ba6864b4d732fd1172c9018eeb6bfed274169f63f8032949e7309c12948"
+DEFAULT_ARCHIVE_SHA256=""
 VERSION="${VAULTED_AGENT_VERSION:-$DEFAULT_VERSION}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB="${GITHUB:-https://github.com}"

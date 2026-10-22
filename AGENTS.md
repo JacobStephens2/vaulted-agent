@@ -12,13 +12,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.25**
+Current release pin (product install): **v0.4.26**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.25 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.25 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.26 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.26 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
@@ -81,7 +81,7 @@ elevated launches always read the machine config dir).
 | Interactive install-time config | `va setup` (the installer asks its own questions, then calls `auth-mode`, `setup <backend> --wire-only` and `setup <backend> --set-token`) |
 | Wire day-one Harnesses to a Backend, no token | `sudo va setup bitwarden --wire-only` (also `onepassword`, `pass`; `sops` records `default_backend` only). Asks no questions and never touches the token |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
-| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.25` |
+| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.26` |
 | Uninstall | `sudo va uninstall` |
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,

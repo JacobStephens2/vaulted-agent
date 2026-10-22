@@ -1,4 +1,4 @@
-# Migration: one Harness discovery for `install.sh` and `va update` (unreleased)
+# Migration: one Harness discovery for `install.sh` and `va update` (v0.4.26)
 
 **Behaviour change.** The installer no longer detects agent CLIs itself. It
 runs the installed launcher's `update --sync-harnesses` (a dry run asks the
@@ -25,7 +25,7 @@ write byte-identical Harness confs and print the same per-agent report.
 - **One conf body.** Installer-written confs gain `labels = no` and a header
   that names Harness discovery instead of `install.sh`.
 
-# Migration: one Uninstall plan for `uninstall` and `install.sh --uninstall` (unreleased)
+# Migration: one Uninstall plan for `uninstall` and `install.sh --uninstall` (v0.4.26)
 
 **Behaviour change.** `vaulted-agent uninstall` and `./install.sh --uninstall`
 are now one implementation, in the launcher. The installer runs
@@ -51,7 +51,7 @@ release build, then `cargo build`).
 - **A failed removal fails the command.** The other removals still run, the
   failure is reported, and the exit is non-zero. Before, it only warned.
 
-# Migration: `setup <backend>` verifies an exported or existing token (unreleased)
+# Migration: `setup <backend>` verifies an exported or existing token (v0.4.26)
 
 **Behaviour change.** `vaulted-agent setup bitwarden|onepassword` now verifies
 the Manager token whichever way it arrives, not only a paste or
@@ -71,7 +71,7 @@ the token already in `op.env` / `bws.env`, is checked live (`op whoami` /
   never written. A `-p` paste on `setup` is shape-checked and verified like
   any other paste.
 
-# Migration: the installer delegates vault setup to the launcher (unreleased)
+# Migration: the installer delegates vault setup to the launcher (v0.4.26)
 
 **Behaviour change.** `install.sh` keeps its questions and flags, but every
 vault-config write now goes through the launcher it just installed:
@@ -107,7 +107,7 @@ with `auth_mode = file`, the token piped to `setup <backend> --set-token`.
   adds it to every Harness lacking a `workdir`.
 - `--dry-run` prints the launcher commands it would run, with the token elided.
 
-# Migration: `setup <backend>` wires day-one Harnesses (unreleased)
+# Migration: `setup <backend>` wires day-one Harnesses (v0.4.26)
 
 **Behaviour change.** `vaulted-agent setup bitwarden|onepassword|pass|sops` now
 does the Vault wiring that only the installer used to do, before it asks for a
@@ -130,7 +130,7 @@ same hint. `setup <backend> --wire-only` wires and stops before the token,
 without asking the auth-mode, Service-user or workdir questions; it needs a
 named Backend and is refused with `--set-token`.
 
-# Migration: a bad `defaults.conf` stops the run (unreleased)
+# Migration: a bad `defaults.conf` stops the run (v0.4.26)
 
 **Behaviour break.** `defaults.conf` is read once, through Machine defaults,
 and a misconfiguration now stops the run instead of falling back to built-in
@@ -160,7 +160,7 @@ setup failed`); re-run `va update --sync-harnesses` once the file is fixed.
 `update --sync-harnesses` now honours `VAULTED_AGENT_SERVICE_USER` when it
 decides whose home and `PATH` to search, as the launch does.
 
-# Migration: ambiguous Bitwarden refs fail closed (unreleased)
+# Migration: ambiguous Bitwarden refs fail closed (v0.4.26)
 
 **Behaviour break.** A `project:PROJECT/KEY` reference that matches more than
 one secret (the same key twice in one project) now fails the launch closed:
@@ -213,7 +213,7 @@ new setup step. After the first binary upgrade, run `va update --sync-harnesses`
 or repeat `va update`. Future upgrades run both steps automatically. This also
 repairs a missing Muse Harness without reinstalling the whole launcher.
 
-# Migration: glued Bitwarden refs from bash 0.3.0 `va refresh` (unreleased)
+# Migration: glued Bitwarden refs from bash 0.3.0 `va refresh` (v0.4.26)
 
 `va refresh` on the bash launcher (v0.3.0) captured each new `VAR=name:KEY`
 line with `$(…)`, which strips the trailing newline, then concatenated. A
@@ -234,12 +234,12 @@ on the glued shape and print the recovered lines.
 A host still running the 0.3.0 bash binary will re-glue on the next merge
 refresh. `va update` (or a reinstall) is the way off that writer.
 
-# Migration: `va update` replaces the installed binary (unreleased)
+# Migration: `va update` replaces the installed binary (v0.4.26)
 
 `va update` downloads a GitHub release asset for this OS/arch and overwrites
 the running launcher (`current_exe`, usually `/usr/local/bin/vaulted-agent`).
 Default target is `VAULTED_AGENT_VERSION`, else the latest GitHub release.
-`va update v0.4.25` pins. `--check` and `--dry-run` write nothing.
+`va update v0.4.26` pins. `--check` and `--dry-run` write nothing.
 
 This is not `install.sh`. Existing Harnesses, manifests, and token files stay
 put; newer updaters add missing Harnesses as described above. If the binary
@@ -249,7 +249,7 @@ dest is not writable, it retries with `sudo install`. `va` and
 A host that does not yet have this command still bootstraps with
 `curl -fsSL https://vaultedagent.com/install.sh | bash`.
 
-# Migration: `secrets validate` names the manifest on every line (unreleased)
+# Migration: `secrets validate` names the manifest on every line (v0.4.26)
 
 `va secrets validate` with no argument now prints the manifest alongside the
 harness, and checks every `extra_manifest` recorded in `defaults.conf` as well
@@ -274,14 +274,14 @@ extra_manifest = /srv/orchestration/env.tpl
 A recorded manifest that is missing, unparseable, or names an unknown backend
 now fails the check rather than being skipped.
 
-# Migration: `va bash` is a harness, not the retired Bash launcher (unreleased)
+# Migration: `va bash` is a harness, not the retired Bash launcher (v0.4.26)
 
 `va bash` is a named harness whose `command` is always `bash` (extra argv is
 appended: `va bash ./script.sh`). It is not `va run` (any program) and not a
 return of the pre-v0.4.0 Bash launcher or `*-orchestrator` wrappers — those
 stay retired. Same scrub → resolve → exec path as `va claude`.
 
-# Migration: refs lines record their source secret (unreleased)
+# Migration: refs lines record their source secret (v0.4.26)
 
 `vaulted-agent setup` and `vaulted-agent refresh` now write the source UUID on
 the lines they generate, as a trailing comment:
@@ -307,7 +307,7 @@ Applies to `bitwarden` only. 1Password `op://` references carry their own
 identity, and dotenv manifests hold secret *values*, where a `#` is material and
 is left alone.
 
-# Migration: kimi is not env-blind (retracts v0.4.16 / #69) (unreleased)
+# Migration: kimi is not env-blind (retracts v0.4.16 / #69) (v0.4.26)
 
 v0.4.16 classified kimi as env-blind and stopped vault wiring (#68 / #69).
 End-to-end probes (issue #70) show kimi **does** read OpenAI-compatible
@@ -337,7 +337,7 @@ File-render backends remain useful for tools that truly need secrets on disk
 Follow-up: drop the shipped LEGACY `env=` line when #2746 is in a kimi release
 (track: issue #72).
 
-# Migration: harness `alias` renames an injected secret (unreleased)
+# Migration: harness `alias` renames an injected secret (v0.4.26)
 
 A harness could not hand an injected secret to the agent under a different
 variable name. When the agent hardcodes `OPENAI_API_KEY` (or similar) for a
@@ -364,7 +364,7 @@ Rules:
 - Manager-token names are refused as source and target.
 - A target that also appears in the manifest is overwritten for this harness.
 
-# Migration: a failed launch names the variable (unreleased)
+# Migration: a failed launch names the variable (v0.4.26)
 
 When a launch could not resolve its manifest, the launcher printed the resolver
 error and nothing else. For 1Password that names the *item* the vault could not
@@ -394,7 +394,7 @@ Renaming an item in the vault is the usual cause: the reference stays
 well-formed and stops resolving, so no offline check can catch it. `doctor` is
 offline by design and will still pass.
 
-# Migration: `secrets validate` asks the vault (unreleased)
+# Migration: `secrets validate` asks the vault (v0.4.26)
 
 `secrets validate` checked that each reference was well *formed* and stopped
 there. A reference can be perfectly well-formed and name an item that no longer
@@ -432,7 +432,7 @@ va secrets validate orchestrator-all.env.tpl --offline   # syntax only
 `doctor` is unchanged and remains offline by design; it already says "syntax
 checks only; live vault access not probed".
 
-# Migration: launching a harness against another manifest (unreleased)
+# Migration: launching a harness against another manifest (v0.4.26)
 
 ## `-m` on the harness path
 
@@ -467,7 +467,7 @@ sudoers rule that only allows `vaulted-agent claude` will not match
 `vaulted-agent -m … claude`. Prefer conductor links for delegated grants, or
 extend sudoers to allow the launcher flags before the harness name.
 
-# Migration: 1Password refresh naming and duplicates (unreleased)
+# Migration: 1Password refresh naming and duplicates (v0.4.26)
 
 ## 1Password variable names drop the default section label
 
