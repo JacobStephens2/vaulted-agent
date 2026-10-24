@@ -34,6 +34,10 @@ vaulted-agent version   # expect 0.4.26 (git stamp may appear in parentheses)
    `service_user`. Read the error; run `va doctor`.
 5. **Do not use `-m` under a `*-conductor` symlink.** It is refused on purpose
    (fixed entitlement = one harness → one credential set).
+6. **Do not use `-m` to point a plainfile Harness at another file when a
+   Service user is set and `run` is refused.** The override does not change
+   the Backend, and it is rejected before that Manifest is resolved. A
+   vault-backend Harness can still take `-m`.
 
 ## Ubiquitous language (short)
 
@@ -256,6 +260,10 @@ va -m readonly.env.tpl pick
 - Missing file → error **before** the agent starts.
 - stderr announces the override (search scrollback for `launching with manifest`).
 - **Refused** under `*-conductor`. Use direct `va` for `-m`.
+- On that direct path, once a Service user is set and `run` is refused, a
+  plainfile Harness still rejects `-m` before the named Manifest is resolved.
+  The override does not change the Backend. A vault-backend Harness still
+  accepts `-m`. `allow_run = yes` restores it, because `run -m` is allowed then.
 - With `service_user`, sudoers must match the line as typed (flags before harness
   name). Prefer conductor links for delegated grants, or extend sudoers.
 - `va -m x pick` hops after the menu as `va -m x <chosen>`, so sudoers needs
@@ -294,6 +302,7 @@ Interpret carefully:
 | `defaults.conf:<line>: …` / `<config dir>/defaults.conf: Permission denied` | `defaults.conf` has a value it does not recognise (or a line with no `=`), or exists but cannot be read by the launch account. Fails closed: nothing falls back to built-in values. Fix a typo'd `auth_mode` with `va auth-mode file\|prompt`; otherwise edit the named line, or fix the file's mode/owner. `va doctor` still runs and reports it |
 | Legacy `*_ADD_MORE_*` names | Old 1Password refresh naming; still works; next refresh renames - see MIGRATION.md |
 | `run is disabled while service_user=…` | Expected; set `allow_run = yes` only if you intend that grant |
+| `-m is refused on plainfile harness …` | Service user is set, `run` is refused, and the Harness Backend is still plainfile. The override names a file of secret values and does not change the Backend, so it is rejected before that file is resolved. Point the Harness at a vault Backend, or set `allow_run = yes` only if you intend the caller to choose that file |
 | `no manager token yet and no terminal to paste one` | `setup` with `auth_mode=file` and nothing to capture; pipe it with `--set-token`, export the token, or `va auth-mode prompt` |
 | `--set-token: … rejected by the vault` | Token verified live before write; nothing was stored. Check you pasted a Machine Account access token / service-account token |
 | `exported OP_SERVICE_ACCOUNT_TOKEN rejected by the vault` / `… in <file> rejected by the vault` on `setup` | `setup` verifies an exported or on-disk token too; nothing was written and the token file is unchanged. Unset or fix the export; rotate the file with `printf %s "$TOKEN" \| sudo va setup <backend> --set-token` |

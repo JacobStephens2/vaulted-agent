@@ -745,6 +745,33 @@ fn run_refusal(service_user: Option<&str>, allow_run: bool) -> Option<String> {
     }
 }
 
+/// Why a Manifest override on this Harness is refused, or None when it may proceed.
+///
+/// The override does not change the Backend. Once a Service user is set and
+/// `run` is refused, plainfile is refused before the file is read: the caller
+/// names a file of secret values, and that file would be read as the Service
+/// user. Every other Backend, including pass and sops, is left as it was.
+/// Callers must refuse before the Manifest is resolved.
+fn plainfile_override_refusal(
+    backend: Backend,
+    service_user: Option<&str>,
+    allow_run: bool,
+    harness: &str,
+) -> Option<String> {
+    if backend != Backend::Plainfile {
+        return None;
+    }
+    let svc = service_user?;
+    // Same gate as `run`. The message is this override's, not `run`'s.
+    run_refusal(Some(svc), allow_run)?;
+    Some(format!(
+        "-m is refused on plainfile harness '{harness}' while service_user={svc} and run is disabled: \
+         the override names a file of secret values and does not change the backend, \
+         so it is rejected before that file is resolved. Point the harness at a vault \
+         backend, or set `allow_run = yes` in defaults.conf if you intend the caller to choose that file."
+    ))
+}
+
 pub fn cmd_run(paths: &Paths, args: &[String], token_source: TokenSource) -> Result<()> {
     let defaults = Defaults::load(paths)?;
     if let Some(msg) = run_refusal(defaults.service_user.as_deref(), defaults.allow_run) {
@@ -881,9 +908,13 @@ pub fn cmd_pick(paths: &Paths) -> Result<Option<String>> {
 /// The override serves the direct `va <harness>` path (and `va pick`) only.
 /// Under a `*-conductor` symlink it is refused before this is reached, alongside
 /// `-H` and for the same reason: the symlink is what lets a sudoers rule grant
-/// one harness and have that mean one set of credentials. On the direct path
-/// the caller can already reach `run -m` with any manifest they like, so
-/// refusing here would cost convenience and buy no safety.
+/// one harness and have that mean one set of credentials.
+///
+/// On the direct path the override does not change the Backend, and it is not
+/// the same thing as `run -m` once a Service user is set and `run` is refused.
+/// A plainfile Manifest holds secret values, so that override is rejected
+/// here, before the file is resolved. A vault Backend's override only selects
+/// refs and still proceeds.
 pub fn cmd_launch_harness(
     paths: &Paths,
     name: &str,
@@ -893,6 +924,18 @@ pub fn cmd_launch_harness(
 ) -> Result<()> {
     let mut harness = Harness::load(paths, name)?;
     if let Some(manifest) = manifest_override {
+        // Judge the Backend the launch will use, before the named file is
+        // read. The override does not change that Backend.
+        let defaults = Defaults::load(paths)?;
+        let backend = harness.backend.unwrap_or(defaults.default_backend);
+        if let Some(msg) = plainfile_override_refusal(
+            backend,
+            defaults.service_user.as_deref(),
+            defaults.allow_run,
+            name,
+        ) {
+            return Err(Error::Message(msg));
+        }
         harness.manifest = manifest.to_string();
         // Checked here rather than at injection, so a typo is a clear message
         // instead of a manifest that reads as empty and an agent that starts

@@ -455,8 +455,12 @@ agent instead.
 **Refused under a `*-conductor` symlink**, alongside `-H` and for the same
 reason. That symlink is what lets a sudoers rule grant one harness and have it
 mean one set of credentials; a flag naming the manifest outright would undo it.
-On the direct `va` path there is nothing to protect — a caller who can run `va`
-can already run `va run -m` with any manifest — so it is allowed there.
+On the direct `va` path the override does not change the harness backend. It is
+allowed when no service user is set, or when `run` is allowed, because a caller
+who can run `va` can already run `va run -m` with any manifest. Once a service
+user is set and `run` is refused, a plainfile harness rejects `-m` before that
+manifest is resolved: the file holds secret values. A vault-backend harness
+still accepts the override.
 
 Also refused in front of most management commands (`va -m x doctor`), where
 `run` and `refresh` read their own `-m` from after the command name. Allowed
