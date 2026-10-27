@@ -28,6 +28,10 @@ fn run_output(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Outp
 
 fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
     let out = run_output(program, args, env)?;
+    captured_output(program, args, out)
+}
+
+fn captured_output(program: &str, args: &[&str], out: Output) -> Result<String> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(Error::Message(format!(
@@ -36,6 +40,65 @@ fn run_capture(program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Str
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The single rejection detection point for vault CLI calls. Other failures
+/// keep their stderr verbatim, including `op inject`'s Resolve failure.
+fn run_vault_output(kind: TokenKind, args: &[&str], token: &ManagerToken) -> Result<Output> {
+    let program = match kind {
+        TokenKind::Bws => "bws",
+        TokenKind::Op => "op",
+    };
+    let out = run_output(program, args, &[(kind.env_var(), token.expose())])?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(line) = rejection_detail(kind, &stderr) {
+            let detail = format!("{program} {} failed: {}", args.join(" "), line.trim());
+            let message = match &token.origin {
+                Some(origin) => format!("{}\n  {detail}", origin.rejected(kind, "")),
+                // Token capture has its own source-aware explanation.
+                None => detail,
+            };
+            return Err(Error::TokenRejected(message));
+        }
+    }
+    Ok(out)
+}
+
+fn rejection_detail(kind: TokenKind, stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .take_while(|line| {
+            let line = line.trim();
+            line != "Location:" && !line.starts_with("Backtrace ")
+        })
+        .find(|line| {
+            let lower = line.trim().to_ascii_lowercase();
+            // Only explicit authentication signatures. A bare 401 substring
+            // could be an item id, URL or source-code line number; a 403 may
+            // mean this valid token lacks permission to one item.
+            (kind == TokenKind::Bws && lower.contains("\"invalid_client\""))
+                || lower == "unauthorized"
+                || ["[401 ", "(401)", "401 unauthorized"]
+                    .iter()
+                    .any(|signature| lower.contains(signature))
+                || lower.split_once("status code:").is_some_and(|(_, status)| {
+                    status
+                        .trim_start()
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        == Some("401")
+                })
+        })
+}
+
+fn run_vault_capture(kind: TokenKind, args: &[&str], token: &ManagerToken) -> Result<String> {
+    let out = run_vault_output(kind, args, token)?;
+    let program = match kind {
+        TokenKind::Bws => "bws",
+        TokenKind::Op => "op",
+    };
+    captured_output(program, args, out)
 }
 
 /// What a Backend reports when a Manifest will not resolve: the Manifest, the
@@ -115,10 +178,10 @@ pub fn resolve_plainfile(manifest: &Path) -> Result<HashMap<String, SecretValue>
 }
 
 fn bws_list_json(token: &ManagerToken) -> Result<String> {
-    run_capture(
-        "bws",
+    run_vault_capture(
+        TokenKind::Bws,
         &["secret", "list", "--output", "json"],
-        &[("BWS_ACCESS_TOKEN", token.expose())],
+        token,
     )
 }
 
@@ -194,10 +257,10 @@ pub fn parse_bws_get_value_json(stdout: &str) -> Result<String> {
 }
 
 fn bws_get_value(token: &ManagerToken, id: &str) -> Result<String> {
-    let stdout = run_capture(
-        "bws",
+    let stdout = run_vault_capture(
+        TokenKind::Bws,
         &["secret", "get", id, "--output", "json"],
-        &[("BWS_ACCESS_TOKEN", token.expose())],
+        token,
     )?;
     parse_bws_get_value_json(&stdout)
 }
@@ -239,10 +302,10 @@ pub fn resolve_onepassword(
     token: &ManagerToken,
 ) -> Result<HashMap<String, SecretValue>> {
     let entries = validate_manifest_file(manifest, Backend::OnePassword)?;
-    let out = run_output(
-        "op",
+    let out = run_vault_output(
+        TokenKind::Op,
         &["inject", "-i", &manifest.to_string_lossy()],
-        &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())],
+        token,
     )?;
     if !out.status.success() {
         let message = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -367,11 +430,7 @@ pub fn bws_listing(token: &ManagerToken) -> Result<BwListing> {
 /// `op whoami` is the cheapest live check the token can pass, and unlike
 /// `item list` it does not depend on the account seeing any vault yet.
 pub fn op_whoami(token: &ManagerToken) -> Result<()> {
-    run_capture(
-        "op",
-        &["whoami", "--format", "json"],
-        &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())],
-    )?;
+    run_vault_capture(TokenKind::Op, &["whoami", "--format", "json"], token)?;
     Ok(())
 }
 
@@ -386,7 +445,7 @@ pub fn op_list_items(token: &ManagerToken, vault: Option<&str>) -> Result<OpList
         args.push("--vault");
         args.push(v);
     }
-    let json = run_capture("op", &args, &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())])?;
+    let json = run_vault_capture(TokenKind::Op, &args, token)?;
     OpListing::from_json(&json)
 }
 
@@ -403,7 +462,7 @@ pub fn op_item_json(token: &ManagerToken, item_id: &str, vault: Option<&str>) ->
         args.push("--vault");
         args.push(v);
     }
-    run_capture("op", &args, &[("OP_SERVICE_ACCOUNT_TOKEN", token.expose())])
+    run_vault_capture(TokenKind::Op, &args, token)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::{AuthMode, Backend, Paths};
 use crate::defaults::Defaults;
@@ -14,6 +14,40 @@ use crate::token_file::{self, Probe, Reader, State};
 pub enum TokenKind {
     Bws,
     Op,
+}
+
+/// The source actually used, including a prompt after a missing token file.
+/// Kept with the loaded token so a later vault rejection cannot blame a file
+/// that was never read. Contains no credential material.
+#[derive(Debug, Clone)]
+pub(crate) enum TokenOrigin {
+    Env,
+    File(PathBuf),
+    Prompt,
+}
+
+impl TokenOrigin {
+    /// Shared rejection wording for Token capture and live Backend commands.
+    /// Capture adds its no-write guarantee; loading has no write path.
+    pub(crate) fn rejected(&self, kind: TokenKind, suffix: &str) -> String {
+        let key = kind.env_var();
+        match self {
+            Self::Env => format!(
+                "exported {key} rejected by the vault{suffix}\n  \
+                 unset {key}, or export a working token"
+            ),
+            Self::File(path) => format!(
+                "{key} in {} rejected by the vault{suffix}\n  \
+                 rotate it:  printf %s \"$TOKEN\" | sudo vaulted-agent setup {} --set-token",
+                path.display(),
+                kind.backend_name()
+            ),
+            Self::Prompt => format!(
+                "pasted {key} rejected by the vault{suffix}\n  \
+                 paste a working token on the next invocation"
+            ),
+        }
+    }
 }
 
 impl TokenKind {
@@ -167,7 +201,7 @@ fn prompt_token(kind: TokenKind) -> Result<ManagerToken> {
     if token.is_empty() {
         return Err(Error::Message(format!("empty {}", kind.env_var())));
     }
-    Ok(ManagerToken::new(token))
+    Ok(ManagerToken::new(token).with_origin(TokenOrigin::Prompt))
 }
 
 // ---------------------------------------------------------------------------
@@ -538,12 +572,11 @@ fn capture_from_env<V>(
     kind: TokenKind,
     verify: &dyn Fn(&ManagerToken) -> Result<V>,
 ) -> Result<Capture<V>> {
-    let key = kind.env_var();
-    let token = ManagerToken::new(std::env::var(key).unwrap_or_default());
+    let token = ManagerToken::new(std::env::var(kind.env_var()).unwrap_or_default());
     verify_once(token, verify, |e| {
         format!(
-            "exported {key} rejected by the vault (nothing written)\n  \
-             unset it, or export a working token, then re-run setup {}\n  {e}",
+            "{}, then re-run setup {}\n  {e}",
+            TokenOrigin::Env.rejected(kind, " (nothing written)"),
             kind.backend_name()
         )
     })
@@ -559,11 +592,9 @@ fn capture_from_file<V>(
 ) -> Result<Capture<V>> {
     verify_once(token, verify, |e| {
         format!(
-            "{} in {} rejected by the vault (nothing written; the file is unchanged)\n  \
-             rotate it:  printf %s \"$TOKEN\" | vaulted-agent setup {} --set-token\n  {e}",
-            kind.env_var(),
-            kind.file(paths).display(),
-            kind.backend_name()
+            "{}\n  {e}",
+            TokenOrigin::File(kind.file(paths).to_path_buf())
+                .rejected(kind, " (nothing written; the file is unchanged)")
         )
     })
 }
@@ -726,7 +757,7 @@ impl TokenSource {
         let key = kind.env_var();
         let env_token = std::env::var(key).unwrap_or_default();
         match self.route(!env_token.is_empty()) {
-            TokenRoute::Env => Ok(ManagerToken::new(env_token)),
+            TokenRoute::Env => Ok(ManagerToken::new(env_token).with_origin(TokenOrigin::Env)),
             TokenRoute::Prompt => prompt_token(kind),
             TokenRoute::File => load_from_file(paths, kind),
         }
@@ -789,7 +820,7 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     let key = kind.env_var();
     let path = kind.file(paths);
     match token_file::probe(path, key) {
-        Probe::Token(t) => return Ok(t),
+        Probe::Token(t) => return Ok(t.with_origin(TokenOrigin::File(path.to_path_buf()))),
         // An empty value never authenticates: it is no token, as missing is.
         Probe::NoValue | Probe::Missing => {}
         // Unreadable or malformed is not missing: fail closed instead of
