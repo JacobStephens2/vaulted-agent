@@ -754,6 +754,13 @@ and this process is not that user), the launcher **fails closed** with a message
 that names the effective user and points at `service_user` - it does not pretend
 the file is missing or invite you to paste a vault service-account token.
 
+| Failure on launch, `refresh` or `secrets validate` | Meaning and remedy |
+|---|---|
+| `BWS_ACCESS_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN … rejected by the vault` | The vault rejected the Manager token (Bitwarden `invalid_client`, or an explicit HTTP 401 / Unauthorized response). The message names the actual source and keeps the backend's one-line error without backtrace boilerplate. For a file, rotate with `printf %s "$TOKEN" \| sudo vaulted-agent setup <backend> --set-token`; for an export, unset the named variable or export a working token; for a paste, paste a working token next invocation. |
+
+These rejections fail closed without retrying or writing a token file. Other
+backend failures keep their existing messages; `doctor` stays offline.
+
 **`va setup` and the token file.** On a TTY, setup first asks how vault manager
 tokens should be supplied (same menu as install / `auth-mode`):
 
