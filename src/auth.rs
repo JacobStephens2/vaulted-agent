@@ -58,6 +58,13 @@ impl TokenKind {
         }
     }
 
+    pub(crate) fn program(self) -> &'static str {
+        match self {
+            Self::Bws => "bws",
+            Self::Op => "op",
+        }
+    }
+
     pub fn file(self, paths: &Paths) -> &Path {
         match self {
             Self::Bws => &paths.bws_env_file,

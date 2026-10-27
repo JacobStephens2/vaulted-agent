@@ -45,10 +45,7 @@ fn captured_output(program: &str, args: &[&str], out: Output) -> Result<String> 
 /// The single rejection detection point for vault CLI calls. Other failures
 /// keep their stderr verbatim, including `op inject`'s Resolve failure.
 fn run_vault_output(kind: TokenKind, args: &[&str], token: &ManagerToken) -> Result<Output> {
-    let program = match kind {
-        TokenKind::Bws => "bws",
-        TokenKind::Op => "op",
-    };
+    let program = kind.program();
     let out = run_output(program, args, &[(kind.env_var(), token.expose())])?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -94,11 +91,7 @@ fn rejection_detail(kind: TokenKind, stderr: &str) -> Option<&str> {
 
 fn run_vault_capture(kind: TokenKind, args: &[&str], token: &ManagerToken) -> Result<String> {
     let out = run_vault_output(kind, args, token)?;
-    let program = match kind {
-        TokenKind::Bws => "bws",
-        TokenKind::Op => "op",
-    };
-    captured_output(program, args, out)
+    captured_output(kind.program(), args, out)
 }
 
 /// What a Backend reports when a Manifest will not resolve: the Manifest, the
