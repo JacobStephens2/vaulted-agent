@@ -462,9 +462,16 @@ pub(crate) fn normalize_piped_token(kind: TokenKind, raw: &str) -> Result<String
             "--set-token: stdin holds more than one line; pipe only the {key} value"
         )));
     }
-    if body.contains('=') {
+    // Trailing `=` is base64 padding, including on `ops_` tokens whose text
+    // before the padding also happens to be a valid environment-variable name.
+    // Reject a pasted assignment, not padding in a deliberate token value.
+    if body
+        .trim_end_matches('=')
+        .split_once('=')
+        .is_some_and(|(name, _)| crate::validate::validate_var_name(name.trim()))
+    {
         return Err(Error::Message(format!(
-            "--set-token: stdin holds `=`; pipe the bare token or a single `{key}=…` line"
+            "--set-token: stdin holds an unexpected assignment; pipe the bare token or a single `{key}=…` line"
         )));
     }
     Ok(body.to_string())
@@ -1229,8 +1236,8 @@ mod tests {
     #[test]
     fn piped_token_strips_key_prefix_and_whitespace() {
         assert_eq!(
-            normalize_piped_token(TokenKind::Bws, "BWS_ACCESS_TOKEN=0.a.b:c\n").unwrap(),
-            "0.a.b:c"
+            normalize_piped_token(TokenKind::Bws, "BWS_ACCESS_TOKEN=0.a.b:c2V0dGVy==\n").unwrap(),
+            "0.a.b:c2V0dGVy=="
         );
         assert_eq!(
             normalize_piped_token(TokenKind::Op, "  ops_abc\n").unwrap(),
@@ -1243,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn piped_token_rejects_empty_embedded_newlines_and_stray_equals() {
+    fn piped_token_rejects_empty_embedded_newlines_and_other_assignments() {
         for bad in ["", "   ", "\n"] {
             assert!(
                 normalize_piped_token(TokenKind::Bws, bad).is_err(),
