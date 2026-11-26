@@ -136,6 +136,27 @@ fn has_kv(contents: &str, key: &str, value: &str) -> bool {
     })
 }
 
+/// Link every tool in `dirs` into `bin`, excluding the vault CLIs, so a
+/// test can run the installer with a controlled PATH. The first listing
+/// of a name wins: on merged-/usr hosts `/bin` lists `/usr/bin` again.
+fn link_system_tools(bin: &Path, dirs: &[&Path]) {
+    for dir in dirs {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let name = entry.file_name();
+            if ["bws", "op", "pass", "sops"].iter().any(|n| name == *n) {
+                continue;
+            }
+            let dest = bin.join(name);
+            // `symlink_metadata`, not `exists`: `exists` follows links, so
+            // a link to a broken symlink looks absent and a second listing
+            // of the same name fails with AlreadyExists (#188).
+            if dest.symlink_metadata().is_err() {
+                std::os::unix::fs::symlink(entry.path(), dest).unwrap();
+            }
+        }
+    }
+}
+
 fn assert_wired(install: &Install, backend: &str, refs: &str) {
     let conf = install.read("harnesses.d/fakeagent.conf");
     assert!(has_kv(&conf, "backend", backend), "{conf}");
@@ -331,18 +352,15 @@ fn missing_backend_cli_finishes_install_without_reading_tokens_in_either_auth_mo
         let install = Install::new();
         // Build a controlled PATH containing the installer's OS utilities,
         // excluding every vault CLI regardless of what's installed on the host.
-        for dir in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
-            for entry in fs::read_dir(dir).unwrap().flatten() {
-                let name = entry.file_name();
-                if ["bws", "op", "pass", "sops"].iter().any(|n| name == *n) {
-                    continue;
-                }
-                let dest = install.bin.join(name);
-                if !dest.exists() {
-                    std::os::unix::fs::symlink(entry.path(), dest).unwrap();
-                }
-            }
-        }
+        link_system_tools(
+            &install.bin,
+            &[
+                Path::new("/usr/bin"),
+                Path::new("/bin"),
+                Path::new("/usr/sbin"),
+                Path::new("/sbin"),
+            ],
+        );
         // The token source is a real pipe. Retain a reader to verify that the
         // installer leaves its bytes untouched, independent of how it reads.
         let (mut token_input, mut token_writer) = std::io::pipe().unwrap();
@@ -381,4 +399,37 @@ fn missing_backend_cli_finishes_install_without_reading_tokens_in_either_auth_mo
         assert!(!install.config.join("bws.env").exists(), "{all}");
         assert_wired(&install, "bitwarden", "openai.env.refs");
     }
+}
+
+#[test]
+fn controlled_path_skips_second_listing_of_a_broken_symlink() {
+    // #188: on merged-/usr Ubuntu, /bin lists /usr/bin's names again. A
+    // name whose first link points at a broken symlink must still count
+    // as linked, or the second listing fails with AlreadyExists.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let first = tmp.path().join("usr-bin");
+    let second = tmp.path().join("bin");
+    let dest = tmp.path().join("dest");
+    for dir in [&first, &second, &dest] {
+        fs::create_dir(dir).unwrap();
+    }
+    for dir in [&first, &second] {
+        std::os::unix::fs::symlink("/nonexistent-target", dir.join("brokentool")).unwrap();
+        fs::write(dir.join("goodtool"), "#!/bin/sh\n").unwrap();
+        fs::write(dir.join("bws"), "#!/bin/sh\n").unwrap();
+    }
+
+    link_system_tools(&dest, &[&first, &second]);
+
+    // The first listing wins, broken or not.
+    assert_eq!(
+        fs::read_link(dest.join("brokentool")).unwrap(),
+        first.join("brokentool")
+    );
+    assert_eq!(
+        fs::read_link(dest.join("goodtool")).unwrap(),
+        first.join("goodtool")
+    );
+    // Vault CLIs stay excluded from the controlled PATH.
+    assert!(dest.join("bws").symlink_metadata().is_err());
 }
