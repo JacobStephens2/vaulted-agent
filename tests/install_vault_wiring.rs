@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// A shape-valid Bitwarden Secrets Manager access token (not a real one).
-const BWS_TOKEN: &str = "0.11111111-1111-1111-1111-111111111111.clientsecret:enckey";
+const BWS_TOKEN: &str = "0.11111111-1111-1111-1111-111111111111.clientsecret:c2V0dGVy==";
 const OP_TOKEN: &str = "ops_fake-service-account-token";
 
 struct Install {

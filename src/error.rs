@@ -21,6 +21,8 @@ pub enum Error {
         source: std::io::Error,
     },
     Message(String),
+    /// A classified vault authentication failure, with its Token source remedy.
+    TokenRejected(String),
     /// A Manifest that will not resolve, reported by its Backend.
     Resolve(crate::backend::ResolveFailure),
     /// The Harnesses on one Backend use several Manifests, so there is no one
@@ -75,6 +77,7 @@ impl std::fmt::Display for Error {
             }
             Error::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Error::Message(m) => write!(f, "{m}"),
+            Error::TokenRejected(m) => write!(f, "{m}"),
             Error::Resolve(failure) => write!(f, "{failure}"),
             Error::SeveralManifests { backend, names } => {
                 write!(f, "multiple {backend} manifests ({names})")

@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output, Stdio};
 
 /// A shape-valid Bitwarden Secrets Manager access token (not a real one).
-const BWS_TOKEN: &str = "0.11111111-1111-1111-1111-111111111111.clientsecret:enckey";
+const BWS_TOKEN: &str = "0.11111111-1111-1111-1111-111111111111.clientsecret:c2V0dGVy==";
 
 fn is_root() -> bool {
     Command::new("id")
@@ -118,6 +118,47 @@ fn set_token_rejects_empty_stdin() {
         combined(&out)
     );
     assert!(!seam.config_dir.join("bws.env").exists());
+}
+
+#[test]
+fn set_token_rejects_other_assignments_and_multiline_input() {
+    for (backend, token, prefix, file) in [
+        ("bitwarden", BWS_TOKEN, "BWS_ACCESS_TOKEN", "bws.env"),
+        (
+            "onepassword",
+            "ops_fake==",
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            "op.env",
+        ),
+    ] {
+        for input in [
+            format!("FOO={token}"),
+            format!("FOO = {token}"),
+            format!("{prefix}={token}\nOTHER=x\n"),
+            format!("{token}\rOTHER=x"),
+        ] {
+            let seam = file_mode_seam("file");
+            // If malformed input reaches vault verification, the diagnostic
+            // below will differ. No real vault is contacted.
+            seam.write_executable("bws", "#!/bin/sh\nexit 9\n");
+            seam.write_executable("op", "#!/bin/sh\nexit 9\n");
+
+            let out = run_with_stdin(
+                seam.vaulted_agent().args(["setup", backend, "--set-token"]),
+                &input,
+            );
+            let text = combined(&out);
+            assert!(!out.status.success(), "{text}");
+            let reason = if input.starts_with("FOO") {
+                "unexpected assignment"
+            } else {
+                "more than one line"
+            };
+            assert!(text.contains(reason), "{text}");
+            assert!(!text.contains(token), "token leaked into output: {text}");
+            assert!(!seam.config_dir.join(file).exists(), "{text}");
+        }
+    }
 }
 
 #[test]
@@ -292,25 +333,37 @@ fn an_unchanged_token_is_not_rewritten_but_its_mode_is_repaired() {
 
 #[test]
 fn set_token_writes_a_verified_onepassword_token() {
-    let seam = file_mode_seam("file");
-    seam.install_fake_op();
+    for (input, expected) in [
+        (
+            "ops_eyJmYWtlIjoidG9rZW4ifQ\n",
+            "OP_SERVICE_ACCOUNT_TOKEN=ops_eyJmYWtlIjoidG9rZW4ifQ\n",
+        ),
+        (
+            "ops_eyJmYWtlIjoidG9rZW4ifQ==\n",
+            "OP_SERVICE_ACCOUNT_TOKEN=ops_eyJmYWtlIjoidG9rZW4ifQ==\n",
+        ),
+        (
+            "OP_SERVICE_ACCOUNT_TOKEN=ops_eyJmYWtlIjoidG9rZW4ifQ==\n",
+            "OP_SERVICE_ACCOUNT_TOKEN=ops_eyJmYWtlIjoidG9rZW4ifQ==\n",
+        ),
+    ] {
+        let seam = file_mode_seam("file");
+        seam.install_fake_op();
 
-    let out = run_with_stdin(
-        seam.vaulted_agent()
-            .args(["setup", "onepassword", "--set-token"]),
-        "ops_eyJmYWtlIjoidG9rZW4ifQ\n",
-    );
-    assert!(out.status.success(), "{}", combined(&out));
-    let path = seam.config_dir.join("op.env");
-    let text = fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        text, "OP_SERVICE_ACCOUNT_TOKEN=ops_eyJmYWtlIjoidG9rZW4ifQ\n",
-        "{text}"
-    );
-    assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o640
-    );
+        let out = run_with_stdin(
+            seam.vaulted_agent()
+                .args(["setup", "onepassword", "--set-token"]),
+            input,
+        );
+        assert!(out.status.success(), "{}", combined(&out));
+        let path = seam.config_dir.join("op.env");
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, expected, "{text}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
 }
 
 #[test]

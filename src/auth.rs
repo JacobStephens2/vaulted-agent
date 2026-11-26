@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::{AuthMode, Backend, Paths};
 use crate::defaults::Defaults;
@@ -16,11 +16,52 @@ pub enum TokenKind {
     Op,
 }
 
+/// The source actually used, including a prompt after a missing token file.
+/// Kept with the loaded token so a later vault rejection cannot blame a file
+/// that was never read. Contains no credential material.
+#[derive(Debug, Clone)]
+pub(crate) enum TokenOrigin {
+    Env,
+    File(PathBuf),
+    Prompt,
+}
+
+impl TokenOrigin {
+    /// Shared rejection wording for Token capture and live Backend commands.
+    /// Capture adds its no-write guarantee; loading has no write path.
+    pub(crate) fn rejected(&self, kind: TokenKind, suffix: &str) -> String {
+        let key = kind.env_var();
+        match self {
+            Self::Env => format!(
+                "exported {key} rejected by the vault{suffix}\n  \
+                 unset {key}, or export a working token"
+            ),
+            Self::File(path) => format!(
+                "{key} in {} rejected by the vault{suffix}\n  \
+                 rotate it:  printf %s \"$TOKEN\" | sudo vaulted-agent setup {} --set-token",
+                path.display(),
+                kind.backend_name()
+            ),
+            Self::Prompt => format!(
+                "pasted {key} rejected by the vault{suffix}\n  \
+                 paste a working token on the next invocation"
+            ),
+        }
+    }
+}
+
 impl TokenKind {
     pub fn env_var(self) -> &'static str {
         match self {
             Self::Bws => "BWS_ACCESS_TOKEN",
             Self::Op => "OP_SERVICE_ACCOUNT_TOKEN",
+        }
+    }
+
+    pub(crate) fn program(self) -> &'static str {
+        match self {
+            Self::Bws => "bws",
+            Self::Op => "op",
         }
     }
 
@@ -167,7 +208,7 @@ fn prompt_token(kind: TokenKind) -> Result<ManagerToken> {
     if token.is_empty() {
         return Err(Error::Message(format!("empty {}", kind.env_var())));
     }
-    Ok(ManagerToken::new(token))
+    Ok(ManagerToken::new(token).with_origin(TokenOrigin::Prompt))
 }
 
 // ---------------------------------------------------------------------------
@@ -421,9 +462,16 @@ pub(crate) fn normalize_piped_token(kind: TokenKind, raw: &str) -> Result<String
             "--set-token: stdin holds more than one line; pipe only the {key} value"
         )));
     }
-    if body.contains('=') {
+    // Trailing `=` is base64 padding, including on `ops_` tokens whose text
+    // before the padding also happens to be a valid environment-variable name.
+    // Reject a pasted assignment, not padding in a deliberate token value.
+    if body
+        .trim_end_matches('=')
+        .split_once('=')
+        .is_some_and(|(name, _)| crate::validate::validate_var_name(name.trim()))
+    {
         return Err(Error::Message(format!(
-            "--set-token: stdin holds `=`; pipe the bare token or a single `{key}=…` line"
+            "--set-token: stdin holds an unexpected assignment; pipe the bare token or a single `{key}=…` line"
         )));
     }
     Ok(body.to_string())
@@ -538,12 +586,11 @@ fn capture_from_env<V>(
     kind: TokenKind,
     verify: &dyn Fn(&ManagerToken) -> Result<V>,
 ) -> Result<Capture<V>> {
-    let key = kind.env_var();
-    let token = ManagerToken::new(std::env::var(key).unwrap_or_default());
+    let token = ManagerToken::new(std::env::var(kind.env_var()).unwrap_or_default());
     verify_once(token, verify, |e| {
         format!(
-            "exported {key} rejected by the vault (nothing written)\n  \
-             unset it, or export a working token, then re-run setup {}\n  {e}",
+            "{}, then re-run setup {}\n  {e}",
+            TokenOrigin::Env.rejected(kind, " (nothing written)"),
             kind.backend_name()
         )
     })
@@ -559,11 +606,9 @@ fn capture_from_file<V>(
 ) -> Result<Capture<V>> {
     verify_once(token, verify, |e| {
         format!(
-            "{} in {} rejected by the vault (nothing written; the file is unchanged)\n  \
-             rotate it:  printf %s \"$TOKEN\" | vaulted-agent setup {} --set-token\n  {e}",
-            kind.env_var(),
-            kind.file(paths).display(),
-            kind.backend_name()
+            "{}\n  {e}",
+            TokenOrigin::File(kind.file(paths).to_path_buf())
+                .rejected(kind, " (nothing written; the file is unchanged)")
         )
     })
 }
@@ -726,7 +771,7 @@ impl TokenSource {
         let key = kind.env_var();
         let env_token = std::env::var(key).unwrap_or_default();
         match self.route(!env_token.is_empty()) {
-            TokenRoute::Env => Ok(ManagerToken::new(env_token)),
+            TokenRoute::Env => Ok(ManagerToken::new(env_token).with_origin(TokenOrigin::Env)),
             TokenRoute::Prompt => prompt_token(kind),
             TokenRoute::File => load_from_file(paths, kind),
         }
@@ -789,7 +834,7 @@ fn load_from_file(paths: &Paths, kind: TokenKind) -> Result<ManagerToken> {
     let key = kind.env_var();
     let path = kind.file(paths);
     match token_file::probe(path, key) {
-        Probe::Token(t) => return Ok(t),
+        Probe::Token(t) => return Ok(t.with_origin(TokenOrigin::File(path.to_path_buf()))),
         // An empty value never authenticates: it is no token, as missing is.
         Probe::NoValue | Probe::Missing => {}
         // Unreadable or malformed is not missing: fail closed instead of
@@ -1191,8 +1236,8 @@ mod tests {
     #[test]
     fn piped_token_strips_key_prefix_and_whitespace() {
         assert_eq!(
-            normalize_piped_token(TokenKind::Bws, "BWS_ACCESS_TOKEN=0.a.b:c\n").unwrap(),
-            "0.a.b:c"
+            normalize_piped_token(TokenKind::Bws, "BWS_ACCESS_TOKEN=0.a.b:c2V0dGVy==\n").unwrap(),
+            "0.a.b:c2V0dGVy=="
         );
         assert_eq!(
             normalize_piped_token(TokenKind::Op, "  ops_abc\n").unwrap(),
@@ -1205,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn piped_token_rejects_empty_embedded_newlines_and_stray_equals() {
+    fn piped_token_rejects_empty_embedded_newlines_and_other_assignments() {
         for bad in ["", "   ", "\n"] {
             assert!(
                 normalize_piped_token(TokenKind::Bws, bad).is_err(),

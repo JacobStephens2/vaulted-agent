@@ -12,13 +12,13 @@ Also hosted: https://vaultedagent.com/AGENTS.md
 
 Glossary for domain terms (harness, manifest, backend, …): [CONTEXT.md](CONTEXT.md).
 
-Current release pin (product install): **v0.4.25**
+Current release pin (product install): **v0.4.26**
 
 ```bash
 curl -fsSL https://vaultedagent.com/install.sh | bash
 # pin:
-VAULTED_AGENT_VERSION=v0.4.25 curl -fsSL https://vaultedagent.com/install.sh | bash
-vaulted-agent version   # expect 0.4.25 (git stamp may appear in parentheses)
+VAULTED_AGENT_VERSION=v0.4.26 curl -fsSL https://vaultedagent.com/install.sh | bash
+vaulted-agent version   # expect 0.4.26 (git stamp may appear in parentheses)
 ```
 
 ## What you must not do
@@ -85,7 +85,7 @@ elevated launches always read the machine config dir).
 | Interactive install-time config | `va setup` (the installer asks its own questions, then calls `auth-mode`, `setup <backend> --wire-only` and `setup <backend> --set-token`) |
 | Wire day-one Harnesses to a Backend, no token | `sudo va setup bitwarden --wire-only` (also `onepassword`, `pass`; `sops` records `default_backend` only). Asks no questions and never touches the token |
 | Store / rotate the manager token | `printf %s "$TOKEN" \| sudo va setup bitwarden --set-token` |
-| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.25` |
+| Replace the installed launcher binary | `va update` (latest GitHub release) / `va update v0.4.26` |
 | Uninstall | `sudo va uninstall` |
 
 Launcher flags **before** the harness name: `-p` / `--prompt-auth`,
@@ -284,6 +284,7 @@ Interpret carefully:
 | `op.env: missing` | File really absent (or not a file) |
 | `op.env: unreadable` (`… exists but cannot be read as …`) | Present but EACCES - often need `service_user` or group/ACL, **not** a paste of the vault SA token |
 | `op.env: malformed` / `… is malformed (line N: …)` | The token file is there but a line does not parse, so it holds no usable token. Launches fail closed (no paste prompt), `setup` refuses it and `doctor` counts it as an error. Not a permissions fault: rewrite it with `printf %s "$TOKEN" \| sudo va setup <backend> --set-token` |
+| `BWS_ACCESS_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN … rejected by the vault` on launch, `refresh` or `secrets validate` | The vault rejected the Manager token: Bitwarden `invalid_client` or an explicit HTTP 401 / Unauthorized response. The message names its actual source and keeps the backend's one-line error. For a file, rotate with `printf %s "$TOKEN" \| sudo vaulted-agent setup <backend> --set-token`; for an export, unset the named variable or export a working token; for a paste, paste a working token next invocation. No automatic retry or token-file write; `doctor` stays offline |
 | `cannot enter /home/…` | `workdir=caller` + service account cannot traverse (often `setfacl -m u:<svc>:x /home/<op>`) |
 | `Failed to read project config … Permission denied` | `workdir=caller` in an operator home where agent config (e.g. `~/.codex/config.toml`) is mode 0600 — grant service account read: `setfacl -m u:<svc>:r ~/.codex/config.toml` && `setfacl -d -m u:<svc>:r ~/.codex` |
 | `op cannot parse N reference(s)` | Only **malformed `op://`** lines - plain literals (region, URL) are fine |

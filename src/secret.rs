@@ -4,17 +4,28 @@ use std::fmt;
 
 /// Vault manager token (BWS_ACCESS_TOKEN, OP_SERVICE_ACCOUNT_TOKEN, …).
 #[derive(Clone)]
-pub struct ManagerToken(String);
+pub struct ManagerToken {
+    value: String,
+    pub(crate) origin: Option<crate::auth::TokenOrigin>,
+}
 
 impl ManagerToken {
     pub fn new(raw: impl Into<String>) -> Self {
-        Self(raw.into())
+        Self {
+            value: raw.into(),
+            origin: None,
+        }
+    }
+
+    pub(crate) fn with_origin(mut self, origin: crate::auth::TokenOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     /// Access raw material only at the vault-CLI / inject boundary.
     /// `pub(crate)`: CLI is the sole public acceptance seam (story #50).
     pub(crate) fn expose(&self) -> &str {
-        &self.0
+        &self.value
     }
 }
 

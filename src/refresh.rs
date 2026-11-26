@@ -1026,6 +1026,13 @@ fn gather_onepassword(
         let item = listing.items()[i].clone();
         let fields = backend::op_item_json(&token, &item.id, Some(item.vault.as_str()))
             .and_then(|json| listing.expand(&item.id, &json));
+        let fields = match fields {
+            // A rejected Manager token cannot read the rest of the vault.
+            // Abort before any Refs-file edits, rather than treating it as a
+            // transient per-item failure (which remains a warning).
+            Err(e @ Error::TokenRejected(_)) => return Err(e),
+            other => other,
+        };
         for note in fold.add(&item, fields, exclusions) {
             note.print(&item.title);
         }

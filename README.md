@@ -15,7 +15,7 @@ auth**: paste the vault token at each launch so even the manager token need not
 live on disk. Same scrub/resolve/exec path for one-shot tools via `va run`.
 
 **macOS and Linux.** Product page: [vaultedagent.com](https://vaultedagent.com/) ·
-Latest: [v0.4.25](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.25)
+Latest: [v0.4.26](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.26)
 (Rust runtime; Bash retired — see [MIGRATION.md](MIGRATION.md))
 
 ## Contents
@@ -37,7 +37,7 @@ curl -fsSL https://vaultedagent.com/install.sh | bash
 
 Installs `vaulted-agent` and `va`, detects agents on PATH (`claude`, `codex`,
 `grok`, `kimi`, `agy`, `muse`) and `bash`, and can ask for a vault backend + auth mode. Pin:
-`VAULTED_AGENT_VERSION=v0.4.25` (or `latest`).
+`VAULTED_AGENT_VERSION=v0.4.26` (or `latest`).
 
 ### 2. Wire a vault
 
@@ -113,7 +113,7 @@ va edit-manifest          # open a refs file in $EDITOR; check on save
 va auth-mode prompt       # or: file
 va update                 # update the binary and add missing detected Harnesses
 va update --sync-harnesses # add missing Harnesses without downloading a binary
-va update v0.4.25         # pin; --check / --dry-run do not write
+va update v0.4.26         # pin; --check / --dry-run do not write
 sudo va uninstall
 ```
 
@@ -258,7 +258,7 @@ you $ va claude --resume <session-id>
 blast-radius control, not containment.
 
 Writeup: [One vault, three agents](https://stephens.page/blog/one-vault-three-agents-writing-the-pattern-down-found-five-bugs/) ·
-Latest: [v0.4.25](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.25)
+Latest: [v0.4.26](https://github.com/JacobStephens2/vaulted-agent/releases/tag/v0.4.26)
 
 ## The honest claim
 
@@ -514,10 +514,11 @@ agent runs as, and `agent ALL=(ALL) NOPASSWD: ALL` makes every manifest
 boundary above it decorative — and turns each of the paragraphs above from a
 hardening measure into the only thing standing between a harness grant and root.
 
-Maintainers: cut a release with `scripts/release.sh` (`prepare` on the
-release branch, `cut` after merge). The `curl … | bash` one-liner serves
-`install-remote.sh` from this repo; the script will not refresh the hosted
-copy until the GitHub assets exist. See
+Maintainers: cut a release with `scripts/release.sh release vX.Y.Z` from a
+clean `main`. It opens and merges the version-bump PR, tags, and refreshes the
+hosted installer. The `curl … | bash` one-liner serves `install-remote.sh` from
+this repo; the script will not refresh the hosted copy until the GitHub assets
+exist. See
 [docs/hosting-the-installer.md](docs/hosting-the-installer.md).
 
 ## Updating
@@ -758,6 +759,13 @@ exists, the launcher offers a one-shot “this launch only” paste. If the file
 and this process is not that user), the launcher **fails closed** with a message
 that names the effective user and points at `service_user` - it does not pretend
 the file is missing or invite you to paste a vault service-account token.
+
+| Failure on launch, `refresh` or `secrets validate` | Meaning and remedy |
+|---|---|
+| `BWS_ACCESS_TOKEN` / `OP_SERVICE_ACCOUNT_TOKEN … rejected by the vault` | The vault rejected the Manager token (Bitwarden `invalid_client`, or an explicit HTTP 401 / Unauthorized response). The message names the actual source and keeps the backend's one-line error without backtrace boilerplate. For a file, rotate with `printf %s "$TOKEN" \| sudo vaulted-agent setup <backend> --set-token`; for an export, unset the named variable or export a working token; for a paste, paste a working token next invocation. |
+
+These rejections fail closed without retrying or writing a token file. Other
+backend failures keep their existing messages; `doctor` stays offline.
 
 **`va setup` and the token file.** On a TTY, setup first asks how vault manager
 tokens should be supplied (same menu as install / `auth-mode`):
