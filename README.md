@@ -188,16 +188,22 @@ prune removes only what does not resolve. Delete the line with `va edit-manifest
 if you want the variable gone.
 
 **Launching against another manifest.** `va -m <manifest> <harness>` runs a
-harness against a manifest other than its configured one — useful for taking a
-narrower set of credentials into a session without editing config. It replaces
-the manifest rather than merging, errors if the file is missing, and prints
-which manifest it used. Also works with `va -m <manifest> pick`.
+harness against a manifest other than its configured one, for taking a narrower
+set of credentials into a session without editing config. It replaces the
+manifest rather than merging, errors if the file is missing, and prints which
+manifest it used. Also works with `va -m <manifest> pick`. The override does
+not change the harness backend.
 
 It is a launcher flag, so it goes before the harness name. It is **refused under
 a `*-conductor` symlink**, alongside `-H`: that symlink is what lets a sudoers
 rule grant one harness and have it mean one set of credentials, and a flag
-naming the manifest would undo it. On the direct `va` path a caller can already
-reach `va run -m` with any manifest, so there is nothing extra to protect.
+naming the manifest would undo it. On the direct `va` path the override is
+allowed when no service user is set, or when `run` is allowed, because a caller
+who can run `va` can already run `va run -m` with any manifest. That equivalence
+stops once a service user is set and `run` is refused. A plainfile harness then
+rejects `-m` before that manifest is resolved: the file holds secret values, and
+naming it would let the caller choose any file the service user can read. A
+vault-backend harness still accepts the override.
 
 With `service_user` and a sudoers rule that only names `vaulted-agent claude`,
 a line that starts with `-m` will not match. Use conductor links for delegated
